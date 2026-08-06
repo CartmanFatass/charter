@@ -39,6 +39,56 @@ class TestMerge(unittest.TestCase):
         merged = inventory.merge([[_r("api", "gitlab"), _r("web", "gitlab")]])
         self.assertEqual(len(merged), 2)
 
+    # --- FINDING C1 (CRITICAL): identity is `path_with_namespace`, not bare name -----
+    # `include_subgroups=true` means two GitLab subgroups (`acme/team-a/api` and
+    # `acme/team-b/api`) both have bare name `api`; the old merge keyed purely on bare
+    # name and only compared `forge`, so a SAME-forge collision silently let the second
+    # sighting overwrite the first — the loser vanished from the durable map with
+    # `discover` still exiting 0.
+    def test_same_forge_different_namespace_same_bare_name_is_refused(self):
+        with self.assertRaises(registry.CollisionError) as cm:
+            inventory.merge([
+                [_r("api", "gitlab", ns="acme/team-a/api")],
+                [_r("api", "gitlab", ns="acme/team-b/api")],
+            ])
+        msg = str(cm.exception)
+        self.assertIn("team-a/api", msg)
+        self.assertIn("team-b/api", msg)
+
+    def test_reproduction_two_forge_blocks_of_the_same_kind_also_refused(self):
+        """Two `[[forge]]` blocks of the same kind (two GitHub orgs) hit the identical
+        shape: same bare name, different path_with_namespace, same forge stamp."""
+        with self.assertRaises(registry.CollisionError):
+            inventory.merge([
+                [_r("api", "github", ns="org-one/api")],
+                [_r("api", "github", ns="org-two/api")],
+            ])
+
+    def test_identical_record_seen_twice_is_a_dedupe_not_a_collision(self):
+        """The SAME repo (identical forge + path_with_namespace) turning up twice — e.g.
+        an overlapping `include_subgroups` sweep re-listing a project — must merge to one
+        record, not be refused as a collision."""
+        merged = inventory.merge([
+            [_r("api", "gitlab", ns="acme/api")],
+            [_r("api", "gitlab", ns="acme/api")],
+        ])
+        self.assertEqual(len(merged), 1)
+
+    def test_no_repo_vanishes_silently_on_a_refused_collision(self):
+        """The bug wasn't just "raises" — it's "the loser used to vanish with no error
+        at all". Assert the exception actually fires (not swallowed) for the exact
+        C1 reproduction from the review."""
+        batches = [
+            [{"name": "api", "path_with_namespace": "acme/team-a/api", "forge": "gitlab",
+              "default_branch": "main", "description": "", "web_url": "", "ssh_url": "",
+              "topics": [], "id": 1}],
+            [{"name": "api", "path_with_namespace": "acme/team-b/api", "forge": "gitlab",
+              "default_branch": "main", "description": "", "web_url": "", "ssh_url": "",
+              "topics": [], "id": 2}],
+        ]
+        with self.assertRaises(registry.CollisionError):
+            inventory.merge(batches)
+
 
 class TestFindQualified(unittest.TestCase):
     def test_a_bare_name_still_resolves(self):

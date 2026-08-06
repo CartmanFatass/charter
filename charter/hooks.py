@@ -349,9 +349,17 @@ def _single_credential_reason(cmd: str) -> str | None:
                 return fix + (f"This hands git an SSH {host} URL — use the HTTPS form "
                               f"(`https://{host}/<group>/<repo>.git`); SSH remotes are "
                               "auto-rewritten, so you never need to type one.")
+            # signing: `--gpg-sign` / `-c (commit|tag).gpgsign=true` always deny; `-S` denies
+            # only on an ACTUAL committing subcommand (`_git_subcommand`, not positional
+            # membership — `git log -S commit` is the pickaxe content search, and the word
+            # "commit" is its own search string, not evidence of a `commit` subcommand); and
+            # `-s`/`--sign` deny only for `tag` specifically (`git commit -s`/`--signoff` is
+            # an unrelated Signed-off-by trailer, not GPG signing, and must stay allowed).
+            subcommand = _git_subcommand(args)
             if any(a == "--gpg-sign" or a.startswith("--gpg-sign=") for a in args) or \
                any(re.fullmatch(r"(?:commit|tag)\.gpgsign=true", a) for a in args) or \
-               (any(v in args for v in _SIGN_VERBS) and "-S" in args):
+               (subcommand in _SIGN_VERBS and "-S" in args) or \
+               (subcommand == "tag" and any(a in ("-s", "--sign") for a in args)):
                 return fix + ("Commit/tag signing is disabled on purpose (a signer prompt hangs "
                               "an agent) — commit unsigned; `charter save` handles control-plane "
                               "commits.")

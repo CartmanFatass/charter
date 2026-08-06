@@ -241,6 +241,42 @@ class SingleCredentialGuardCase(unittest.TestCase):
         self.assertIsNone(self._deny("git log -S'needle' --oneline"))
         self.assertIsNone(self._deny("git log -S needle"))
 
+    # --- FINDING I4: the old check was a positional MEMBERSHIP test
+    # --- (`any(v in args for v in _SIGN_VERBS) and "-S" in args`) — it read the verb from
+    # --- ANYWHERE in argv, not the actual subcommand, producing both a false negative
+    # --- (`git tag -s`/`--sign` walked straight through, since `-s`/`--sign` were never
+    # --- checked at all) and a false positive (`git log -S commit` denied, because the
+    # --- word "commit" — the pickaxe's own search string — happens to appear in argv and
+    # --- match one of `_SIGN_VERBS` by pure membership, with no regard for what it means).
+    def test_denies_tag_dash_s_signing(self):
+        # false negative: `git tag -s` (GPG-sign the tag) was never checked at all.
+        self.assertIsNotNone(self._deny("git tag -s -m 'v1' v1.0.0"))
+
+    def test_denies_tag_dash_dash_sign(self):
+        self.assertIsNotNone(self._deny("git tag --sign -m 'v1' v1.0.0"))
+
+    def test_log_pickaxe_with_the_word_commit_is_not_mistaken_for_signing(self):
+        # false positive: "commit" appearing as the pickaxe's OWN search string used to
+        # satisfy `any(v in args for v in _SIGN_VERBS)` by membership, denying a read-only
+        # `git log`. The real subcommand is `log`, never a committing verb.
+        self.assertIsNone(self._deny("git log -S commit --oneline"))
+        self.assertIsNone(self._deny("git log -Scommit"))
+
+    def test_commit_dash_s_signoff_is_unrelated_and_stays_allowed(self):
+        # `git commit -s`/`--signoff` adds a Signed-off-by trailer — NOT GPG signing
+        # (that's `-S`/`--gpg-sign`). Golden rule 0 is about the signing KEY hanging an
+        # agent, not the signoff trailer, so this must stay allowed even on `commit`.
+        self.assertIsNone(self._deny("git commit -s -m 'x'"))
+        self.assertIsNone(self._deny("git commit --signoff -m 'x'"))
+
+    def test_plain_annotated_tag_without_any_signing_flag_stays_allowed(self):
+        self.assertIsNone(self._deny("git tag -a v1.0.0 -m 'annotated, not signed'"))
+
+    def test_tag_dash_capital_s_still_denied_via_subcommand_not_membership(self):
+        # regression guard: the subcommand-based rewrite must still catch `-S` on `tag`
+        # (it was already in _SIGN_VERBS before this fix — must not be lost in the rewrite).
+        self.assertIsNotNone(self._deny("git tag -S -m 'v1' v1.0.0"))
+
     def test_allows_ssh_to_other_hosts(self):
         # devops SSH to a server is unrelated to the git credential rule
         self.assertIsNone(self._deny("ssh deploy@prod-box-01 'uptime'"))

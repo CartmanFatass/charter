@@ -1,7 +1,16 @@
 """Resolving which forge a control plane — or an individual repo — uses.
 
 A control plane may declare several `[[forge]]` blocks and track repos from all of them,
-because organisations genuinely drift across forges."""
+because organisations genuinely drift across forges.
+
+FINDING I6: `registry.for_host` (and its `TestForHost` case, formerly here) has been
+DELETED — it had zero production callers (`resolve_host` below is what every real
+caller uses) and still carried the substring-match bug fixed elsewhere in this module
+(`probe.host in url`, so a known host string appearing anywhere in the URL — including
+inside the PATH — misresolved the forge; see `TestResolveHostMatchesHostComponentNotSubstring`).
+Dead code pinned by tests looks alive and invites a future caller to re-land the bug —
+deleting both closes that door. Anything that used to reach for `for_host` should use
+`resolve_host` instead."""
 from __future__ import annotations
 
 import shutil
@@ -51,20 +60,6 @@ class TestForRepo(unittest.TestCase):
     def test_a_record_with_no_stamp_defaults_to_gitlab_for_back_compat(self):
         """Inventories written before the forge stamp existed have no `forge` key."""
         self.assertIsInstance(registry.for_repo({}), GitLabForge)
-
-
-class TestForHost(unittest.TestCase):
-    def test_infers_from_https_and_ssh_remotes(self):
-        for url, kind in (
-            ("https://github.com/a/b.git", "github"),
-            ("git@github.com:a/b.git", "github"),
-            ("https://gitlab.com/a/b.git", "gitlab"),
-            ("ssh://git@gitlab.com/a/b.git", "gitlab"),
-        ):
-            self.assertEqual(registry.for_host(url).kind, kind, url)
-
-    def test_an_unknown_host_is_none(self):
-        self.assertIsNone(registry.for_host("https://example.com/a/b.git"))
 
 
 class TestKnownForges(unittest.TestCase):

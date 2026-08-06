@@ -43,21 +43,6 @@ def for_repo(repo: dict) -> Forge:
     return _build(repo.get("forge") or _DEFAULT_KIND, None)
 
 
-def for_host(url: str) -> Forge | None:
-    """Infer a backend from a remote URL, for a repo cloned outside the inventory.
-
-    Only recognises each registered kind's DEFAULT host (``gitlab.com``, ``github.com``)
-    — a control plane that declares a self-hosted forge needs :func:`resolve_host`
-    instead, which also consults ``charter.toml``. Kept pure/parameterless (no control
-    plane to read) so it stays usable without a `root`, and so this exact behaviour
-    (used as the base case by ``resolve_host``) stays pinned by its own tests."""
-    for kind, cls in KINDS.items():
-        probe = cls()
-        if probe.host in (url or ""):
-            return probe
-    return None
-
-
 def _default_forges() -> dict[str, Forge]:
     """``host -> Forge`` for every registered kind's DEFAULT host (from :data:`KINDS`,
     so a new forge kind is covered automatically the day it's registered — never a
@@ -176,10 +161,11 @@ def _host_of(url: str) -> str:
 
 
 def resolve_host(url: str, root) -> Forge | None:
-    """Like :func:`for_host`, but ALSO recognises a host DECLARED in *root*'s own
-    ``charter.toml`` (see :func:`known_forges`) — not just a registered kind's default
-    host. This is what lets a self-hosted forge (GitLab Enterprise, GHE) resolve to its
-    own real policy instead of silently falling through to another forge's.
+    """Infer a backend from a remote URL, recognising both every registered kind's
+    DEFAULT host (``gitlab.com``, ``github.com``) AND a host DECLARED in *root*'s own
+    ``charter.toml`` (see :func:`known_forges`). This is what lets a self-hosted forge
+    (GitLab Enterprise, GHE) resolve to its own real policy instead of silently falling
+    through to another forge's, or going unrecognised entirely.
 
     Matches *url*'s **host component** (:func:`_host_of`) — never a substring of the
     whole URL — and checks **declared** hosts before class defaults, so a control plane

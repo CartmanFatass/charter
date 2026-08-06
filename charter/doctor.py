@@ -88,22 +88,66 @@ def check_git_identity() -> Result:
     )
 
 
-def check_forge_cli() -> Result:
-    cli = GitLabForge().cli
+#: Per-CLI install hint — used when the control plane declares (or defaults to) a
+#: forge whose CLI isn't installed. Keyed by `Forge.cli`, so a new forge kind only
+#: needs an entry here, not a new check function.
+_INSTALL_HINT = {
+    "glab": "brew install glab  (see https://gitlab.com/gitlab-org/cli)",
+    "gh": "brew install gh  (see https://cli.github.com/)",
+}
+
+
+def declared_or_default_forges() -> list:
+    """The forges THIS control plane actually declares (`[[forge]]` blocks in its own
+    ``charter.toml``, re-read fresh against the CURRENT ``config.ROOT`` — same
+    discipline as ``commands._instance_load_root``, so a test that redirects
+    ``config.ROOT`` after import sees what IT declared, not the real process's stale
+    module-level config), de-duplicated by ``(kind, host)``.
+
+    Falls back to a single default :class:`GitLabForge` when none are declared — the
+    shape every control plane had before multi-forge support existed, and still what a
+    fresh `charter init` (or a legacy single-forge control plane) produces. Before this
+    (FINDING I3), `check_forge_cli`/`check_forge_auth` hardcoded `GitLabForge()`
+    unconditionally, so a GitHub-only control plane got a `glab` FAIL — a real tool,
+    just the wrong one, with a fix (`brew install glab`) that does nothing for a
+    control plane that never touches GitLab at all.
+
+    Never raises: a malformed `[[forge]]` block is a config mistake `doctor`'s own
+    `check_control_plane_config` already surfaces separately — this just skips it
+    rather than taking preflight down."""
+    from . import config as _config, instance as _instance
+    from .forge import registry
+    try:
+        cfg = _instance.load(_config.ROOT)
+    except Exception:
+        cfg = {}
+    try:
+        pairs = registry.forges_for(cfg)
+    except Exception:
+        pairs = []
+    if not pairs:
+        return [GitLabForge()]
+    seen: dict[tuple, object] = {}
+    for forge, _owner in pairs:
+        seen.setdefault((forge.kind, forge.host), forge)
+    return list(seen.values())
+
+
+def check_forge_cli(forge=None) -> Result:
+    forge = forge or GitLabForge()
+    cli = forge.cli
     if not shutil.which(cli):
-        return Result(
-            cli,
-            FAIL,
-            hint=f"Install {cli}: brew install glab  (see https://gitlab.com/gitlab-org/cli).",
-        )
+        hint = _INSTALL_HINT.get(cli, f"Install {cli}.")
+        return Result(cli, FAIL, hint=f"Install {cli}: {hint}.")
     return Result(cli, OK, detail=_first_line(util.run([cli, "--version"], check=False).stdout))
 
 
-def check_forge_auth() -> Result:
-    cli = GitLabForge().cli
+def check_forge_auth(forge=None) -> Result:
+    forge = forge or GitLabForge()
+    cli = forge.cli
     if not shutil.which(cli):
         return Result(f"{cli} auth", FAIL, hint=f"Install {cli} first, then run: {cli} auth login.")
-    proc = util.run([cli, "auth", "status"], check=False)
+    proc = util.run([cli, "auth", "status", "--hostname", forge.host], check=False)
     blob = (proc.stdout or "") + (proc.stderr or "")
     if "Logged in" in blob:
         summary = next(
@@ -115,7 +159,7 @@ def check_forge_auth() -> Result:
         f"{cli} auth",
         FAIL,
         detail=_first_line(blob),
-        hint=f"Run: {cli} auth login  (pick gitlab.com; choose TOKEN/HTTPS — charter "
+        hint=f"Run: {cli} auth login  (pick {forge.host}; choose TOKEN/HTTPS — charter "
              "never uses SSH for git).",
     )
 
@@ -228,19 +272,15 @@ def check_vaults() -> Result:
     return Result("vaults", OK, detail=f"{len(vs)} configured, all healthy")
 
 
-#: Order matters — cheap/local checks first, network checks last.
-CHECKS = (
-    check_python,
-    check_git,
-    check_git_identity,
-    check_forge_cli,
-    check_forge_auth,
-    check_ssh,
-    check_control_plane_config,
-    check_inventory,
-    check_vaults,
-)
-
-
 def run_all() -> list[Result]:
-    return [check() for check in CHECKS]
+    """Order: cheap/local checks first, network checks last. The forge cli/auth pair is
+    NOT fixed (it used to be exactly one hardcoded GitLab pair) — it's one pair PER
+    FORGE this control plane actually declares (`declared_or_default_forges`), so a
+    GitHub-only control plane sees `gh`/`gh auth`, never a `glab` FAIL with no real fix
+    (FINDING I3)."""
+    results = [check_python(), check_git(), check_git_identity()]
+    for forge in declared_or_default_forges():
+        results.append(check_forge_cli(forge))
+        results.append(check_forge_auth(forge))
+    results += [check_ssh(), check_control_plane_config(), check_inventory(), check_vaults()]
+    return results

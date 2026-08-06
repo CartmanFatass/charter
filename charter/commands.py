@@ -76,11 +76,24 @@ def _origin_https(root) -> str | None:
 # --------------------------------------------------------------------------- #
 # discover                                                                     #
 # --------------------------------------------------------------------------- #
-def _build_repo(forge, p: dict, no_probe: bool) -> dict:
+def _build_repo(forge, p: dict, no_probe: bool) -> tuple[dict, bool]:
+    """``(record, probe_failed)``. ``probe_failed`` is FINDING I5's fix: it distinguishes
+    "the stack probe itself errored" (network hiccup, expired token, a GitHub secondary
+    rate limit — likely under `_build_batch`'s concurrency) from "this repo genuinely
+    has no recognised root-level stack file". Before this, both looked identical —
+    `repo_tree` is the permissive best-effort API, so ANY failure silently became an
+    empty file list, and `classify_stack([])` returns "unknown" either way — so a probe
+    failure silently rewrote the repo's stack with no way to tell it apart from the
+    truth. Uses `repo_tree_strict` (raises on failure) instead of the permissive
+    `repo_tree` specifically so this distinction is possible."""
     stack = "unknown"
+    probe_failed = False
     if not no_probe:
-        files = forge.repo_tree(p, p.get("default_branch"))
-        stack = inventory.classify_stack(files)
+        try:
+            files = forge.repo_tree_strict(p, p.get("default_branch"))
+            stack = inventory.classify_stack(files)
+        except ForgeError:
+            probe_failed = True
     return {
         "name": p["name"],
         "path_with_namespace": p["path_with_namespace"],
@@ -94,14 +107,16 @@ def _build_repo(forge, p: dict, no_probe: bool) -> dict:
         # Which forge this record came from, so a mixed inventory stays unambiguous
         # once records from several forges are merged (see inventory.merge/find).
         "forge": p.get("forge") or forge.kind,
-    }
+    }, probe_failed
 
 
-def _build_batch(forge, projects: list[dict], no_probe: bool) -> list[dict]:
+def _build_batch(forge, projects: list[dict], no_probe: bool) -> tuple[list[dict], int]:
+    """``(records, probe_failed_count)`` — see :func:`_build_repo`."""
     if no_probe:
-        return [_build_repo(forge, p, no_probe) for p in projects]
+        return [_build_repo(forge, p, no_probe)[0] for p in projects], 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        return list(ex.map(lambda p: _build_repo(forge, p, no_probe), projects))
+        results = list(ex.map(lambda p: _build_repo(forge, p, no_probe), projects))
+    return [r for r, _ in results], sum(1 for _, failed in results if failed)
 
 
 def _forges_to_query(cfg: dict):
@@ -136,8 +151,9 @@ def cmd_discover(args) -> int:
         raise SystemExit(str(e))
 
     batches: list[list[dict]] = []
+    probe_failures = 0
     for forge, owner, exclude in to_query:
-        util.info(f"Querying {forge.kind} group `{owner}` …")
+        util.info(f"Querying {forge.kind} {forge.owner_noun} `{owner}` …")
         try:
             forge.check_auth()
         except ForgeError as e:
@@ -155,7 +171,9 @@ def cmd_discover(args) -> int:
         # below. A forge failing here raises before inventory.save is ever reached, so
         # a partial multi-forge failure can never wipe (or half-write) the inventory,
         # the same discipline the single-forge `_api_strict` split enforces.
-        batches.append(_build_batch(forge, projects, args.no_probe))
+        records, failed = _build_batch(forge, projects, args.no_probe)
+        probe_failures += failed
+        batches.append(records)
 
     try:
         merged = inventory.merge(batches)
@@ -168,6 +186,20 @@ def cmd_discover(args) -> int:
 
     rel = config.INVENTORY.relative_to(config.ROOT)
     util.ok(f"Wrote {doc['count']} repos to {rel}")
+    # FINDING I5: still SAVE on a probe failure (stack is best-effort descriptive
+    # metadata — unlike `list_repos`, a repo missing from the map entirely is
+    # unacceptable, which is why THAT failure aborts instead; see F1). But never let it
+    # be silent — a network hiccup, an expired token, or a GitHub secondary rate limit
+    # (8 repos probe concurrently, exactly what trips it) must not quietly masquerade as
+    # "these repos have no recognisable stack".
+    if probe_failures:
+        util.warn(
+            f"⚠ stack probe FAILED for {probe_failures} repo(s) — their `stack` was "
+            'written as "unknown" because the probe itself errored (network/auth/a '
+            "GitHub secondary rate limit), not because they lack a recognised build "
+            "file. Re-run `charter discover` to re-probe; if it keeps failing, check "
+            "`charter doctor` (forge auth) or wait out the rate-limit window."
+        )
     added, removed = sorted(after - before), sorted(before - after)
     if added:
         util.info("New in group: " + ", ".join(added))

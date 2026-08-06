@@ -18,6 +18,28 @@ def _cell(text: str) -> str:
     return (text or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
+#: Proper-cased display names, keyed by `Forge.kind` — only needed here (a heading
+#: reads as prose), so this stays a small local table rather than a new protocol attr.
+_FORGE_DISPLAY = {"gitlab": "GitLab", "github": "GitHub"}
+
+
+def _forge_label(doc: dict) -> str:
+    """Forge-accurate vocabulary for the topology heading — GitLab repos live in a
+    "group", GitHub's in an "org". Naming the wrong one is FINDING I3: the heading was
+    hardcoded to "GitLab group" even for a GitHub-only (or mixed) control plane. A
+    mixed-forge inventory (or one with no repos yet) has no single right word, so it
+    stays neutral ("group" — the historical default) rather than guessing."""
+    from .forge import registry
+    kinds = {r.get("forge") for r in doc.get("repos", [])}
+    kinds.discard(None)
+    if len(kinds) == 1:
+        kind = next(iter(kinds))
+        cls = registry.KINDS.get(kind)
+        if cls is not None:
+            return f"{_FORGE_DISPLAY.get(kind, kind)} {cls.owner_noun}"
+    return "group"
+
+
 def topology_md(doc: dict) -> str:
     repos = sorted(doc.get("repos", []), key=lambda r: r["name"])
     out = [
@@ -25,7 +47,7 @@ def topology_md(doc: dict) -> str:
         "",
         "# Repository Topology",
         "",
-        f"**{len(repos)} repos** in the `{config.GROUP}` GitLab group. "
+        f"**{len(repos)} repos** in the `{config.GROUP}` {_forge_label(doc)}. "
         "Refresh with `charter discover`.",
         "",
         "> Repos are cloned on demand into `workspaces/<workspace>/<name>/` "

@@ -33,6 +33,10 @@ class TestGitHubForge(unittest.TestCase):
         self.assertEqual((self.f.kind, self.f.host, self.f.cli, self.f.change_sigil),
                          ("github", "github.com", "gh", "#"))
 
+    def test_owner_noun_is_org(self):
+        """FINDING I3 (part 3) — GitHub has orgs/users, not GitLab's 'groups'."""
+        self.assertEqual(self.f.owner_noun, "org")
+
     def test_satisfies_the_protocol(self):
         self.assertIsInstance(self.f, base.Forge)
 
@@ -130,9 +134,17 @@ class TestGitHubForge(unittest.TestCase):
         self.assertIn("acme-org", str(cm.exception))
 
     def test_list_repos_raises_on_mid_pagination_failure_rather_than_truncating(self):
-        """Page 1 succeeds (a full 100-item page, so pagination continues), page 2
-        fails — a 404 that far in isn't "not an org" (that's only checked on page 1), so
-        this must raise rather than silently stopping and returning a truncated list."""
+        """FINDING M8: this test used to claim it exercised "a 404 that far in", but its
+        stub returned a generic connection error — which raises regardless of the
+        `page == 1` guard, so it never actually stressed the boundary the docstring
+        describes. Fixed to return a REAL 404 (the same live body/stderr captured in
+        `_REAL_404_STDOUT`/`_REAL_404_STDERR`) on page 2. `_paged_strict`'s org_probe
+        fallback only special-cases a 404 on page 1 (evidence *owner* might be a
+        personal account, not an org) — a 404 THIS far into pagination is a genuine
+        failure (page 1 already proved the org exists), not a signal to fall back to the
+        user endpoint. A 404 mid-pagination is a failure, not an org/user fallback
+        signal, so this must raise rather than silently stopping and returning a
+        truncated list."""
         page1 = json.dumps([
             {"id": i, "name": f"repo{i}", "full_name": f"acme/repo{i}",
              "default_branch": "main"}
@@ -143,7 +155,7 @@ class TestGitHubForge(unittest.TestCase):
             joined = " ".join(cmd)
             if "&page=1" in joined:
                 return _proc(page1)
-            return _proc("", rc=1, stderr="error connecting to github.com")
+            return _proc(_REAL_404_STDOUT, rc=1, stderr=_REAL_404_STDERR)
 
         with mock.patch("charter.util.run", side_effect=side_effect):
             with self.assertRaises(base.ForgeError):
@@ -171,6 +183,36 @@ class TestGitHubForge(unittest.TestCase):
                 self.f.repo_tree({"path_with_namespace": "acme/api",
                                    "default_branch": "main"}), [])
 
+    # --- FINDING I5: `repo_tree` stays permissive by contract (see the test above and
+    # --- gitlab.py's twin) — `repo_tree_strict` is the sibling discover's stack probe
+    # --- actually calls, which RAISES on failure instead of degrading to [], so
+    # --- `_build_repo` can distinguish "the probe failed" from "this repo genuinely has
+    # --- no recognised root-level stack file" (both used to look identical).
+    def test_repo_tree_strict_raises_on_failure_rather_than_degrading(self):
+        with mock.patch("charter.util.run", return_value=_proc("", rc=1)):
+            with self.assertRaises(base.ForgeError):
+                self.f.repo_tree_strict({"path_with_namespace": "acme/api",
+                                         "default_branch": "main"})
+
+    def test_repo_tree_strict_returns_the_same_names_as_repo_tree_on_success(self):
+        payload = json.dumps({"tree": [{"path": "README.md"}, {"path": "src/main.py"}]})
+        with mock.patch("charter.util.run", return_value=_proc(payload)):
+            names = self.f.repo_tree_strict({"path_with_namespace": "acme/api",
+                                             "default_branch": "main"})
+        self.assertEqual(names, ["README.md"])
+
+    def test_repo_tree_strict_a_genuine_empty_tree_is_not_confused_with_failure(self):
+        with mock.patch("charter.util.run", return_value=_proc(json.dumps({"tree": []}))):
+            self.assertEqual(
+                self.f.repo_tree_strict({"path_with_namespace": "acme/api",
+                                         "default_branch": "main"}), [])
+
+    def test_repo_tree_strict_raises_on_malformed_json(self):
+        with mock.patch("charter.util.run", return_value=_proc("{not json")):
+            with self.assertRaises(base.ForgeError):
+                self.f.repo_tree_strict({"path_with_namespace": "acme/api",
+                                         "default_branch": "main"})
+
     # --- open_change / ci_status: permissive, feed the status line -----------------
 
     def test_open_change_returns_the_pr_number(self):
@@ -181,6 +223,50 @@ class TestGitHubForge(unittest.TestCase):
     def test_open_change_is_none_when_there_is_no_open_pr(self):
         with mock.patch("charter.util.run", return_value=_proc("[]")):
             self.assertIsNone(self.f.open_change("acme/api", "feat"))
+
+    # --- FINDING M7: `github.py` didn't URL-encode owner/name/branch/ref, unlike
+    # --- `gitlab.py` (which uses `urllib.parse.quote` throughout). A branch named
+    # --- `feature/foo` produced a broken `git/trees/feature/foo` path (extra path
+    # --- segments instead of one ref) and `head=owner:feature/foo` (an unencoded slash
+    # --- in a query value).
+    def test_open_change_encodes_a_slashed_branch(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc("[]")
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            self.f.open_change("acme/api", "feature/foo")
+        joined = " ".join(calls[0])
+        self.assertIn("head=acme:feature%2Ffoo", joined)
+        self.assertNotIn("head=acme:feature/foo", joined)
+
+    def test_repo_tree_encodes_a_slashed_ref(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc(json.dumps({"tree": []}))
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            self.f.repo_tree({"path_with_namespace": "acme/api"}, ref="feature/foo")
+        joined = " ".join(calls[0])
+        self.assertIn("git/trees/feature%2Ffoo", joined)
+        self.assertNotIn("git/trees/feature/foo", joined)
+
+    def test_repo_tree_strict_encodes_a_slashed_ref(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc(json.dumps({"tree": []}))
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            self.f.repo_tree_strict({"path_with_namespace": "acme/api"}, ref="feature/foo")
+        joined = " ".join(calls[0])
+        self.assertIn("git/trees/feature%2Ffoo", joined)
+        self.assertNotIn("git/trees/feature/foo", joined)
 
     def test_ci_status_uses_githubs_own_rollup(self):
         """GitHub has N check-runs with no inherent single value — but it computes a

@@ -21,13 +21,20 @@ class GitLabForge:
     kind = "gitlab"
     cli = "glab"
     change_sigil = "!"
+    owner_noun = "group"
 
     def __init__(self, host: str = "gitlab.com") -> None:
         self.host = host
 
     # --- plumbing -----------------------------------------------------------------
     def _glab(self, args, check: bool = True):
-        return util.run([self.cli, *args], check=check)
+        """Every invocation is explicit about ITS OWN host (``--hostname``) — mirrors
+        `GitHubForge`, which has always passed `--hostname self.host` on every call.
+        Before this, a declared self-hosted GitLab (``host = "git.internal"``) silently
+        queried gitlab.com instead (glab's ambient default host), and `check_auth`
+        reported success for `git.internal` merely because gitlab.com happened to be
+        logged in — a false green on the auth axis (FINDING I2)."""
+        return util.run([self.cli, "--hostname", self.host, *args], check=check)
 
     def _api(self, path: str):
         """Best-effort JSON GET. Returns None on any failure — callers feed the status
@@ -104,6 +111,24 @@ class GitLabForge:
         while True:
             batch = self._api(
                 f"projects/{rid}/repository/tree?per_page=100&page={page}{ref_q}") or []
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return [e.get("name", "") for e in out]
+
+    def repo_tree_strict(self, repo: dict, ref: str | None = None) -> list[str]:
+        """See :meth:`base.Forge.repo_tree_strict` — same pagination as :meth:`repo_tree`,
+        but through :meth:`_api_strict` so a failure raises instead of degrading (FINDING
+        I5)."""
+        rid = repo.get("id")
+        ref_q = f"&ref={urllib.parse.quote(str(ref), safe='')}" if ref else ""
+        out, page = [], 1
+        while True:
+            batch = self._api_strict(
+                f"projects/{rid}/repository/tree?per_page=100&page={page}{ref_q}")
             if not batch:
                 break
             out.extend(batch)

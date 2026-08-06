@@ -558,6 +558,13 @@ def _persona_chips(session: str | None = None) -> list[str]:
 
 
 def render(payload: dict | None = None) -> str:
+    """FINDING M9: the module docstring promises this NEVER crashes — that guarantee
+    lives entirely in this function's two `try/except` blocks, so EVERY step that can
+    fail must sit inside one of them. Before this, `_repo_rows`/`_persona_chips` (and
+    the summary/pin/reinit assembly) ran in the GAP between the two — a bad repo row (or
+    a broken persona) crashed `render()` itself, the exact thing this docstring says can
+    never happen. Everything through `chips` now shares the FIRST try/except, so a
+    failure anywhere in data-gathering falls back to the same minimal string."""
     payload = payload or {}
     try:
         active, src = _active(payload.get("session_id"))
@@ -574,24 +581,24 @@ def render(payload: dict | None = None) -> str:
         from . import glstate
         gl = glstate.read_for(dirs, branches)
         glstate.maybe_spawn(dirs, active)
+
+        pin = f"{_YELLOW}*{_R}" if src == "$EDM_WORKSPACE" else ""
+        # Reinit tip sits right after the name so it survives truncation on narrow panes.
+        reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
+        summary = f"{_DIM} · {_R}".join(filter(None, [
+            f"{_CYAN}⬢{_R} {_BOLD}{active}{_R}{pin}",
+            reinit,
+            f"{_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}",
+            f"{_DIM}ws{_R} {nws}",
+            f"{_DIM}vaults{_R} {nv}" if nv else None,
+            *_context_gauge(payload),
+        ]))
+
+        sid = payload.get("session_id")
+        repo_lines = [r.render(_LEFT_W)[0] for r in _repo_rows(dirs, active, cur, states, branches, gl)]
+        chips = _persona_chips(sid)
     except Exception:
         return f"{_CYAN}⬢{_R} charter"
-
-    pin = f"{_YELLOW}*{_R}" if src == "$EDM_WORKSPACE" else ""
-    # Reinit tip sits right after the name so it survives truncation on narrow panes.
-    reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
-    summary = f"{_DIM} · {_R}".join(filter(None, [
-        f"{_CYAN}⬢{_R} {_BOLD}{active}{_R}{pin}",
-        reinit,
-        f"{_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}",
-        f"{_DIM}ws{_R} {nws}",
-        f"{_DIM}vaults{_R} {nv}" if nv else None,
-        *_context_gauge(payload),
-    ]))
-
-    sid = payload.get("session_id")
-    repo_lines = [r.render(_LEFT_W)[0] for r in _repo_rows(dirs, active, cur, states, branches, gl)]
-    chips = _persona_chips(sid)
 
     try:
         # shared-namespace memory: persistent (committed) + ephemeral (this session)
@@ -644,5 +651,13 @@ def main(argv=None) -> int:
         payload = json.load(sys.stdin)
     except Exception:
         payload = {}
-    print(render(payload))
+    # Defense in depth (FINDING M9): `render()` itself is guarded end-to-end, but this
+    # is the outermost boundary of the whole subprocess — it must never crash even if a
+    # future bug (or a monkeypatch, or an import-time surprise) reaches past render's
+    # own guard, since a raise here takes the entire status-line subprocess down.
+    try:
+        out = render(payload)
+    except Exception:
+        out = f"{_CYAN}⬢{_R} charter"
+    print(out)
     return 0

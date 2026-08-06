@@ -78,10 +78,9 @@ class TestForgeAwareState(unittest.TestCase):
     """The status line renders `!42` for a GitLab MR and `#42` for a GitHub PR — each
     audience sees its own forge's notation, never the other's.
 
-    Resolves via `registry.resolve_host` (not the parameterless `for_host`): Task 4
-    replaced host resolution with a host-component matcher that also consults the
-    active control plane's own declared forges, so a self-hosted host resolves too —
-    `state_for_repo` must go through that same resolver, not the narrower one.
+    Resolves via `registry.resolve_host`, a host-component matcher that also consults
+    the active control plane's own declared forges, so a self-hosted host resolves too —
+    `state_for_repo` must go through that resolver.
     """
 
     def test_open_change_and_ci_come_from_the_repos_forge(self):

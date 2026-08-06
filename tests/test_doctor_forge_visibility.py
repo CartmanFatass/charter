@@ -133,5 +133,65 @@ class TestCheckSshHintIsHonest(unittest.TestCase):
         self.assertIn("forge", result.hint.lower())
 
 
+class TestDoctorChecksDeclaredForgesOnly(unittest.TestCase):
+    """FINDING I3 (part 1) — `check_forge_cli`/`check_forge_auth` hardcoded
+    `GitLabForge()`, so a GitHub-only control plane got a `glab` FAIL ("brew install
+    glab") — a real tool, just the wrong one, and misleading for a control plane that
+    never touches GitLab at all. `doctor` must check the forges THIS control plane
+    actually declares, falling back to the historical single-GitLab default only when
+    none are declared (a fresh `charter init`, or a legacy single-forge control plane)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-doctor-forgecli-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        self._orig = (config.CONFIG_ERROR, config.HAS_CONTROL_PLANE, config.ROOT)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.CONFIG_ERROR, config.HAS_CONTROL_PLANE, config.ROOT = self._orig
+
+    def _set(self, has_control_plane=True):
+        config.CONFIG_ERROR = None
+        config.HAS_CONTROL_PLANE = has_control_plane
+        config.ROOT = self.root
+
+    def test_no_charter_toml_falls_back_to_a_single_gitlab_default(self):
+        self._set(has_control_plane=False)
+        forges = doctor.declared_or_default_forges()
+        self.assertEqual([f.kind for f in forges], ["gitlab"])
+
+    def test_a_github_only_control_plane_never_checks_glab(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "github"\nowner = "acme"\n')
+        self._set()
+        forges = doctor.declared_or_default_forges()
+        self.assertEqual([f.kind for f in forges], ["github"])
+        results = doctor.run_all()
+        names = [r.name for r in results]
+        self.assertIn("gh", names)
+        self.assertNotIn("glab", names)
+        self.assertNotIn("glab auth", names)
+
+    def test_a_github_only_control_plane_never_shows_the_glab_install_hint(self):
+        """The exact misleading outcome named in the finding: a GitHub-only user must
+        never be told to `brew install glab` at all."""
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "github"\nowner = "acme"\n')
+        self._set()
+        results = doctor.run_all()
+        hints = " ".join(r.hint for r in results if r.hint)
+        self.assertNotIn("brew install glab", hints)
+
+    def test_a_gitlab_and_github_control_plane_checks_both_clis(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\ngroup = "acme"\n\n'
+            '[[forge]]\nkind = "github"\nowner = "acme"\n')
+        self._set()
+        results = doctor.run_all()
+        names = [r.name for r in results]
+        self.assertIn("glab", names)
+        self.assertIn("gh", names)
+
+
 if __name__ == "__main__":
     unittest.main()

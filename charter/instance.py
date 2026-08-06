@@ -58,8 +58,17 @@ def group_of(cfg: dict, fallback: str, index: int = 0) -> str:
     a single-forge control plane cares about, which is what every caller but
     multi-forge ``discover`` wants: ``config.GROUP`` is deliberately "the first forge's
     group", not "all of them", since it is only used as a human-readable label and a
-    back-compat fallback owner when no ``[[forge]]`` block is declared at all)."""
-    return _forge_at(cfg, index).get("group") or fallback
+    back-compat fallback owner when no ``[[forge]]`` block is declared at all).
+
+    Accepts EITHER ``group`` or ``owner`` — the same either-key acceptance
+    ``registry.forges_for`` already has (GitLab calls it a group, GitHub an org/user;
+    ``owner`` is the cross-forge name). ``group`` wins when a block unusually declares
+    both. Before this (FINDING I3, part 2), a hand-written ``owner = "acme"`` block
+    (no ``group`` key) yielded an empty ``config.GROUP`` — "repos in the `` GitLab
+    group", ``charter status`` printing ``": 38 repos in inventory"``, and
+    ``topology.md`` saying "38 repos in the `` GitLab group"."""
+    block = _forge_at(cfg, index)
+    return block.get("group") or block.get("owner") or fallback
 
 
 def exclude_of(cfg: dict, index: int = 0) -> set[str]:

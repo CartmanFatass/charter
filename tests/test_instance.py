@@ -71,10 +71,29 @@ class TestConfigWiring(InstanceIso):
         ]}
         self.assertEqual(instance.group_of(cfg, "unused", index=0), "acme")
         self.assertEqual(instance.exclude_of(cfg, index=0), {"acme-control"})
-        # github's block uses `owner`, not `group` — group_of only reads `group`
-        # (forges_for is what accepts either key; see test_forge_registry.py).
-        self.assertEqual(instance.group_of(cfg, "unused", index=1), "unused")
+        # FINDING I3 (part 2): github's block uses `owner`, not `group` — `group_of`
+        # must accept EITHER key, the same as `registry.forges_for` already does (see
+        # test_forge_registry.py's `test_group_and_owner_are_both_accepted`). Before the
+        # fix, `group_of` read only `group`, so a hand-written `owner = "acme"` block
+        # yielded `config.GROUP == ""` — "repos in the `` GitLab group", `charter
+        # status` printing `": 38 repos in inventory"`, `topology.md` saying "38 repos
+        # in the `` GitLab group".
+        self.assertEqual(instance.group_of(cfg, "unused", index=1), "diazoxide")
         self.assertEqual(instance.exclude_of(cfg, index=1), {"sandbox"})
+
+    def test_group_of_accepts_owner_when_group_is_absent(self):
+        self.assertEqual(
+            instance.group_of({"forge": [{"kind": "github", "owner": "acme"}]}, "unused"),
+            "acme")
+
+    def test_group_of_prefers_group_over_owner_when_both_are_present(self):
+        """An unusual block declaring both — `group` wins (it's the more specific,
+        forge-native term; `owner` is the cross-forge fallback name)."""
+        self.assertEqual(
+            instance.group_of(
+                {"forge": [{"kind": "gitlab", "group": "acme-group", "owner": "acme-owner"}]},
+                "unused"),
+            "acme-group")
 
     def test_an_out_of_range_index_falls_back_to_empty(self):
         cfg = {"forge": [{"kind": "gitlab", "group": "acme", "exclude": ["x"]}]}

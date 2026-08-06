@@ -23,6 +23,11 @@ class TestGitLabForge(unittest.TestCase):
         self.assertEqual((self.f.kind, self.f.host, self.f.cli, self.f.change_sigil),
                          ("gitlab", "gitlab.com", "glab", "!"))
 
+    def test_owner_noun_is_group(self):
+        """FINDING I3 (part 3) — GitLab has 'groups'; GitHub has 'orgs'/'users'. Naming
+        the wrong one is user-visible (a status message, a generated doc heading)."""
+        self.assertEqual(self.f.owner_noun, "group")
+
     def test_satisfies_the_protocol(self):
         self.assertIsInstance(self.f, base.Forge)
 
@@ -124,6 +129,44 @@ class TestGitLabForge(unittest.TestCase):
         self.assertEqual(names, ["README.md"])
         self.assertEqual(m.call_count, 1)
 
+    # --- FINDING I5: `repo_tree` is permissive (degrades to [] on failure) BY
+    # --- CONTRACT — it feeds discover's stack probe, but also anything else that wants
+    # --- a best-effort file listing. `repo_tree_strict` is the sibling discover's probe
+    # --- actually uses: it raises on failure instead of degrading, so `_build_repo` can
+    # --- tell "the probe failed" apart from "this repo genuinely has no recognised
+    # --- stack file" — both used to look identical (an empty list either way).
+    def test_repo_tree_strict_raises_on_failure_rather_than_degrading(self):
+        with mock.patch("charter.util.run", return_value=_proc("", rc=1)):
+            with self.assertRaises(base.ForgeError):
+                self.f.repo_tree_strict({"id": 7})
+
+    def test_repo_tree_strict_returns_the_same_names_as_repo_tree_on_success(self):
+        payload = json.dumps([{"name": "nx.json"}, {"name": "README.md"}])
+        with mock.patch("charter.util.run", return_value=_proc(payload)):
+            self.assertEqual(sorted(self.f.repo_tree_strict({"id": 7})),
+                             ["README.md", "nx.json"])
+
+    def test_repo_tree_strict_paginates_like_repo_tree(self):
+        page1 = json.dumps([{"name": f"f{i}"} for i in range(100)])
+        page2 = json.dumps([{"name": "nx.json"}])
+
+        def side_effect(cmd, **kwargs):
+            if "&page=1" in cmd[-1]:
+                return _proc(page1)
+            if "&page=2" in cmd[-1]:
+                return _proc(page2)
+            return _proc("[]")
+
+        with mock.patch("charter.util.run", side_effect=side_effect):
+            names = self.f.repo_tree_strict({"id": 7})
+        self.assertEqual(len(names), 101)
+        self.assertIn("nx.json", names)
+
+    def test_repo_tree_strict_raises_on_a_genuine_empty_tree_is_not_confused(self):
+        """A genuinely empty tree is a legal, successful result: [] with no error."""
+        with mock.patch("charter.util.run", return_value=_proc("[]")):
+            self.assertEqual(self.f.repo_tree_strict({"id": 7}), [])
+
     def test_open_change_returns_the_iid(self):
         with mock.patch("charter.util.run",
                         return_value=_proc(json.dumps([{"iid": 42}]))):
@@ -172,6 +215,69 @@ class TestGitLabForge(unittest.TestCase):
         with mock.patch("charter.util.run",
                         return_value=_proc("✓ Logged in to gitlab.com as me\n")):
             self.f.check_auth()  # must not raise
+
+    # --- FINDING I2: a declared self-hosted GitLab must query ITS OWN host, not the
+    # --- glab default (gitlab.com) — `GitHubForge` already passes `--hostname` on every
+    # --- call; `GitLabForge._glab` silently dropped it, so a self-hosted control plane
+    # --- actually queried gitlab.com, and `check_auth` reported success for the
+    # --- self-hosted host when only logged into gitlab.com (a false green).
+    def test_hostname_reaches_the_list_repos_call(self):
+        f = GitLabForge(host="git.internal")
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc("[]")
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            f.list_repos("acme")
+        self.assertTrue(calls)
+        for cmd in calls:
+            self.assertIn("--hostname", cmd)
+            self.assertIn("git.internal", cmd)
+
+    def test_hostname_reaches_the_check_auth_call(self):
+        f = GitLabForge(host="git.internal")
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc("✓ Logged in to git.internal as me\n")
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            f.check_auth()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--hostname", calls[0])
+        self.assertIn("git.internal", calls[0])
+
+    def test_default_host_also_passes_hostname_explicitly(self):
+        """Not just the self-hosted case — every call is explicit about the host it
+        means, so `glab`'s own ambient default host can never silently substitute."""
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return _proc("[]")
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            self.f.list_repos("acme")
+        self.assertIn("--hostname", calls[0])
+        self.assertIn("gitlab.com", calls[0])
+
+    def test_check_auth_reports_failure_for_the_declared_host_even_if_only_logged_into_default(self):
+        """The false-green this finding names: only logged into gitlab.com, but the
+        control plane declares `git.internal` — `check_auth` must actually query
+        git.internal (and see it's not logged in there), not silently report success
+        because glab's ambient default happens to be authenticated."""
+        f = GitLabForge(host="git.internal")
+
+        def fake(cmd, **kw):
+            self.assertIn("git.internal", cmd)
+            return _proc("not logged in to any hosts")
+
+        with mock.patch("charter.util.run", side_effect=fake):
+            with self.assertRaises(base.ForgeError):
+                f.check_auth()
 
 
 if __name__ == "__main__":

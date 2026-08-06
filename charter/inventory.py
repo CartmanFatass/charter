@@ -81,23 +81,53 @@ def repos(doc: dict | None = None) -> list:
 def merge(batches: list[list[dict]]) -> list[dict]:
     """Combine per-forge repo lists into one inventory.
 
-    Repos are keyed by BARE NAME so every existing command, doc and habit keeps working.
-    A collision across forges is REFUSED rather than resolved by guessing: the workspace
-    path on disk is derived from that name, so picking one silently would let two
-    different repos clone over each other.
+    A repo is exposed under a BARE NAME (the final path segment) so every existing
+    command, doc and habit keeps working — but IDENTITY, for deciding whether two
+    sightings are "the same repo" or a genuine collision, is ``(forge, path_with_
+    namespace)`` — never the bare name alone (the pre-fix key) and never "bare name +
+    a forge-only equality check" (the pre-fix collision test).
+
+    Two records with the SAME identity (the exact same project, on the exact same
+    forge) are genuinely the same repo — the second sighting is a dedupe (e.g. an
+    overlapping ``include_subgroups=true`` sweep re-listing a project), not an error.
+
+    Two records that share a bare name but have DIFFERENT identities are a genuine
+    collision and are REFUSED rather than resolved by guessing — the on-disk workspace
+    path is derived from the bare name, so silently picking one would let two different
+    repos clone over each other. This is reachable in normal use: GitLab
+    ``include_subgroups=true`` means ``acme/team-a/api`` and ``acme/team-b/api`` both
+    have bare name ``api`` (same forge, different namespace); two ``[[forge]]`` blocks
+    of the same kind (two GitHub orgs) hit the identical shape; and two different
+    forges sharing a bare name (the original cross-forge case) still collides too.
     """
     from .forge.registry import CollisionError
-    seen: dict[str, dict] = {}
+    by_identity: dict[tuple, dict] = {}
+    owner_of_name: dict[str, tuple] = {}
     for batch in batches:
         for r in batch:
-            prev = seen.get(r["name"])
-            if prev is not None and prev.get("forge") != r.get("forge"):
+            name = r["name"]
+            identity = (r.get("forge"), r["path_with_namespace"])
+            prev_identity = owner_of_name.get(name)
+            if prev_identity is not None and prev_identity != identity:
+                prev = by_identity[prev_identity]
+                if prev.get("forge") == r.get("forge"):
+                    # Same forge, different namespace — a forge-qualifier (`forge:name`)
+                    # can't disambiguate two repos that are already on the same forge, so
+                    # the only actionable fix is excluding one in charter.toml.
+                    raise CollisionError(
+                        f"{r.get('forge')} exposes two different repos both named "
+                        f"{name!r}: {prev['path_with_namespace']!r} and "
+                        f"{r['path_with_namespace']!r}. There's no bare-name qualifier "
+                        f"that can tell two same-forge repos apart — exclude one via "
+                        f"that `[[forge]]` block's `exclude` in charter.toml.")
                 raise CollisionError(
-                    f"both {prev.get('forge')} and {r.get('forge')} expose a repo named "
-                    f"{r['name']!r}. Qualify it — e.g. `{r.get('forge')}:{r['name']}` — "
+                    f"both {prev.get('forge')} ({prev['path_with_namespace']!r}) and "
+                    f"{r.get('forge')} ({r['path_with_namespace']!r}) expose a repo "
+                    f"named {name!r}. Qualify it — e.g. `{r.get('forge')}:{name}` — "
                     f"or exclude one in charter.toml.")
-            seen[r["name"]] = r
-    return sorted(seen.values(), key=lambda r: r["name"])
+            owner_of_name[name] = identity
+            by_identity[identity] = r
+    return sorted(by_identity.values(), key=lambda r: r["name"])
 
 
 def find(repos: list, name_or_path: str):

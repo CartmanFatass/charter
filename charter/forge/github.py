@@ -21,6 +21,7 @@ Two asymmetries with GitLab are handled here rather than leaking upward:
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 from .. import util
 from .base import CI_STATES, ForgeError
@@ -51,6 +52,7 @@ class GitHubForge:
     kind = "github"
     cli = "gh"
     change_sigil = "#"
+    owner_noun = "org"
 
     def __init__(self, host: str = "github.com") -> None:
         self.host = host
@@ -140,15 +142,42 @@ class GitHubForge:
 
     def repo_tree(self, repo: dict, ref: str | None = None) -> list[str]:
         path = repo.get("path_with_namespace") or ""
+        owner, _, name = path.partition("/")
         ref = ref or repo.get("default_branch") or "HEAD"
-        data = self._api(f"repos/{path}/git/trees/{ref}")
+        enc_owner, enc_name = urllib.parse.quote(owner, safe=""), urllib.parse.quote(name, safe="")
+        enc_ref = urllib.parse.quote(ref, safe="")
+        data = self._api(f"repos/{enc_owner}/{enc_name}/git/trees/{enc_ref}")
+        return [e.get("path", "") for e in (data or {}).get("tree", [])
+                if "/" not in e.get("path", "")]
+
+    def repo_tree_strict(self, repo: dict, ref: str | None = None) -> list[str]:
+        """See :meth:`base.Forge.repo_tree_strict` — same lookup as :meth:`repo_tree`,
+        but raises instead of degrading on failure (FINDING I5)."""
+        path = repo.get("path_with_namespace") or ""
+        owner, _, name = path.partition("/")
+        ref = ref or repo.get("default_branch") or "HEAD"
+        enc_owner, enc_name = urllib.parse.quote(owner, safe=""), urllib.parse.quote(name, safe="")
+        enc_ref = urllib.parse.quote(ref, safe="")
+        p = util.run([self.cli, "api", "--hostname", self.host,
+                      f"repos/{enc_owner}/{enc_name}/git/trees/{enc_ref}"], check=False)
+        if p.returncode != 0:
+            detail = (p.stderr or p.stdout or "").strip() or f"gh exited {p.returncode}"
+            raise ForgeError(f"listing tree for {path}@{ref} failed: {detail}")
+        if not p.stdout.strip():
+            return []
+        try:
+            data = json.loads(p.stdout)
+        except ValueError as e:
+            raise ForgeError(f"GitHub API returned malformed JSON (tree {path}@{ref}): {e}") from e
         return [e.get("path", "") for e in (data or {}).get("tree", [])
                 if "/" not in e.get("path", "")]
 
     def open_change(self, path: str, branch: str) -> int | None:
         owner, _, name = path.partition("/")
+        enc_owner, enc_name = urllib.parse.quote(owner, safe=""), urllib.parse.quote(name, safe="")
+        enc_branch = urllib.parse.quote(branch, safe="")
         arr = self._api(
-            f"repos/{owner}/{name}/pulls?state=open&head={owner}:{branch}&per_page=1")
+            f"repos/{enc_owner}/{enc_name}/pulls?state=open&head={enc_owner}:{enc_branch}&per_page=1")
         return arr[0].get("number") if arr else None
 
     def ci_status(self, path: str, branch: str) -> str | None:

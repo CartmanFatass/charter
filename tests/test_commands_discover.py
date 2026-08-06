@@ -6,8 +6,10 @@ forge failure, `inventory.save` must never be called at all.
 """
 from __future__ import annotations
 
+import io
 import json
 import unittest
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest import mock
 
@@ -181,6 +183,129 @@ class TestDiscoverMultiForge(PersonaIso):
         by_name = {r["name"]: r["forge"] for r in doc["repos"]}
         self.assertEqual(by_name, {"api": "gitlab", "site": "github", "shared-name": "github"})
         self.assertEqual(doc["count"], 3)
+
+
+class TestDiscoverStackProbeFailureIsVisible(PersonaIso):
+    """FINDING I5 (Important) — `repo_tree` is the permissive best-effort API, so any
+    probe failure (network hiccup, expired token, a GitHub secondary rate limit — 8
+    repos probe concurrently, exactly what trips it) silently rewrote a repo's `stack`
+    to "unknown", indistinguishable from a repo genuinely having no recognised
+    root-level stack file. `discover` then saved the degraded inventory and exited 0
+    with no visibility at all.
+
+    CHOICE: warn loudly with an exact count rather than aborting the whole save — stack
+    is best-effort DESCRIPTIVE metadata (unlike `list_repos`, which is load-bearing:
+    losing a repo from the map is unacceptable, so F1 aborts on that). Aborting
+    `discover` entirely on a handful of rate-limited probes (in a large org, especially
+    on GitHub, under the existing 8-way concurrency) would make the tool unusable
+    exactly when it's needed most. So: still save, but never let it be silent."""
+
+    def test_probe_failure_still_saves_but_is_not_silently_unknown_and_undetectable(self):
+        payload = json.dumps([{
+            "id": 1, "name": "svc", "path": "svc",
+            "path_with_namespace": "acme/svc", "default_branch": "main",
+            "description": "", "web_url": "https://gitlab.com/acme/svc",
+            "ssh_url_to_repo": "git@gitlab.com:acme/svc.git", "topics": [],
+        }])
+
+        def side_effect(cmd, **kwargs):
+            if "status" in cmd:
+                return SimpleNamespace(stdout="✓ Logged in to gitlab.com as me\n",
+                                       stderr="", returncode=0)
+            if "repository/tree" in cmd[-1]:
+                return _proc("", rc=1)          # the stack probe itself fails
+            return _proc(payload)               # the projects listing succeeds
+
+        buf = io.StringIO()
+        with mock.patch("charter.util.run", side_effect=side_effect), redirect_stderr(buf):
+            rc = commands.cmd_discover(_args(no_probe=False))
+        self.assertEqual(rc, 0)   # still saves — a chosen degradation, not an abort
+
+        from charter import inventory
+        doc = inventory.load()
+        self.assertEqual(doc["count"], 1)
+        self.assertEqual(doc["repos"][0]["stack"], "unknown")
+
+        out = buf.getvalue()
+        self.assertIn("1", out)
+        self.assertTrue(any(w in out.lower() for w in ("probe", "fail")),
+                        f"no loud warning about the probe failure in: {out!r}")
+
+    def test_a_repo_that_genuinely_has_no_recognised_stack_prints_no_failure_warning(self):
+        """The flip side — a SUCCESSFUL probe that legitimately finds nothing
+        recognisable must not be confused with a failure."""
+        payload = json.dumps([{
+            "id": 1, "name": "svc", "path": "svc",
+            "path_with_namespace": "acme/svc", "default_branch": "main",
+            "description": "", "web_url": "https://gitlab.com/acme/svc",
+            "ssh_url_to_repo": "git@gitlab.com:acme/svc.git", "topics": [],
+        }])
+
+        def side_effect(cmd, **kwargs):
+            if "status" in cmd:
+                return SimpleNamespace(stdout="✓ Logged in to gitlab.com as me\n",
+                                       stderr="", returncode=0)
+            if "repository/tree" in cmd[-1]:
+                return _proc("[]")               # a real, successful, empty tree
+            return _proc(payload)
+
+        buf = io.StringIO()
+        with mock.patch("charter.util.run", side_effect=side_effect), redirect_stderr(buf):
+            rc = commands.cmd_discover(_args(no_probe=False))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("probe failed", buf.getvalue().lower())
+        self.assertNotIn("probe fail", buf.getvalue().lower())
+
+    def test_build_repo_reports_probe_failed_distinct_from_a_genuine_unknown_stack(self):
+        from types import SimpleNamespace as NS
+
+        class FailingForge:
+            kind = "gitlab"
+
+            def repo_tree_strict(self, repo, ref=None):
+                from charter.forge import ForgeError
+                raise ForgeError("boom")
+
+        class SucceedingButEmptyForge:
+            kind = "gitlab"
+
+            def repo_tree_strict(self, repo, ref=None):
+                return []
+
+        p = {"name": "x", "path_with_namespace": "acme/x", "ssh_url": "s",
+             "default_branch": "main", "description": "", "topics": [], "web_url": ""}
+        rec, failed = commands._build_repo(FailingForge(), p, no_probe=False)
+        self.assertTrue(failed)
+        self.assertEqual(rec["stack"], "unknown")
+
+        rec2, failed2 = commands._build_repo(SucceedingButEmptyForge(), p, no_probe=False)
+        self.assertFalse(failed2)
+        self.assertEqual(rec2["stack"], "unknown")
+
+
+class TestDiscoverProgressWordingIsForgeAccurate(PersonaIso):
+    """FINDING I3 (part 3) — `cmd_discover` printed "Querying github group `acme`" —
+    GitHub has orgs/users, not GitLab's groups. The progress line must say the right
+    word for the forge actually being queried."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.tmp / "charter.toml").write_text(
+            'schema = 1\n\n[[forge]]\nkind = "github"\nowner = "acme-gh"\n')
+
+    def test_querying_a_github_owner_says_org_not_group(self):
+        def side_effect(cmd, **kwargs):
+            if "status" in cmd:
+                return SimpleNamespace(stdout="✓ Logged in to github.com as me\n",
+                                       stderr="", returncode=0)
+            return SimpleNamespace(stdout="[]", stderr="", returncode=0)
+
+        buf = io.StringIO()
+        with mock.patch("charter.util.run", side_effect=side_effect), redirect_stderr(buf):
+            commands.cmd_discover(_args())
+        out = buf.getvalue()
+        self.assertIn("Querying github org `acme-gh`", out)
+        self.assertNotIn("Querying github group", out)
 
 
 class TestDiscoverUnknownForgeKind(PersonaIso):

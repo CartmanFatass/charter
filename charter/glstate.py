@@ -143,9 +143,9 @@ def state_for_repo(d: Path, branch: str) -> dict:
     clone's own ``origin``, which is what makes a mixed-forge workspace work — two
     clones side by side can be hosted on different forges.
 
-    Resolves via ``registry.resolve_host`` rather than the parameterless ``for_host`` —
-    that's what also recognises a self-hosted forge this control plane's own
-    ``charter.toml`` declares, not just each kind's default host.
+    Resolves via ``registry.resolve_host``, which also recognises a self-hosted forge
+    this control plane's own ``charter.toml`` declares, not just each kind's default
+    host.
 
     Best-effort by contract: this feeds the status line, which renders on every turn and
     must never raise. No remote, an unknown host, a missing CLI, or an API failure all
