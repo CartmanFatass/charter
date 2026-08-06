@@ -142,6 +142,19 @@ class TestCommitDispatchPosture(unittest.TestCase):
         self.assertFalse(cp.call_args.kwargs.get("no_push"),
                          "`push` is today's umbrella behaviour: publish right away")
 
+    def test_unrecognised_value_behaves_like_local(self):
+        """`config.MEMORY_SHARE` is always pre-clamped through `instance.share_of` — but
+        this gate must not itself depend on that. Given a value outside the three known
+        modes (a typo, a test, a future caller setting the attribute directly), it must
+        fall back to `local`'s exact behaviour: no commit attempted at all, not fall
+        through the if/elif chain into an immediate FOREGROUND push (worse than either
+        sibling path, which degrade gracefully)."""
+        cp = self._run("puhs")
+        cp.assert_not_called()
+        self.assertFalse((config.EDM_HOME / "dispatch-commit.lock").exists())
+        self.assertFalse(config.EDM_HOME.exists(),
+                         "an unrecognised posture must not even create EDM_HOME's lock parent")
+
 
 if __name__ == "__main__":
     unittest.main()

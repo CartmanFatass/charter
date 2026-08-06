@@ -87,6 +87,22 @@ def default_workspace_of(cfg: dict, fallback: str) -> str:
 SHARE_MODES = ("local", "commit", "push")
 
 
+def clamp_share(value: str | None) -> str:
+    """Clamp any candidate posture value to a known ``SHARE_MODES`` entry, defaulting to
+    ``local`` when it isn't one.
+
+    An unrecognised value falls back to ``local`` deliberately: a typo must fail *safe*,
+    because the failure mode on the other side is publishing an agent's notes. This is
+    the single clamp — ``share_of`` uses it for the raw TOML value, and every reactive
+    committer (``hooks._commit_dispatch``, ``commands.commit_memory_reactive``,
+    ``commands_workspace.cmd_workspace_autosave``) re-applies it to ``config.MEMORY_SHARE``
+    defensively, so none of them trusts an if/elif fallthrough to do the clamping for it —
+    a duplicated hand-rolled check would be a second thing to keep in sync with
+    ``SHARE_MODES``; this is the one place that knows the set.
+    """
+    return value if value in SHARE_MODES else "local"
+
+
 def share_of(cfg: dict) -> str:
     """The control plane's memory posture, defaulting to ``local``.
 
@@ -94,4 +110,4 @@ def share_of(cfg: dict) -> str:
     because the failure mode on the other side is publishing an agent's notes.
     """
     v = (cfg.get("memory") or {}).get("share")
-    return v if v in SHARE_MODES else "local"
+    return clamp_share(v)

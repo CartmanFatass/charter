@@ -52,6 +52,14 @@ class TestReactiveCommitHonoursPosture(unittest.TestCase):
         cp.assert_called_once()
         self.assertFalse(cp.call_args.kwargs.get("no_push"))
 
+    def test_unrecognised_value_behaves_like_local(self):
+        """`config.MEMORY_SHARE` is always pre-clamped through `instance.share_of` — but
+        this reactive path must not itself depend on that. A value outside the three known
+        modes fell through the local/commit branches into the final `return` (today's
+        `push` path, committed with `background=True`) — the exact fail-unsafe shape this
+        pins shut: no commit attempted at all, same as `local`."""
+        self._record("puhs").assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

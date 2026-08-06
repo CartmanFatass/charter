@@ -125,6 +125,16 @@ class TestAutosaveGating(unittest.TestCase):
         self.assertTrue(cp.call_args.kwargs.get("no_push"))
         popen.assert_not_called()           # `commit` records but never publishes
 
+    def test_unrecognised_posture_skips_even_when_live_and_pending(self):
+        """`config.MEMORY_SHARE` is always pre-clamped through `instance.share_of` — but
+        this autosave path must not itself depend on that. A value outside the three known
+        modes fell past the `local` guard and unconditionally committed (only the
+        background PUSH was gated on `share == "push"`) — a workspace memo landing in git
+        on a typo. Must behave exactly like `local`: no commit, no push."""
+        cp, popen = self._run(pending=True, live=True, share="puhs")
+        cp.assert_not_called()
+        popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

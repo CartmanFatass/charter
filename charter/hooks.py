@@ -879,8 +879,11 @@ def _commit_dispatch(path, agent: str) -> None:
     one failure mode the reactive path didn't already cover. An flock turns that race
     into a short queue; the push itself stays in the background."""
     import fcntl
-    from . import commands, config as _cfg
-    share = _cfg.MEMORY_SHARE
+    from . import commands, config as _cfg, instance as _instance
+    # Re-clamp defensively rather than trust `config.MEMORY_SHARE` was already clamped —
+    # it always is (via `instance.share_of` at import time), but this gate must not itself
+    # depend on that upstream guarantee (see `instance.clamp_share`).
+    share = _instance.clamp_share(_cfg.MEMORY_SHARE)
     if share == "local":
         return
     lock = _cfg.EDM_HOME / "dispatch-commit.lock"

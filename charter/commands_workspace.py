@@ -398,7 +398,11 @@ def cmd_workspace_autosave(args) -> int:
     pushes in the BACKGROUND, so a slow push never blocks the turn. Best-effort — never
     raises, never blocks."""
     try:
-        share = config.MEMORY_SHARE
+        from . import instance as _instance
+        # Re-clamp defensively — see `instance.clamp_share`: `config.MEMORY_SHARE` is
+        # always pre-clamped at import time, but this reactive path must not itself rely
+        # on that upstream guarantee.
+        share = _instance.clamp_share(config.MEMORY_SHARE)
         if share == "local":
             return 0  # the safe default → this workspace memo stays on disk, never committed
         name = workspace.resolve()

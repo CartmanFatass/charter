@@ -337,7 +337,10 @@ def commit_memory_reactive(paths: list[str], title: str) -> int:
 
     Returns commit_push's rc (0 = committed / nothing to do / posture is local,
     1 = a secret-shaped value was refused)."""
-    share = config.MEMORY_SHARE
+    from . import instance as _instance
+    # Re-clamp defensively — see `instance.clamp_share`: `config.MEMORY_SHARE` is always
+    # pre-clamped at import time, but this reactive path must not itself rely on that.
+    share = _instance.clamp_share(config.MEMORY_SHARE)
     if share == "local":
         return 0
     msg = f"memory: {title}"[:100]
