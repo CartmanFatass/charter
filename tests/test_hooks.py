@@ -1,0 +1,252 @@
+import os
+import unittest
+from unittest import mock
+
+from tests._isolation import PersonaIso, run_hook
+from charter import hooks, config, persona
+
+
+def _decision(r):
+    return (r or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+
+def _context(r):
+    return (r or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+class TestLeakGuard(PersonaIso):  # A
+    def test_reveal_flag_denied(self):
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "edm persona secret get k --reveal"}})
+        self.assertEqual(_decision(r), "deny")
+
+    def test_cat_vault_denied(self):
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .edm/vaults/dev.json"}})
+        self.assertEqual(_decision(r), "deny")
+
+    def test_ls_vault_is_fine(self):
+        self.assertIsNone(run_hook(hooks.pretooluse, {"tool_input": {"command": "ls .edm/vaults/"}}))
+
+
+class TestCloneGuard(PersonaIso):  # B — a nudge ('ask'), not a hard block
+    def test_cd_into_clone_commit_asks(self):
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cd workspaces/default/x && git commit -m y"},
+                                        "cwd": str(self.tmp)})
+        self.assertEqual(_decision(r), "ask")
+
+    def test_git_dash_C_clone_asks(self):
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "git -C workspaces/default/x push"},
+                                        "cwd": str(self.tmp)})
+        self.assertEqual(_decision(r), "ask")
+
+    def test_legacy_repos_path_still_asks(self):  # back-compat mid-migration
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cd repos/default/x && git commit -m y"},
+                                        "cwd": str(self.tmp)})
+        self.assertEqual(_decision(r), "ask")
+
+    def test_commit_with_cwd_inside_repos_asks(self):
+        cwd = config.WORKSPACES_DIR / "ws" / "repo"
+        cwd.mkdir(parents=True)
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "git commit -m x"}, "cwd": str(cwd)})
+        self.assertEqual(_decision(r), "ask")
+
+    def test_umbrella_root_commit_silent(self):
+        self.assertIsNone(run_hook(hooks.pretooluse,
+                                   {"tool_input": {"command": "git commit -q -F m.txt"}, "cwd": str(self.tmp)}))
+
+    def test_secret_leak_still_hard_denied(self):  # A stays a hard block
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .edm/vaults/dev.json"}})
+        self.assertEqual(_decision(r), "deny")
+
+    def test_add_personas_not_denied(self):
+        self.assertIsNone(run_hook(hooks.pretooluse,
+                                   {"tool_input": {"command": "git add personas/dev/memory/"}, "cwd": str(self.tmp)}))
+
+
+class TestGateFallthrough(PersonaIso):
+    def test_declared_tool_allowed(self):
+        self.make_persona("dev", role="Dev", vault="dev", tools="kubectl")
+        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+            r = run_hook(hooks.pretooluse, {"tool_input": {"command": "kubectl get pods"}})
+        self.assertEqual(_decision(r), "allow")
+
+    def test_undeclared_tool_silent(self):
+        self.make_persona("dev", role="Dev", vault="dev", tools="kubectl")
+        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+            self.assertIsNone(run_hook(hooks.pretooluse, {"tool_input": {"command": "helm list"}}))
+
+
+class TestSessionStart(PersonaIso):  # C
+    def test_injects_active_persona_memory(self):
+        self.make_persona("dev", role="Dev", vault="dev")
+        persona.remember("dev", "fact one", title="one")
+        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+            r = run_hook(hooks.sessionstart, {"session_id": "t"})
+        ctx = _context(r)
+        self.assertIn("dev", ctx)
+        self.assertIn("one", ctx)
+
+    def test_role_injected_even_without_memory(self):
+        # A persona's ROLE (identity + remit) is injected even with no memory, so the
+        # default persona reliably shapes the session. ($EDM_WORKSPACE suppresses the
+        # separate workspace nudge so this isolates the persona branch.)
+        self.make_persona("dev", role="Dev", vault="dev", **{"delegate-when": "dev tasks"})
+        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev", "EDM_WORKSPACE": "default"}):
+            ctx = _context(run_hook(hooks.sessionstart, {"session_id": "t"}))
+        self.assertIn("dev", ctx)
+        self.assertIn("acting as", ctx)
+        self.assertIn("dev tasks", ctx)  # the remit (delegate-when) is surfaced
+
+    def test_no_active_persona_is_silent(self):
+        with mock.patch.dict(os.environ, {"EDM_WORKSPACE": "default"}, clear=False):
+            os.environ.pop("EDM_PERSONA", None)
+            self.assertIsNone(run_hook(hooks.sessionstart, {"session_id": "t"}))
+
+
+class TestMemorySecretScan(PersonaIso):  # D
+    def _write_path(self, name):
+        p = config.PERSONAS_DIR / "dev" / "memory" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def test_secret_in_memory_warns_without_echoing_value(self):
+        p = self._write_path("leak.md")
+        r = run_hook(hooks.posttooluse, {"tool_name": "Write",
+                                         "tool_input": {"file_path": str(p), "content": "api_key = sk-abcdef123456"}})
+        ctx = _context(r)
+        self.assertIn("SECURITY", ctx)
+        self.assertNotIn("sk-abcdef123456", ctx)  # the value must never be echoed
+
+    def test_clean_memory_is_silent(self):
+        p = self._write_path("ok.md")
+        self.assertIsNone(run_hook(hooks.posttooluse, {"tool_name": "Write",
+                                   "tool_input": {"file_path": str(p), "content": "KC runs as a StatefulSet of 3"}}))
+
+    def test_non_memory_file_ignored(self):
+        p = self.tmp / "edm" / "x.py"
+        self.assertIsNone(run_hook(hooks.posttooluse, {"tool_name": "Write",
+                                   "tool_input": {"file_path": str(p), "content": "password = hunter2xxx"}}))
+
+    def test_non_write_tool_ignored(self):
+        p = self._write_path("leak2.md")
+        self.assertIsNone(run_hook(hooks.posttooluse, {"tool_name": "Bash",
+                                   "tool_input": {"file_path": str(p), "content": "token = sk-zzzzzzzzzz"}}))
+
+
+class TestCommitmentGate(PersonaIso):  # F — ask before you build
+    """The steward's quizzing was measured at 1-per-10 prompts with a daily rate swinging
+    0.00–0.31: discretionary, so it fired on whim and went quiet during long grinds. This
+    gate supplies the missing TRIGGER.
+
+    The false-positive tests carry the real weight: a nudge that fires on a lookup becomes
+    wallpaper and gets tuned out, which would leave the discipline worse off than before.
+    """
+
+    def _fires(self, prompt: str) -> bool:
+        return bool(hooks._commitment_signals(prompt))
+
+    # --- must fire: an action verb PLUS a genuine fork ------------------------------
+    def test_fuzzy_build_request_fires(self):
+        self.assertTrue(self._fires("can we somehow make the statusline better?"))
+
+    def test_broad_scope_fires(self):
+        self.assertTrue(self._fires("add a health check across every repo"))
+
+    def test_destructive_fires(self):
+        self.assertTrue(self._fires("remove the legacy personas and rewrite their charters"))
+
+    def test_long_multipart_ask_fires(self):
+        self.assertTrue(self._fires(
+            "implement the new routing layer: " + "it should handle retries and backoff, "
+            "plus a metrics hook, and we need to keep the old path working " * 3))
+
+    # --- must NOT fire: no fork, or not a request for work -------------------------
+    def test_plain_question_is_silent(self):
+        for q in ("what does edm recall do?",
+                  "why is the dispatch tally committing so often?",
+                  "is all committed pushed?",
+                  "how many personas are there?",
+                  "show me the worktrees"):
+            self.assertFalse(self._fires(q), q)
+
+    def test_precise_small_fix_is_silent(self):
+        """Action, but no fork — there is nothing to quiz about."""
+        self.assertFalse(self._fires("fix the typo in docs/workspaces.md line 4"))
+
+    def test_status_check_is_silent(self):
+        self.assertFalse(self._fires("check the CI status"))
+
+    def test_empty_prompt_is_silent(self):
+        self.assertFalse(self._fires(""))
+        self.assertFalse(self._fires("   "))
+
+    def test_question_wins_over_action_words(self):
+        """Leading interrogatives suppress even when a build verb appears later."""
+        self.assertFalse(self._fires("what would it take to migrate every repo?"))
+
+    # --- the emitted directive + cadence ------------------------------------------
+    def test_nudge_names_the_signal_and_the_human_only_skills(self):
+        ctx = hooks._commitment_nudge("can we somehow improve this across all repos?", None)
+        self.assertIn("open-ended wording", ctx)
+        self.assertIn("broad scope", ctx)
+        self.assertIn("AskUserQuestion", ctx)
+        self.assertIn("grill-with-docs", ctx)      # human-only: nobody else can offer it
+        self.assertIn("Scout first", ctx)
+
+    def test_a_bug_report_is_long_only_because_of_the_PASTE(self):
+        """Validated against 935 real prompts: raw length flagged bug reports whose bulk was a
+        pasted curl/stack-trace. Quizzing someone about approach when they handed you an error
+        is the false positive that teaches them to ignore the gate."""
+        report = ("fix the login error\n\n" + '{"dd":{"trace_id":"abc"},"msg":"boom"}' * 20)
+        self.assertNotIn("a long, multi-part ask", hooks._commitment_signals(report))
+
+    def test_long_PROSE_still_counts_as_multi_part(self):
+        ask = ("refactor the routing layer. " + "it needs retries, backoff, a metrics hook, "
+               "and the old path has to keep working while we migrate. " * 4)
+        self.assertIn("a long, multi-part ask", hooks._commitment_signals(ask))
+
+    def test_symptom_report_gets_diagnosis_not_a_design_quiz(self):
+        ctx = hooks._commitment_nudge(
+            "fix the migration bug, somehow every org fails with a 422", None)
+        self.assertIn("symptom to diagnose", ctx)
+        self.assertIn("systematic-debugging", ctx)
+        self.assertIn("Quiz only if", ctx)          # a symptom needs a fix, not a questionnaire
+        self.assertNotIn("brainstorming", ctx)
+
+    def test_build_request_gets_the_design_route(self):
+        ctx = hooks._commitment_nudge("can we somehow improve the statusline?", None)
+        self.assertIn("work to be built", ctx)
+        self.assertIn("brainstorming", ctx)
+
+    def test_cooldown_suppresses_an_immediate_repeat(self):
+        p = "can we somehow improve the routing?"
+        self.assertTrue(hooks._commitment_nudge(p, "sess-1"))
+        self.assertFalse(hooks._commitment_nudge(p, "sess-1"))   # clarification exchange
+
+    def test_hook_emits_nothing_for_a_lookup(self):
+        self.assertIsNone(run_hook(hooks.userpromptsubmit,
+                                   {"prompt": "what is the active workspace?",
+                                    "session_id": "sess-2"}))
+
+
+class TestSessionStartWiring(unittest.TestCase):  # G — survives /compact
+    """The committed SessionStart wiring must carry NO `matcher`.
+
+    Claude Code matches SessionStart on a `source` of startup|resume|clear|compact|fork,
+    and an ABSENT matcher matches all five. Pinning it to "startup" would still look fine
+    at session start but silently drop the persona identity + memory digest after the
+    first /compact — the failure mode is invisible, hence this guard.
+    See docs/token-efficiency.md ("What survives it").
+    """
+
+    def test_sessionstart_has_no_matcher(self):
+        import json
+        settings = json.loads((config.ROOT / ".claude" / "settings.json").read_text())
+        entries = settings.get("hooks", {}).get("SessionStart", [])
+        self.assertTrue(entries, "SessionStart wiring is missing from .claude/settings.json")
+        for e in entries:
+            self.assertNotIn("matcher", e,
+                             "SessionStart must stay unmatched so it re-fires on /compact")
+
+
+if __name__ == "__main__":
+    unittest.main()

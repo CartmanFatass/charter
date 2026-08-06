@@ -4,3 +4,8 @@ build/
 dist/
 *.egg-info/
 .venv/
+
+# Per-developer secret vaults + registry (plaintext secrets, tokens, file paths).
+# NEVER commit this — it holds credentials. Also where local session/usage state
+# (e.g. sessions/<id>.usage) lands when the CLI or its tests run against ROOT.
+/.edm/

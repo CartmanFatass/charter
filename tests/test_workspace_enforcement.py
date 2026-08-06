@@ -1,0 +1,110 @@
+"""Workspace enforcement hooks: the clone-edit → memo nudge (PostToolUse) and the
+debounced auto-save (Stop hook) gating."""
+
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from charter import config, hooks, workspace
+from charter import commands_workspace as cw
+from tests._isolation import PersonaIso, run_hook
+
+
+def _ctx(r):
+    return (r or {}).get("hookSpecificOutput", {}).get("additionalContext", "") if r else ""
+
+
+class TestCloneEditNudge(PersonaIso):
+    def _edit(self, path, session="s1"):
+        return run_hook(hooks.posttooluse,
+                        {"tool_name": "Write", "tool_input": {"file_path": path}, "session_id": session})
+
+    def test_live_workspace_clone_edit_nudges(self):
+        workspace.set_live("myws", True)  # only LIVE workspaces nudge for a shared memo
+        ctx = _ctx(self._edit("workspaces/myws/iam-service/src/main.py"))
+        self.assertIn("workspace memo", ctx)
+        self.assertIn("myws", ctx)
+        self.assertIn("iam-service", ctx)
+
+    def test_local_workspace_clone_edit_is_silent(self):
+        # LOCAL (default) → private → no "record a shared memo" nudge
+        self.assertEqual(self._edit("workspaces/localws/iam-service/a.py"), None)
+
+    def test_nudge_is_once_per_session_per_workspace(self):
+        workspace.set_live("myws", True)
+        self.assertTrue(_ctx(self._edit("workspaces/myws/iam-service/a.py")))   # first → nudge
+        self.assertEqual(self._edit("workspaces/myws/iam-service/b.py"), None)  # second → silent
+        self.assertEqual(self._edit("workspaces/myws/account-service/c.py"), None)  # same ws → silent
+
+    def test_a_different_live_workspace_nudges_again(self):
+        workspace.set_live("ws1", True)
+        workspace.set_live("ws2", True)
+        self.assertTrue(_ctx(self._edit("workspaces/ws1/repo/a.py")))
+        self.assertTrue(_ctx(self._edit("workspaces/ws2/repo/a.py")))  # different ws → nudges
+
+    def test_editing_workspace_memory_is_not_a_clone_nudge(self):
+        workspace.set_live("myws", True)
+        self.assertEqual(self._edit("workspaces/myws/memory/notes.md"), None)
+
+
+class TestAutosaveGating(unittest.TestCase):
+    """The Stop-hook autosave: no-op when nothing pending or within debounce; commits +
+    background-pushes when pending + debounce elapsed. Git + push are mocked."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = Path(tempfile.mkdtemp(prefix="edm-autosave-"))
+        self._orig = {k: getattr(config, k) for k in ("ROOT", "EDM_HOME", "WORKSPACES_DIR")}
+        config.ROOT = self.tmp
+        config.EDM_HOME = self.tmp / ".edm"
+        config.WORKSPACES_DIR = self.tmp / "workspaces"
+        # a workspace with a memory file so _ws_meta_paths is non-empty
+        (config.WORKSPACES_DIR / "default" / "memory").mkdir(parents=True)
+        (config.WORKSPACES_DIR / "default" / "memory" / "notes.md").write_text("x")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import shutil
+        for k, v in self._orig.items():
+            setattr(config, k, v)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, pending: bool, live: bool = True):
+        status = SimpleNamespace(stdout=(" M workspaces/default/memory/notes.md\n" if pending else ""))
+        with mock.patch.object(cw, "_git", return_value=status), \
+             mock.patch.object(cw, "commit_push", return_value=0) as cp, \
+             mock.patch.object(cw.subprocess, "Popen") as popen, \
+             mock.patch.object(cw.workspace, "is_live", return_value=live), \
+             mock.patch.object(cw.workspace, "resolve", return_value="default"):
+            cw.cmd_workspace_autosave(SimpleNamespace())
+        return cp, popen
+
+    def test_noop_when_nothing_pending(self):
+        cp, popen = self._run(pending=False)
+        cp.assert_not_called()
+        popen.assert_not_called()
+
+    def test_commits_and_bg_pushes_when_pending(self):
+        cp, popen = self._run(pending=True)
+        cp.assert_called_once()             # secret-scanned commit (no_push)
+        popen.assert_called_once()          # detached background push
+
+    def test_skips_local_workspace(self):
+        cp, popen = self._run(pending=True, live=False)  # LOCAL → never auto-committed
+        cp.assert_not_called()
+        popen.assert_not_called()
+
+    def test_debounce_skips_recent(self):
+        marker = config.EDM_HOME / "ws-autosave" / "default"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("now")            # fresh marker → within debounce window
+        cp, popen = self._run(pending=True)
+        cp.assert_not_called()
+        popen.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

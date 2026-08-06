@@ -1,0 +1,953 @@
+"""``edm persona`` commands: manage shared personas and use their vaults.
+
+Persona *definitions* are committed (``personas/<name>.md``); their *secrets*
+live in a local vault the definition names. ``edm persona secret …`` proxies to
+that vault, so an agent adopting a persona reads/writes only that persona's
+credentials — and, per the secrets contract, never sees the plaintext.
+"""
+
+from __future__ import annotations
+
+import os
+
+from . import commands_secrets, config, persona, trace, util
+from .secrets import base, registry
+
+_TEMPLATE = """---
+name: {name}
+role: {role}
+vault: {vault}
+---
+
+# {role}
+
+You are the **{name}** persona for EasyDMARC — {role}. When this persona is
+active, adopt this role: its responsibilities, focus, and conventions.
+
+## Responsibilities
+- (describe what this persona owns and does)
+
+## How to work as this persona
+- Focus repos: (which repos this role typically works in — see `edm status`)
+- Credentials: use `edm persona secret …` (this persona's vault: `{vault}`).
+  Never print secret values.
+- Conventions: (persona-specific norms, tools, definition of done)
+"""
+
+
+# --------------------------------------------------------------------------- #
+# management                                                                   #
+# --------------------------------------------------------------------------- #
+def cmd_persona_create(args) -> int:
+    if not persona.valid_name(args.name):
+        util.err(f"invalid persona name '{args.name}' (lowercase letters, digits, '.', '_', '-')")
+        return 1
+    p = persona.path(args.name)
+    if p.exists() and not args.force:
+        util.err(f"persona '{args.name}' already exists ({p.relative_to(config.ROOT)}). "
+                 "Edit it, or pass --force to overwrite.")
+        return 1
+
+    extends = getattr(args, "extends", None)
+    if extends and not persona.load(extends):
+        util.err(f"--extends '{extends}': no such persona to inherit from (see `edm persona list`).")
+        return 1
+
+    vault = args.vault or args.name
+    p = persona.dir_of(args.name) / "persona.md"  # always create in the directory layout
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = _TEMPLATE.format(name=args.name, role=args.role or args.name.title(), vault=vault)
+    if extends:
+        # inherit charter + tools from the parent; this file adds the child's specialization
+        text = text.replace(f"vault: {vault}\n", f"vault: {vault}\nextends: {extends}\n", 1)
+        text = text.replace(
+            "active, adopt this role: its responsibilities, focus, and conventions.",
+            f"active, adopt this role. It **inherits from `{extends}`** (that persona's charter + "
+            f"tools apply); the sections below are what THIS persona ADDS on top.", 1)
+    p.write_text(text)
+    persona.scaffold_memory(args.name)  # memory/ + refs/ (committed, with keep-files)
+    persona.ensure_shared()             # the cross-persona _shared/ namespace
+    util.ok(f"Created persona '{args.name}' → {p.parent.relative_to(config.ROOT)}/ "
+            "(persona.md + memory/ + refs/; edit the charter, then commit — personas are shared).")
+    if _write_agent(args.name) == "written":
+        util.info(f"  generated .claude/agents/{args.name}.md — invokable as subagent '{args.name}'.")
+
+    if args.with_vault:
+        cfg = {"file": str(config.VAULTS_DIR / f"{vault}.json")}
+        try:
+            registry.add_vault(vault, "plain-file", cfg, persona=args.name)
+            util.ok(f"Registered local vault '{vault}' (plain-file) for persona '{args.name}'.")
+        except base.VaultError as e:
+            util.warn(f"vault: {e}")
+    else:
+        util.info(f"Set up its vault locally when ready: "
+                  f"edm vault add {vault} --provider plain-file --persona {args.name}")
+
+    if args.use:
+        persona.set_active(args.name)
+        util.ok(f"Active persona set to '{args.name}'.")
+        _warn_env(args.name)
+    return 0
+
+
+def cmd_persona_list(args) -> int:
+    names = persona.list_personas()
+    active = persona.resolve_active()
+    if not names:
+        util.info('No personas yet. Create one: edm persona create <name> --role "<Role>"')
+        return 0
+    print(f"Active persona: {active or '—'}  (via {persona.source()})\n")
+    roles = {n: ((persona.load(n) or {"meta": {}})["meta"].get("role") or "") for n in names}
+    vaults = {n: (persona.vault_of(n) or "—") for n in names}
+    # dynamic column widths so long persona/role/vault names don't collide
+    nw = max([len("PERSONA")] + [len(n) for n in names]) + 2
+    rw = min(38, max([len("ROLE")] + [len(r) for r in roles.values()])) + 2
+    vw = max([len("VAULT")] + [len(v) for v in vaults.values()]) + 2
+    fmt = f"{{}}{{:<{nw}}}{{:<{rw}}}{{:<{vw}}}{{}}"
+    print(fmt.format("  ", "PERSONA", "ROLE", "VAULT", "VAULT STATUS"))
+    for n in names:
+        mark = "* " if n == active else "  "
+        print(fmt.format(mark, n, roles[n][:rw - 2], vaults[n], _vault_status(vaults[n])))
+    return 0
+
+
+def _vault_status(vault: str | None) -> str:
+    if not vault or vault == "—":
+        return "no vault"
+    try:
+        if vault not in registry.vaults():
+            return "not set up (local)"
+        _ok, detail = registry.provider_for(vault).health()
+        return detail
+    except base.VaultError as e:
+        return str(e)
+
+
+def cmd_persona_show(args) -> int:
+    d = persona.resolve(args.name)  # effective persona (inheritance applied)
+    if not d:
+        util.err(f"no persona '{args.name}'")
+        return 1
+    m = d["meta"]
+    print(f"{m.get('name', args.name)} — {m.get('role', '')}")
+    chain = d.get("lineage") or [args.name]
+    if len(chain) > 1:  # inherits: child → parent → …
+        print(f"inherits: {' → '.join(chain)}  (charter + tools merged below)")
+    vault = persona.vault_of(args.name)
+    if vault:
+        print(f"vault:   {vault}  ({_vault_status(vault)})")
+    tools = persona.tools_of(args.name)
+    if tools:
+        print(f"tools:   {', '.join(sorted(tools))}  (auto-approved when this persona is active)")
+    print(f"file:    {persona.path(args.name).relative_to(config.ROOT)}")
+    _print_memory_summary(args.name)
+    print()
+    print(d["charter"])
+    return 0
+
+
+def _print_memory_summary(name: str) -> None:
+    own = len(persona.memories(name))
+    shared = len(persona.memories(name, shared=True))
+    eph = len(persona.memories(name, ephemeral=True)) + len(persona.memories(name, shared=True, ephemeral=True))
+    refs = persona.refs_dir(name)
+    nrefs = len([p for p in refs.glob("*") if p.name != "README.md"]) if refs.exists() else 0
+    print(f"memory:  {own} own · {shared} shared (persistent) · {eph} ephemeral · {nrefs} refs")
+    print(f"         {persona.memory_dir(name).relative_to(config.ROOT)}/  ·  "
+          f"recall: edm persona recall {name}")
+
+
+def cmd_persona_use(args) -> int:
+    if not persona.load(args.name):
+        util.err(f"no persona '{args.name}' (create it: edm persona create {args.name})")
+        return 1
+    persona.set_active(args.name)
+    util.ok(f"Active persona set to '{args.name}'.")
+    _warn_env(args.name)
+    return 0
+
+
+def cmd_persona_current(args) -> int:
+    active = persona.resolve_active()
+    print(active or "(none)")
+    util.info(f"resolved via {persona.source()}")
+    return 0
+
+
+def cmd_persona_clear(args) -> int:
+    persona.clear_active()
+    util.ok("Active persona cleared.")
+    d = persona.default_persona()
+    if d:
+        util.info(f"Resolves to the committed default '{d}' now (personas/.default).")
+    return 0
+
+
+def cmd_persona_default(args) -> int:
+    """Show / set / clear the committed team-wide default persona (personas/.default) —
+    the one adopted when no --persona / $EDM_PERSONA / `edm persona use` is set."""
+    f = config.PERSONAS_DIR / ".default"
+    if getattr(args, "clear", False):
+        if f.exists():
+            f.unlink()
+            util.ok("Cleared the committed default persona (commit with `edm save`).")
+        else:
+            util.info("No committed default persona was set.")
+        return 0
+    if getattr(args, "name", None):
+        if not persona.load(args.name):
+            util.err(f"no persona '{args.name}' — create it first (`edm persona create {args.name}`).")
+            return 1
+        config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
+        f.write_text(args.name + "\n")
+        util.ok(f"Committed default persona set to '{args.name}' → personas/.default (shared; "
+                "commit with `edm save`).")
+        util.info("Overridden per-developer by `edm persona use` / $EDM_PERSONA / --persona.")
+        return 0
+    d = persona.default_persona()
+    if d:
+        print(d)
+        util.info("committed team-wide default (personas/.default). "
+                  "Change: edm persona default <name>  ·  clear: --clear")
+    else:
+        util.info("No committed default persona. Set one: edm persona default <name>")
+    return 0
+
+
+def _dependents_of(name: str) -> list[str]:
+    """Personas that would be left with a DANGLING reference if *name* went away —
+    either `extends: <name>` (inherits its charter) or `uses: …, <name>, …` (shares its
+    vault/tools). `edm persona lint` reports a dangling ref as an error, but only after
+    the fact; this lets `remove` refuse up front."""
+    out = []
+    for other in persona.list_personas():
+        if other == name:
+            continue
+        meta = (persona.load(other) or {}).get("meta", {})
+        if (meta.get("extends") or "").strip() == name:
+            out.append(f"{other} (extends)")
+            continue
+        uses = [u.strip() for u in (meta.get("uses") or "").split(",") if u.strip()]
+        if name in uses:
+            out.append(f"{other} (uses)")
+    return sorted(out)
+
+
+def cmd_persona_remove(args) -> int:
+    import shutil
+    if not persona.load(args.name):
+        util.err(f"no persona '{args.name}'")
+        return 1
+    deps = _dependents_of(args.name)
+    if deps and not getattr(args, "force", False):
+        util.err(f"Refusing to remove '{args.name}' — it is still referenced by:")
+        for d in deps:
+            util.err(f"  {d}")
+        util.info("Repoint or remove those first (an `extends:` parent's charter is inherited, "
+                  "so folding it into the child before removing keeps the discipline).")
+        util.info(f"Override with: edm persona remove {args.name} --force")
+        return 1
+    if persona.is_dir_layout(args.name):
+        d = persona.dir_of(args.name)
+        shutil.rmtree(d)  # removes persona.md + committed memory/ + refs/
+        util.ok(f"Removed persona directory {d.relative_to(config.ROOT)}/ "
+                "(definition, memory, and refs — commit the deletion).")
+    else:
+        p = persona.path(args.name)
+        p.unlink()
+        util.ok(f"Removed persona definition {p.relative_to(config.ROOT)} (commit the deletion).")
+    if _remove_agent(args.name):
+        util.info(f"  also removed generated .claude/agents/{args.name}.md.")
+    util.info("Its local vault (if any) is left untouched — remove with `edm vault remove <vault>`.")
+    if persona.resolve_active() == args.name and persona.source() == "active-file":
+        persona.clear_active()
+        util.info("Active persona cleared.")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# persona-scoped secrets (proxy to the persona's vault)                        #
+# --------------------------------------------------------------------------- #
+def _resolve_vault(args) -> str | None:
+    name = persona.resolve_active(getattr(args, "persona", None))
+    if not name:
+        util.err("no active persona. Select one: edm persona use <name>  (or pass --persona).")
+        return None
+    vault = persona.vault_of(name)
+    if not vault:
+        util.err(f"persona '{name}' has no vault. Add `vault:` to its file, or "
+                 f"`edm vault add <v> --persona {name}`.")
+        return None
+    if vault not in registry.vaults():
+        util.err(f"persona '{name}' vault '{vault}' isn't set up on this machine. "
+                 f"Create it: edm vault add {vault} --provider plain-file --persona {name}.")
+        return None
+    return vault
+
+
+def _proxy(secret_fn):
+    def run(args) -> int:
+        vault = _resolve_vault(args)
+        if not vault:
+            return 1
+        args.vault = vault
+        return secret_fn(args)
+    return run
+
+
+cmd_persona_secret_get = _proxy(commands_secrets.cmd_secret_get)
+cmd_persona_secret_set = _proxy(commands_secrets.cmd_secret_set)
+cmd_persona_secret_list = _proxy(commands_secrets.cmd_secret_list)
+cmd_persona_secret_rm = _proxy(commands_secrets.cmd_secret_rm)
+cmd_persona_secret_cp = _proxy(commands_secrets.cmd_secret_cp)
+cmd_persona_secret_exec = _proxy(commands_secrets.cmd_secret_exec)
+cmd_persona_secret_audit = _proxy(commands_secrets.cmd_secret_audit)
+
+
+def _warn_env(name: str) -> None:
+    env = os.environ.get("EDM_PERSONA")
+    if env and env.strip() != name:
+        util.warn(f"$EDM_PERSONA='{env}' is set and takes precedence — commands use "
+                  f"'{env}', not '{name}'.")
+
+
+# --------------------------------------------------------------------------- #
+# sync-agents: generate a Claude Code sub-agent per persona                    #
+# --------------------------------------------------------------------------- #
+_AGENT_MARKER = "GENERATED by `edm persona sync-agents`"
+
+
+def _agents_dir():
+    return config.ROOT / ".claude" / "agents"
+
+
+def _yaml_str(s: str) -> str:
+    s = (s or "").replace("\n", " ").strip()
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _agent_description(name: str, meta: dict) -> str:
+    role = meta.get("role") or name
+    when = (meta.get("delegate-when") or "").strip()
+    tools = meta.get("tools")
+    tail = (f" Runs {tools} and pulls credentials from the '{name}' vault."
+            if tools else f" Pulls credentials from the '{name}' vault.")
+    # The `delegate-when` triggers are what let the agent auto-route work here; a
+    # persona without them falls back to a generic (weakly-triggering) description.
+    if when:
+        return f"The {role} persona (EasyDMARC). Delegate to it for {when}.{tail}"
+    return f"The {role} persona. Delegate {role.lower()} tasks to it.{tail}"
+
+
+def _render_agent(name: str, meta: dict, charter: str) -> str:
+    role = meta.get("role") or name.title()
+    desc = meta.get("agent-description") or meta.get("description") or _agent_description(name, meta)
+    fm = [f"name: {name}", f"description: {_yaml_str(desc)}"]
+    if meta.get("agent-tools"):
+        fm.append(f"tools: {meta['agent-tools']}")  # narrow the toolset; omit = inherit all
+    for k in ("model", "color", "memory"):  # pass through when the charter sets them
+        if meta.get(k):
+            fm.append(f"{k}: {meta[k]}")
+
+    uses = [u.strip() for u in (meta.get("uses") or "").split(",") if u.strip() and u.strip() != name]
+    uses_note = ""
+    if uses:
+        joined = ", ".join(f"`{u}`" for u in uses)
+        uses_note = (
+            f"\n- **You may also use these personas: {joined}.** Read their vault "
+            f"(`edm persona secret --persona <name> …`), run their tools, or delegate a "
+            f"sub-task to their sub-agent (Agent tool, `subagent_type: <name>`)."
+        )
+
+    # Generic capability handoff — every persona gets this, so it hands work outside its
+    # role to the owning persona instead of guessing with partial credentials. Awareness,
+    # not access: delegation runs the owner with *its own* vault; only `uses:` shares creds.
+    try:
+        infra = "`devops` owns production cluster/logs/kubectl access. " \
+            if ("devops" in persona.list_personas() and name != "devops") else ""
+    except Exception:
+        infra = ""
+    handoff = (
+        f"\n- **Outside your domain, hand off — don't guess with partial credentials.** "
+        f"{infra}Delegate to the owner via the Agent tool (`subagent_type: <persona>`; it runs "
+        f"with *its own* vault — you never see its secrets); `edm persona list` shows who owns "
+        f"what. Never `edm persona use` to switch the active persona — that's user-request-only."
+    )
+
+    try:
+        rel = persona.def_path(name).relative_to(config.ROOT)
+    except ValueError:
+        rel = f"personas/{name}/persona.md"
+
+    mem = f"""
+## Memory
+- **Search before acting** — never bulk-read the indexes: `edm recall "<keywords>"` searches
+  every base at once (your memory, shared, the active workspace) and labels hits by source.
+- **Record what's durable** as you learn: `edm persona remember {name} "<one fact>"` — one
+  curated idea each; `--shared` if every persona benefits, `--ephemeral` for session scratch.
+  Persistent memory commits + pushes itself immediately, so it reaches the team as you write it.
+- **Never** put secrets in memory/refs — credentials live only in the vault."""
+
+    body = f"""<!-- {_AGENT_MARKER} from {rel} — edit the persona, not this file. -->
+
+This sub-agent acts as the **{name}** persona for EasyDMARC — {role} — in an
+isolated context. Adopt the charter below as your role.
+
+{charter}
+
+## As a persona sub-agent
+- **🔑 git = the glab token over HTTPS. Never SSH, never signing.** Repos are pre-configured, so
+  a plain `git push` works. If git ever asks for a key or passphrase, run `edm git-policy
+  --apply` — don't reach for SSH (`glab auth status` checks the credential).
+- **Credentials** come only from this persona's vault, and are **never printed**:
+  `edm persona secret --persona {name} <list|exec|cp> …` — use `exec`/`cp`, never `--reveal`.
+  Run tools through it, e.g. `… exec --file KUBECONFIG=kubeconfig -- kubectl -n <ns> get pods`{uses_note}{handoff}
+- Follow the umbrella's conventions (see CLAUDE.md); report results concisely to the caller.
+{mem}
+"""
+    return "---\n" + "\n".join(fm) + "\n---\n" + body
+
+
+def _write_agent(name: str) -> str | None:
+    """Generate/refresh one persona's sub-agent. Returns 'written'|'skipped'|None.
+    Uses the RESOLVED persona (inheritance applied: merged charter + unioned tools)."""
+    d = persona.resolve(name)
+    if not d:
+        return None
+    path = _agents_dir() / f"{name}.md"
+    if path.exists() and _AGENT_MARKER not in path.read_text():
+        util.warn(f"{path.relative_to(config.ROOT)} exists and isn't generated — "
+                  "leaving the hand-written agent alone.")
+        return "skipped"
+    _agents_dir().mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_agent(name, d["meta"], d["charter"]))
+    return "written"
+
+
+def _remove_agent(name: str) -> bool:
+    """Remove a persona's generated agent (never a hand-written one). Returns True if removed."""
+    path = _agents_dir() / f"{name}.md"
+    if path.exists() and _AGENT_MARKER in path.read_text():
+        path.unlink()
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# memory: persistent (committed) + ephemeral (session scratch) + activity log  #
+# --------------------------------------------------------------------------- #
+def _require(name: str) -> bool:
+    if not persona.load(name):
+        util.err(f"no persona '{name}' (create it: edm persona create {name})")
+        return False
+    return True
+
+
+def cmd_persona_remember(args) -> int:
+    name = persona.resolve_active(getattr(args, "persona", None)) if not args.name else args.name
+    if not name or not _require(name):
+        return 1
+    try:
+        p = persona.remember(name, args.text, title=args.title,
+                             shared=args.shared, ephemeral=args.ephemeral)
+    except ValueError as e:
+        util.err(str(e))
+        return 1
+    where = ("shared " if args.shared else "") + ("ephemeral" if args.ephemeral else "persistent")
+    util.ok(f"Remembered ({where}) → {p.relative_to(config.ROOT) if _under_root(p) else p}")
+    if args.ephemeral:
+        return 0  # session scratch, gitignored — nothing to commit
+    if getattr(args, "no_sync", False):
+        util.info("  (--no-sync) recorded locally; share later with: edm persona memory-sync.")
+        return 0
+    # Reactive: the persistent memory reaches the shared repo the moment it's written.
+    from .commands import commit_memory_reactive
+    idx = persona.index_of(persona.memory_dir(name, args.shared))
+    rels = [str(p.relative_to(config.ROOT)), str(idx.relative_to(config.ROOT))]
+    commit_memory_reactive(rels, f"persona({name}): {p.stem}")
+    return 0
+
+
+def _under_root(p) -> bool:
+    try:
+        p.relative_to(config.ROOT)
+        return True
+    except ValueError:
+        return False
+
+
+def _snippet(path, width=90) -> str:
+    try:
+        for ln in path.read_text().splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and not ln.startswith("_"):
+                return ln[:width] + ("…" if len(ln) > width else "")
+    except OSError:
+        pass
+    return ""
+
+
+def cmd_persona_recall(args) -> int:
+    name = args.name or persona.resolve_active()
+    if not name or not _require(name):
+        return 1
+
+    # Retrieval: pull just the relevant memories instead of the whole index.
+    if getattr(args, "query", None):
+        hits = persona.search_memories(name, args.query, limit=args.log or 8)
+        if not hits:
+            util.info(f"no memory of '{args.query}' for '{name}'.")
+            return 0
+        print(f"── memory matching '{args.query}' ({len(hits)})")
+        for p, title, score in hits:
+            rel = p.relative_to(config.ROOT) if _under_root(p) else p
+            print(f"  [{score:>3}] {title}\n        {rel}\n        {_snippet(p)}")
+        return 0
+
+    printed = False
+    for shared, label in ((False, name), (True, "_shared (all personas)")):
+        idx = persona.index_of(persona.memory_dir(name, shared=shared))
+        mems = persona.memories(name, shared=shared)
+        if mems:
+            printed = True
+            print(f"── persistent memory · {label} ({len(mems)}) "
+                  f"[{persona.memory_dir(name, shared=shared).relative_to(config.ROOT)}/]")
+            print(idx.read_text().strip() if idx.exists() else "(no index)")
+            print()
+    eph = persona.memories(name, ephemeral=True) + persona.memories(name, shared=True, ephemeral=True)
+    if eph:
+        printed = True
+        print(f"── ephemeral scratch · this session ({len(eph)})")
+        for p in eph:
+            print(f"- {p.stem}")
+        print()
+    acts = trace.for_persona(name, n=args.log)
+    if acts:
+        printed = True
+        print(f"── recent activity · this session ({len(acts)})")
+        for r in acts:
+            extra = "  ".join(f"{k}={v}" for k, v in r.items() if k not in ("ts", "event", "persona"))
+            print(f"  {r.get('ts', '')}  {r['event']:10} {extra}")
+    if not printed:
+        util.info(f"persona '{name}' has no memories yet. "
+                  f"Add one: edm persona remember {name} \"<fact>\"")
+    return 0
+
+
+def cmd_persona_forget(args) -> int:
+    name = args.name
+    if not _require(name):
+        return 1
+    if persona.forget(name, args.slug, shared=args.shared, ephemeral=args.ephemeral):
+        util.ok(f"Forgot '{args.slug}' from {name}'s "
+                f"{'ephemeral' if args.ephemeral else 'persistent'} memory.")
+        return 0
+    util.err(f"no memory '{args.slug}' in that store")
+    return 1
+
+
+_MEM_PATH = __import__("re").compile(r"personas/[^/]+/(?:memory|refs)/")
+
+
+def _pending_memory(root) -> list[str]:
+    """Repo-relative persona memory/refs paths with uncommitted changes."""
+    import subprocess
+    r = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--", "personas"],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=10)
+    out = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip()
+        if " -> " in path:  # rename → take the destination
+            path = path.split(" -> ", 1)[1]
+        if _MEM_PATH.search("/" + path):
+            out.append(path)
+    return out
+
+
+def cmd_persona_memory_sync(args) -> int:
+    """Commit (and push) all pending persona memory/refs in one safe step — the counterpart
+    to `remember`: durable knowledge gets shared instead of sitting uncommitted. Refuses if a
+    file looks like it holds a secret (those belong in the vault, never in memory)."""
+    import subprocess
+    from .hooks import _secret_kind
+
+    root = config.ROOT
+    changed = _pending_memory(root)
+    if not changed:
+        util.ok("No uncommitted persona memory/refs — nothing to sync.")
+        return 0
+
+    flagged = []
+    for p in changed:
+        try:
+            kind = _secret_kind((root / p).read_text())
+        except OSError:
+            kind = None
+        if kind:
+            flagged.append((p, kind))
+    if flagged:
+        util.err("Refusing to commit — a secret-shaped value in persona memory/refs:")
+        for p, kind in flagged:
+            util.err(f"  {p}  ({kind})")
+        util.info("Secrets live only in the vault (`edm persona secret set`). Remove it, then retry.")
+        return 1
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(root), *a],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    git("add", "--", *changed)
+    touched = sorted({p.split("/")[1] for p in changed if p.startswith("personas/")})
+    body = (f"personas: sync memory/refs ({', '.join(touched)})\n\n"
+            f"{len(changed)} persona memory/ref file(s) committed so the team's personas share "
+            f"the knowledge. Synced via `edm persona memory-sync`.\n\n"
+            f"Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>\n")
+    cache = config.EDM_HOME / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    mf = cache / "memsync-msg.txt"
+    mf.write_text(body)
+    git("commit", "-q", "-F", str(mf))
+    if git("diff", "--cached", "--quiet").returncode != 0:  # signing failed → staged remains
+        git("commit", "--no-gpg-sign", "-q", "-F", str(mf))
+    util.ok(f"Committed {len(changed)} memory/ref file(s) for: {', '.join(touched)}.")
+
+    if args.no_push:
+        util.info("Skipped push (--no-push).")
+        return 0
+    p = git("push", "origin", "HEAD")
+    if p.returncode == 0:
+        util.ok("Pushed to origin.")
+    else:
+        util.warn("Committed locally, but push failed (check git auth). Tail:")
+        for line in p.stdout.splitlines()[-3:]:
+            util.warn("  " + line)
+    return 0
+
+
+def cmd_persona_dedupe(args) -> int:
+    name = args.name or persona.resolve_active()
+    if not name or not _require(name):
+        return 1
+    dupes = persona.find_duplicates(name, threshold=args.threshold)
+    if not dupes:
+        util.ok(f"no near-duplicate memories for '{name}' (threshold {args.threshold}).")
+        return 0
+    print(f"Near-duplicate memory pairs for '{name}' (Jaccard ≥ {args.threshold}):\n")
+    for jac, pa, ta, pb, tb in dupes:
+        ra = pa.relative_to(config.ROOT) if _under_root(pa) else pa
+        rb = pb.relative_to(config.ROOT) if _under_root(pb) else pb
+        print(f"  {jac:.0%}  {ta}\n        ↔ {tb}\n        {ra}\n        {rb}\n")
+    util.info("Review, then drop one: edm persona forget <name> <slug> [--shared]")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# lint: deterministic config eval for personas (routing/guards are in the tests) #
+# --------------------------------------------------------------------------- #
+def _agent_sync_issues(name: str) -> list[tuple[str, str]]:
+    """Is the generated .claude/agents/<name>.md in sync with the persona?"""
+    d = persona.resolve(name)  # resolved, so a parent charter/tool change marks children stale
+    if not d:
+        return []
+    path = _agents_dir() / f"{name}.md"
+    if not path.exists():
+        return [("warn", "no generated sub-agent — run `edm persona sync-agents`")]
+    cur = path.read_text()
+    if _AGENT_MARKER not in cur:
+        return []  # hand-written agent — never touched
+    if cur.strip() != _render_agent(name, d["meta"], d["charter"]).strip():
+        return [("warn", "generated sub-agent is stale — run `edm persona sync-agents`")]
+    return []
+
+
+def cmd_persona_lint(args) -> int:
+    names = [args.name] if getattr(args, "name", None) else persona.list_personas()
+    if not names:
+        util.info("No personas to lint.")
+        return 0
+    errors = 0
+    for n in names:
+        issues = list(persona.lint(n)) + _agent_sync_issues(n)
+        if not issues:
+            util.ok(f"{n}: ok")
+            continue
+        for level, msg in issues:
+            if level == "error":
+                errors += 1
+                util.err(f"{n}: {msg}")
+            else:
+                util.warn(f"{n}: {msg}")
+    if errors:
+        util.err(f"{errors} error(s) — dangling reuse or unloadable persona.")
+        return 1
+    return 0
+
+
+def cmd_persona_stats(args) -> int:
+    """Roster health mined from committed memory — a persona's memory IS its activity
+    trace, so this is the usage + (in-corpus) quality signal for the steward's observe
+    loop. Read-only. Sorted by volume; flags idle/dormant personas as prune candidates."""
+    names = [args.name] if getattr(args, "name", None) else persona.list_personas()
+    if not names:
+        util.info("No personas yet.")
+        return 0
+    if not getattr(args, "name", None):
+        names = names + [config.SHARED_PERSONA]  # include the shared namespace
+    from . import dispatch
+    rows = [persona.stats(n, recent_days=getattr(args, "recent_days", 14)) for n in names]
+    rows.sort(key=lambda r: (-r["count"], r["persona"]))
+    # DISPATCH is the signal memory volume is blind to: a persona can hold plenty of
+    # memory and still never be *used*, while the work it owns routes to a generic agent.
+    disp = dispatch.tally()
+    glyph = {"active": "●", "idle": "○", "dormant": "✗",
+             "orchestrator": "⬡", "standby": "◇", "advisory": "◇"}
+    print(f"{'PERSONA':<28}{'MEM':>5}{'RECENT':>8}{'VERIFY':>8}{'DUP':>6}{'DISP':>6}  STATUS")
+    dormant = idle = unused = 0
+    for r in rows:
+        v = f"{r['verify_pct']}%" if r["verify_pct"] is not None else "—"
+        d = f"{r['dup_pct']}%" if r["dup_pct"] is not None else "—"
+        rec = f"{r['recent']}" if r["count"] else "—"
+        n_disp = disp.get(r["persona"], 0)
+        shared_row = r["persona"] == config.SHARED_PERSONA
+        # "never dispatched" outranks the memory-derived status — it's the louder problem.
+        status = r["status"]
+        if not shared_row and n_disp == 0 and disp:
+            status = "never dispatched"
+            unused += 1
+        print(f"{r['persona']:<28}{r['count']:>5}{rec:>8}{v:>8}{d:>6}"
+              f"{(n_disp if not shared_row else '—'):>6}  "
+              f"{glyph.get(status, '⚑' if status == 'never dispatched' else '·')} {status}")
+        dormant += r["status"] == "dormant"
+        idle += r["status"] == "idle"
+    print()
+    util.info(f"RECENT = memories in the last {getattr(args, 'recent_days', 14)} days · "
+              f"VERIFY = share carrying a verification marker (quality proxy) · DUP = share "
+              f"in a near-dup pair (noise) · DISP = times DISPATCHED as a sub-agent (committed "
+              f"tally) · ⬡/◇ = memory-blind role (activity: profile), not judged by volume.")
+    gen, total = dispatch.generic_share()
+    if total:
+        util.info(f"Routing: {total - gen}/{total} dispatches went to a persona · {gen} to a "
+                  f"generic agent ({100 * gen // total}%). A high generic share means the work "
+                  f"a persona owns is being done without it.")
+    else:
+        util.info("No dispatches recorded yet — the tally starts filling as sub-agents are "
+                  "dispatched (`edm persona dispatch-backfill` seeds it from past sessions).")
+    if unused:
+        util.warn(f"{unused} persona(s) NEVER dispatched — they exist, lint green, and are "
+                  f"unused. Check whether their work is routing to a generic agent instead.")
+    if dormant:
+        util.warn(f"{dormant} dormant persona(s) — a REAL prune signal (old, zero memory, no "
+                  f"declared activity: profile). The steward can quiz-propose removal (cite this).")
+    if idle:
+        util.info(f"{idle} idle persona(s) — have memory but none recent; watch, don't prune yet.")
+    return 0
+
+
+def cmd_persona_dispatch_backfill(args) -> int:
+    """Seed the committed dispatch tally from this project's past transcripts, so the
+    routing baseline exists now rather than a week from now. Reads only tool name,
+    subagent_type and timestamp — no prompt text ever reaches the store."""
+    from . import dispatch
+    from .commands import commit_memory_reactive
+    imported, skipped = dispatch.backfill()
+    if not imported and not skipped:
+        util.warn(f"No dispatches found in {dispatch._transcript_dir()} — nothing to seed.")
+        return 0
+    util.ok(f"Seeded {imported} past dispatch(es) into the committed tally.")
+    if skipped:
+        util.info(f"  skipped {skipped} already covered by live records (no double-count).")
+    t = dispatch.tally()
+    gen, total = dispatch.generic_share()
+    for agent, n in t.most_common():
+        mark = "  (generic)" if agent in dispatch.GENERIC else ""
+        util.info(f"  {n:>5}  {agent}{mark}")
+    if total:
+        util.info(f"Baseline: {100 * gen // total}% of dispatches went to a generic agent.")
+    rel = [str(p.relative_to(config.ROOT)) for p in sorted(dispatch._dir().glob("*.jsonl"))]
+    if rel:
+        commit_memory_reactive(rel, f"dispatch: backfill {imported} past dispatch(es)")
+    return 0
+
+
+def cmd_persona_optimize(args) -> int:
+    """Optimize persona memory (one, or --all): analyze the corpus, AUTO-apply only the
+    tier-1 safe & reversible ops with --apply (collapse exact duplicates → archive the
+    redundant copies; repair the index), and print the tier-2 PROPOSALS (near-dup merges,
+    stale archives, charter promotions) for the steward to quiz on — never auto-applied,
+    never a silent charter edit. Read-only without --apply. Mirrors steward's Hat 2 model."""
+    from . import curate
+    from .commands import commit_memory_reactive
+    names = [args.name] if getattr(args, "name", None) else persona.list_personas()
+    if not names:
+        util.info("No personas to optimize.")
+        return 0
+    if getattr(args, "all", False) or not getattr(args, "name", None):
+        if config.SHARED_PERSONA not in names:
+            names = names + [config.SHARED_PERSONA]
+    apply = getattr(args, "apply", False)
+    stale_days = getattr(args, "stale_days", 90)
+    total_actions = 0
+    for n in names:
+        shared = n == config.SHARED_PERSONA
+        mdir = persona.memory_dir(n, shared=shared)
+        rep = curate.report(mdir, stale_days=stale_days)
+        if rep["total"] == 0:
+            continue
+        st = persona.stats(n, shared=shared)
+        print(f"\n◆ {n}  ({rep['total']} memories · {st['verify_pct'] or 0}% verified · "
+              f"{len(rep['exact_dups'])} exact-dup group(s) · {len(rep['near_dups'])} near-dup "
+              f"pair(s) · {len(rep['stale'])} stale)")
+        if apply:
+            actions = curate.apply_safe(mdir)
+            for a in actions:
+                util.ok(f"  auto: {a}")
+            total_actions += len(actions)
+            if actions:  # reactive: the persona's committed memory changed → share it now
+                rel = str(mdir.relative_to(config.ROOT))
+                commit_memory_reactive([rel], f"persona({n}): curate — {len(actions)} safe op(s)")
+            rep = curate.report(mdir, stale_days=stale_days)  # refresh for proposals
+        props = curate.proposals(rep)
+        if props:
+            print("  proposals (steward: quiz the engineer — not auto-applied):")
+            for p in props:
+                print(f"    ? {p}")
+        elif apply:
+            util.info("  clean — nothing to propose.")
+    if not apply:
+        util.info("\nRead-only. Re-run with --apply to auto-apply the safe/reversible ops "
+                  "(exact-dup collapse + index repair); proposals always stay manual.")
+    elif total_actions == 0:
+        util.info("\nNo safe ops to apply — corpus is already tidy.")
+    return 0
+
+
+def cmd_persona_log(args) -> int:
+    """Record a manual `note` into the session trace, or show this persona's activity
+    from it. (One activity record: the trace — see `edm trace`.)"""
+    name = args.name or persona.resolve_active()
+    if not name or not _require(name):
+        return 1
+    if args.message:
+        trace.record("note", persona=name, msg=args.message)
+        util.ok(f"Noted to {name}'s session activity (see `edm trace` / `edm persona recall {name}`).")
+        return 0
+    entries = trace.for_persona(name, n=args.n)
+    if not entries:
+        util.info(f"no activity for '{name}' in this session yet.")
+        return 0
+    for r in entries:
+        extra = "  ".join(f"{k}={v}" for k, v in r.items() if k not in ("ts", "event", "persona"))
+        print(f"{r.get('ts', '')}  {r['event']:10} {extra}")
+    return 0
+
+
+def cmd_persona_migrate(args) -> int:
+    persona.ensure_shared()  # make sure the cross-persona namespace exists
+    names = [args.name] if args.name else persona.list_personas()
+    migrated, already = [], []
+    for n in names:
+        r = persona.migrate(n)
+        if r == "migrated":
+            migrated.append(n)
+        elif r == "already":
+            already.append(n)
+            persona.scaffold_memory(n)  # backfill memory/refs on already-dir personas
+    if migrated:
+        util.ok(f"Migrated to directory layout: {', '.join(migrated)}")
+        _sync_all_agents()  # regenerate so the GENERATED marker points at persona.md
+    if already:
+        util.info(f"Already directory-layout: {', '.join(already)}")
+    if not migrated and not already:
+        util.info("No personas to migrate.")
+    util.info("Review with `git status` and commit the moves + scaffolding.")
+    return 0
+
+
+def _sync_all_agents() -> None:
+    for n in persona.list_personas():
+        _write_agent(n)
+
+
+def cmd_trace(args) -> int:
+    """Observability: show a session's activity trace (guard denials, tool approvals,
+    secret warnings, memory writes, persona switches) — raw or aggregated."""
+    sess = getattr(args, "session", None) or trace._session()
+    events = trace.read(sess)
+    if not events:
+        avail = ", ".join(trace.sessions()) or "none"
+        util.info(f"no trace for session '{sess}'. Sessions with a trace: {avail}")
+        return 0
+    if getattr(args, "summary", False):
+        from collections import Counter
+        by_event = Counter(e["event"] for e in events)
+        personas = sorted({e.get("persona") for e in events if e.get("persona")})
+        tools = Counter(e["tool"] for e in events if e.get("event") == "allow" and e.get("tool"))
+        denies = [e for e in events if e["event"] == "deny"]
+        warns = [e for e in events if e["event"] == "secret-warn"]
+        print(f"session {sess}: {len(events)} events")
+        print("  by event : " + ", ".join(f"{k}={v}" for k, v in by_event.most_common()))
+        if personas:
+            print("  personas : " + ", ".join(personas))
+        if tools:
+            print("  approved : " + ", ".join(f"{k}×{v}" for k, v in tools.most_common()))
+        if denies:
+            print(f"  guard denials ({len(denies)}):")
+            for e in denies[-5:]:
+                print(f"    {e.get('ts', '')}  {e.get('reason', '')}")
+        if warns:
+            print(f"  secret warnings ({len(warns)}): "
+                  + ", ".join(w.get("file", "") for w in warns[-5:]))
+        return 0
+    shown = events[-args.n:] if getattr(args, "n", 0) else events
+    for e in shown:
+        extra = "  ".join(f"{k}={v}" for k, v in e.items() if k not in ("ts", "event"))
+        print(f"{e.get('ts', '')}  {e['event']:12} {extra}")
+    return 0
+
+
+def cmd_persona_gc(args) -> int:
+    """Hidden: prune ephemeral scratch from ended sessions (SessionStart hook)."""
+    current = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not current:
+        try:
+            import sys, json as _json
+            current = (_json.load(sys.stdin) or {}).get("session_id")
+        except Exception:
+            current = None
+    n = persona.gc_ephemeral(current)
+    if n:
+        util.info(f"pruned {n} ended-session ephemeral store(s)")
+    return 0
+
+
+def cmd_persona_sync_agents(args) -> int:
+    one = getattr(args, "persona", None)
+    if one and not persona.load(one):
+        util.err(f"no persona '{one}'")
+        return 1
+    names = [one] if one else persona.list_personas()
+    if not names:
+        util.info("No personas to sync. Create one first: edm persona create <name>.")
+        return 0
+
+    written = [n for n in names if _write_agent(n) == "written"]
+
+    removed = []
+    if not one and _agents_dir().exists():  # full sync also prunes orphaned generated agents
+        existing = set(persona.list_personas())
+        for f in _agents_dir().glob("*.md"):
+            if f.stem not in existing and _AGENT_MARKER in f.read_text():
+                f.unlink()
+                removed.append(f.stem)
+
+    util.ok(f"Synced {len(written)} persona sub-agent(s) → "
+            f".claude/agents/ ({', '.join(written) or 'none'})")
+    if removed:
+        util.info("Removed stale generated agents: " + ", ".join(removed))
+    for n in written:
+        util.info(f"  invoke '{n}' via the Agent/Task tool (subagent_type: {n})")
+    if written:
+        util.info("New/changed agents load on the next Claude Code session (restart to use now).")
+    return 0
