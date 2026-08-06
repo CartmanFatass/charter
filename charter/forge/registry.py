@@ -5,6 +5,8 @@ record carries a ``forge`` stamp so a merged, multi-forge inventory stays unambi
 """
 from __future__ import annotations
 
+import re
+
 from .base import Forge
 from .github import GitHubForge
 from .gitlab import GitLabForge
@@ -56,11 +58,58 @@ def for_host(url: str) -> Forge | None:
     return None
 
 
+def _default_forges() -> dict[str, Forge]:
+    """``host -> Forge`` for every registered kind's DEFAULT host (from :data:`KINDS`,
+    so a new forge kind is covered automatically the day it's registered — never a
+    hardcoded literal)."""
+    return {cls().host: cls() for cls in KINDS.values()}
+
+
+def declared_forges(root) -> tuple[dict[str, Forge], list[str]]:
+    """``(host -> Forge, errors)`` for every ``[[forge]]`` block DECLARED in *root*'s own
+    ``charter.toml`` — resolved **per block**, so one broken block can never take a good
+    sibling block down with it.
+
+    Before this, a single malformed block (a typo'd ``kind``, a missing field) made the
+    WHOLE declared set vanish: :func:`forges_for` raised on the first bad block, which
+    aborted the loop before any later ``dict`` update happened — including for perfectly
+    good blocks that came before or after it in the same file. A guard that degrades to
+    LESS coverage on a partial config error is worse than no guard, because it still
+    looks present (see ``known_forges``/``hooks._known_forges``, which is what actually
+    denies the SSH bypass). This is the resilient replacement: every block is attempted
+    independently, a bad one is recorded in *errors* and skipped, and every block that
+    DID resolve still ends up in the returned mapping.
+
+    Only when ``charter.toml`` itself can't be read/parsed at all (truly malformed TOML,
+    or a schema newer than this charter understands) is there no per-block salvage to
+    do — ``instance.load`` raises before any block is ever seen, so the whole widening is
+    unavailable that time; that failure is reported as a single entry in *errors* too.
+    Never raises — callers (the PreToolUse guard) must never be broken by a bad file."""
+    try:
+        from .. import instance
+        cfg = instance.load(root)
+    except Exception as e:
+        return {}, [f"charter.toml: {e}"]
+    forges: dict[str, Forge] = {}
+    errors: list[str] = []
+    for i, block in enumerate(cfg.get("forge") or []):
+        try:
+            if not isinstance(block, dict):
+                raise ValueError(f"[[forge]] block {i} is not a table")
+            forge = _build(block.get("kind") or _DEFAULT_KIND, block.get("host"))
+        except Exception as e:
+            errors.append(f"[[forge]] block {i}: {e}")
+            continue
+        forges[forge.host] = forge
+    return forges, errors
+
+
 def known_forges(root) -> dict[str, Forge]:
     """``host -> Forge`` for every host this control plane's one-credential policy
-    covers: every registered kind's DEFAULT host (from :data:`KINDS`, so a new forge kind
-    is covered automatically the day it's registered — never a hardcoded literal),
-    widened by *root*'s own ``charter.toml`` ``[[forge]]`` blocks. That widening is what
+    covers: every registered kind's DEFAULT host, widened by *root*'s own
+    ``charter.toml`` ``[[forge]]`` blocks (:func:`declared_forges` — a DECLARED host wins
+    over a same-named default, so a self-hosted GitLab declared as ``gitlab.com`` would
+    still take priority, though that's not the normal case). That widening is what
     recognises a DECLARED self-hosted host (``host = "git.internal"``), which no class's
     default host can ever match on its own.
 
@@ -69,19 +118,61 @@ def known_forges(root) -> dict[str, Forge]:
     so the same host set backs both the denial and the "is this repo compliant" check —
     they can never drift apart.
 
-    Best-effort: reading ``charter.toml`` never raises. This runs on every Bash
-    PreToolUse call and every ``git-policy`` check, both of which must degrade to "just
-    the default hosts" — never raise or block — on a missing/unreadable/malformed file.
-    """
-    forges: dict[str, Forge] = {cls().host: cls() for cls in KINDS.values()}
+    Best-effort and never raises. A malformed/unreadable ``charter.toml`` degrades to
+    just the default hosts (:func:`declared_forges` already handles that); one broken
+    ``[[forge]]`` block degrades only itself — every OTHER declared host, and the class
+    defaults, still come back. This runs on every Bash PreToolUse call, so it must also
+    stay non-raising even against a bug this function didn't anticipate — hence the
+    outer guard below."""
     try:
-        from .. import instance
-        cfg = instance.load(root)
-        for forge, _owner in forges_for(cfg):
-            forges[forge.host] = forge
+        declared, _errors = declared_forges(root)
     except Exception:
-        pass
-    return forges
+        declared = {}
+    return {**_default_forges(), **declared}
+
+
+def known_forges_report(root) -> tuple[dict[str, Forge], list[str]]:
+    """Like :func:`known_forges`, but also returns the block/file-level errors
+    encountered — for ``doctor`` to surface (the guard itself only ever wants the plain
+    mapping; visibility is `doctor`'s job, not something that should slow down or risk
+    a Bash PreToolUse call). Never raises."""
+    try:
+        declared, errors = declared_forges(root)
+    except Exception as e:
+        declared, errors = {}, [f"charter.toml: {e}"]
+    return {**_default_forges(), **declared}, errors
+
+
+#: Matches the HOST component of ``scheme://[user@]host[:port]/...`` — stops at the
+#: first ``/``, ``:`` (port), ``?`` (query) or ``#`` (fragment), so nothing past the
+#: host (path, branch/ref, query string) is ever mistaken for it.
+_URL_HOST_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://(?:[^@/]*@)?([^/:?#]+)")
+#: Matches the HOST component of scp-style ``[user@]host:path`` (e.g. ``git@host:org/repo.git``).
+#: The negative lookahead excludes ``scheme://`` forms (already handled above) — a colon
+#: immediately followed by ``//`` is a scheme separator, not the scp host/path separator.
+_SCP_HOST_RE = re.compile(r"^(?:[^@/\s]+@)?([^/\s:]+):(?!//)")
+
+
+def _host_of(url: str) -> str:
+    """The HOST COMPONENT of a git remote URL — never a substring match anywhere else in
+    the URL. Handles both shapes git accepts: ``scheme://[user@]host[:port]/path`` and
+    scp-style ``[user@]host:path``. Case-folded (git treats hostnames case-insensitively
+    on the wire). Returns ``""`` when no host can be parsed — never raises.
+
+    This is FINDING 1's fix: the previous ``host in url`` substring check matched a known
+    host appearing ANYWHERE in the string — including inside the *path* — so
+    ``git@git.internal:gitlab.com-mirror/api.git`` (a self-hosted remote whose path
+    happens to start with ``gitlab.com-``) misresolved as gitlab.com's own forge."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    m = _URL_HOST_RE.match(url)
+    if m:
+        return m.group(1).lower()
+    m = _SCP_HOST_RE.match(url)
+    if m:
+        return m.group(1).lower()
+    return ""
 
 
 def resolve_host(url: str, root) -> Forge | None:
@@ -90,12 +181,18 @@ def resolve_host(url: str, root) -> Forge | None:
     host. This is what lets a self-hosted forge (GitLab Enterprise, GHE) resolve to its
     own real policy instead of silently falling through to another forge's.
 
-    Returns ``None`` when *url*'s host matches neither a default nor a declared forge —
-    genuinely unrecognised. Callers MUST treat that as **unmanaged**, never silently
-    apply another forge's policy: doing so is what let a self-hosted clone report a
-    false-green "token-only" while its SSH remote was never actually rewritten off SSH
-    (see ``gitpolicy.forge_for``)."""
-    for host, forge in known_forges(root).items():
-        if host in (url or ""):
-            return forge
-    return None
+    Matches *url*'s **host component** (:func:`_host_of`) — never a substring of the
+    whole URL — and checks **declared** hosts before class defaults, so a control plane
+    that (unusually) redeclares a default host's name under its own ``[[forge]]`` block
+    still gets the declared one. Returns ``None`` when *url*'s host matches neither a
+    declared nor a default forge — genuinely unrecognised. Callers MUST treat that as
+    **unmanaged**, never silently apply another forge's policy: doing so is what let a
+    self-hosted clone report a false-green "token-only" while its SSH remote was never
+    actually rewritten off SSH (see ``gitpolicy.forge_for``)."""
+    host = _host_of(url)
+    if not host:
+        return None
+    declared, _errors = declared_forges(root)
+    if host in declared:
+        return declared[host]
+    return _default_forges().get(host)

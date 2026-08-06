@@ -178,6 +178,59 @@ class SingleCredentialGuardCase(unittest.TestCase):
     def test_denies_uppercase_host_ssh_probe(self):
         self.assertIsNotNone(self._deny("ssh -T git@GITHUB.COM"))
 
+    # --- FINDING 2, sibling C: `--config-env` is `-c`'s documented twin (value read
+    # --- from an env var, so it never even appears on the command line)
+    def test_denies_config_env_sshcommand_attached(self):
+        self.assertIsNotNone(self._deny("git --config-env=core.sshCommand=VAR fetch"))
+
+    def test_denies_config_env_sshcommand_split(self):
+        self.assertIsNotNone(self._deny("git --config-env core.sshCommand=VAR fetch"))
+
+    def test_allows_config_env_for_an_unrelated_key(self):
+        self.assertIsNone(self._deny("git --config-env=user.name=VAR fetch"))
+
+    # --- FINDING 2, sibling D: `git config core.sshCommand …` is a PERSISTENT write —
+    # --- after it runs, a plain `git fetch` goes over SSH with nothing left to see
+    def test_denies_git_config_core_sshcommand_persistent_write(self):
+        self.assertIsNotNone(self._deny("git config core.sshCommand 'ssh -i ~/.ssh/id'"))
+
+    def test_denies_git_config_local_core_sshcommand_write(self):
+        self.assertIsNotNone(
+            self._deny("git config --local core.sshCommand 'ssh -i ~/.ssh/id'"))
+
+    def test_allows_git_config_get_core_sshcommand_read(self):
+        self.assertIsNone(self._deny("git config --get core.sshCommand"))
+
+    def test_allows_bare_git_config_core_sshcommand_read(self):
+        # no value follows → git's own default GET behaviour, not a write
+        self.assertIsNone(self._deny("git config core.sshCommand"))
+
+    def test_allows_unrelated_git_config_writes(self):
+        self.assertIsNone(self._deny("git config user.email foo@bar.com"))
+        self.assertIsNone(self._deny("git config --add remote.origin.fetch '+refs/*:refs/*'"))
+
+    def test_config_write_denial_does_not_trip_on_a_commit_message(self):
+        # a commit message merely MENTIONING core.sshCommand must not be misread as a
+        # `git config` invocation (matches the existing SSH-URL-in-a-message regression)
+        self.assertIsNone(self._deny(
+            "git commit -m 'docs: never set core.sshCommand, use HTTPS instead'"))
+
+    # --- FINDING 2, sibling E: GIT_CONFIG_COUNT/KEY_n/VALUE_n — the override lives
+    # --- entirely in the environment, no flag on the command line at all
+    def test_denies_git_config_key_value_env_mechanism(self):
+        self.assertIsNotNone(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.sshCommand "
+            "GIT_CONFIG_VALUE_0='ssh -i ~/.ssh/id' git fetch"))
+
+    def test_denies_git_config_key_env_case_insensitive(self):
+        self.assertIsNotNone(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.SSHCOMMAND "
+            "GIT_CONFIG_VALUE_0='ssh -i ~/.ssh/id' git fetch"))
+
+    def test_allows_git_config_key_env_for_an_unrelated_key(self):
+        self.assertIsNone(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=bob git fetch"))
+
     def test_allows_normal_git_over_https(self):
         for ok in ("git push origin main", "git pull --ff-only", "git status",
                    "git clone https://gitlab.com/easydmarc/x.git", "git commit -m 'x'"):
@@ -321,6 +374,53 @@ class DeclaredSelfHostedForgeCase(unittest.TestCase):
         with mock.patch.object(config, "ROOT", self.root):
             from charter.commands import _origin_https
             self.assertEqual(_origin_https(self.repo), "https://git.internal/acme/api.git")
+
+
+class FalseGreenViaHostMisrecognitionCase(unittest.TestCase):
+    """FINDING 1 — the exact live reproduction the adversarial re-review reported: a
+    clone whose origin embeds a KNOWN host as a substring of its PATH (not its actual
+    host) must resolve to its OWN real host's forge — never silently fall through to
+    the forge whose name merely appears in the path. Before the fix, `charter
+    git-policy` printed a false '✓ token-only' for this exact repo while its origin was
+    never actually rewritten off SSH."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-falsegreen-root-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        self.repo = Path(tempfile.mkdtemp(prefix="edm-falsegreen-repo-"))
+        self.addCleanup(lambda: shutil.rmtree(self.repo, ignore_errors=True))
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       capture_output=True, env={**os.environ, **_ENV})
+        # the live bug: 'gitlab.com' is a substring of the PATH, not the host
+        origin = "git" + "@git.internal:gitlab.com-mirror/api.git"
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", origin],
+                       check=True, capture_output=True)
+
+    def test_forge_for_resolves_the_real_host_not_the_path_substring(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            forge = gitpolicy.forge_for(self.repo)
+        self.assertIsNotNone(forge)
+        self.assertEqual(forge.host, "git.internal")
+        self.assertEqual(forge.credential_helper(), "!glab auth git-credential")
+
+    def test_apply_then_check_is_honestly_compliant_and_actually_rewrites(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            changed = gitpolicy.apply(self.repo)
+            self.assertTrue(changed)
+            self.assertEqual(gitpolicy.check(self.repo), [])   # honestly compliant
+        resolved = subprocess.run(
+            ["git", "-C", str(self.repo), "ls-remote", "--get-url", "origin"],
+            capture_output=True, text=True).stdout.strip()
+        self.assertTrue(resolved.startswith("https://git.internal/"), resolved)
+        # …and gitlab.com's own insteadOf was NOT written for this repo — that would
+        # leave the real git@git.internal: prefix unrewritten (the exact live bug: SSH
+        # transport, while `check()` still reported "token-only").
+        gitlab_com = subprocess.run(
+            ["git", "-C", str(self.repo), "config", "--local", "--get-all",
+             "url.https://gitlab.com/.insteadOf"], capture_output=True, text=True)
+        self.assertNotIn("git.internal", gitlab_com.stdout)
 
 
 class UnrecognizedForgeIsUnmanagedCase(unittest.TestCase):

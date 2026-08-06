@@ -128,36 +128,72 @@ def check_ssh() -> Result:
     (`gitpolicy.forge_for` resolves which forge per repo)."""
     from . import config as _config, gitpolicy
     scope = gitpolicy.repos(_config.ROOT, _config.WORKSPACES_DIR)
-    bad = [r for r in scope if gitpolicy.check(r)]
+    drift = {r: gitpolicy.check(r) for r in scope}
+    bad = {r: d for r, d in drift.items() if d}
     if not bad:
         return Result("git auth", OK,
                       detail=f"token-only across {len(scope)} repo(s) (each forge's own "
                              f"HTTPS token; no SSH/signing)")
-    names = ", ".join(r.name for r in bad[:3]) + (" …" if len(bad) > 3 else "")
+    # `charter git-policy --apply` deliberately no-ops for an UNMANAGED-forge repo (no
+    # host to resolve a policy for) — telling a developer to run it for exactly THAT
+    # repo is a permanently un-actionable hint. Split the two failure modes so the hint
+    # stays honest either way.
+    unmanaged = [r for r, d in bad.items() if d == [gitpolicy.UNMANAGED_FORGE]]
+    fixable = [r for r in bad if r not in unmanaged]
+    names = ", ".join(r.name for r in list(bad)[:3]) + (" …" if len(bad) > 3 else "")
+    if unmanaged and not fixable:
+        hint = (f"{len(unmanaged)} repo(s) have an unrecognised forge — `charter "
+                f"git-policy --apply` deliberately no-ops for these (there's no policy to "
+                f"apply for a host it can't identify). Declare the host under [[forge]] in "
+                f"charter.toml to bring them under management, then re-run.")
+    elif fixable and not unmanaged:
+        hint = "Apply the single-credential policy to every clone: charter git-policy --apply"
+    else:
+        hint = (f"charter git-policy --apply fixes {len(fixable)} drifted repo(s); "
+                f"{len(unmanaged)} more have an unrecognised forge and need a [[forge]] "
+                f"declaration in charter.toml first — --apply alone won't touch those.")
     return Result(
         "git auth",
         WARN,
         detail=f"{len(bad)}/{len(scope)} repo(s) not token-only: {names}",
-        hint="Apply the single-credential policy to every clone: charter git-policy --apply",
+        hint=hint,
     )
 
 
 def check_control_plane_config() -> Result:
     """``charter.toml`` failed to parse (malformed TOML, or a schema newer than this
     charter understands). ``config`` swallows the exception so the CLI stays usable
-    (see ``config.CONFIG_ERROR``); this is where a user would look to find out why."""
-    from . import config as _config
+    (see ``config.CONFIG_ERROR``); this is where a user would look to find out why.
 
-    if _config.CONFIG_ERROR is None:
-        return Result("charter.toml", OK, detail="parsed cleanly" if _config.HAS_CONTROL_PLANE
-                      else "no control plane found")
-    return Result(
-        "charter.toml",
-        FAIL,
-        detail=_first_line(_config.CONFIG_ERROR),
-        hint="Fix or remove charter.toml, then re-run. Falling back to empty "
-             "group/exclude/workspace defaults until it does.",
-    )
+    A DIFFERENT, narrower failure lives one level down: the file parses fine but one
+    ``[[forge]]`` block doesn't (a typo'd ``kind``, a missing field). ``registry.
+    known_forges`` already keeps every host that DID resolve (a bad block no longer
+    discards its good siblings — see ``charter/forge/registry.py``), but that recovery
+    must not go silent: this is where it's surfaced, so a developer actually finds out a
+    declared host isn't covered instead of the guard just quietly covering less."""
+    from . import config as _config
+    from .forge import registry
+
+    if _config.CONFIG_ERROR is not None:
+        return Result(
+            "charter.toml",
+            FAIL,
+            detail=_first_line(_config.CONFIG_ERROR),
+            hint="Fix or remove charter.toml, then re-run. Falling back to empty "
+                 "group/exclude/workspace defaults until it does.",
+        )
+    _forges, forge_errors = registry.known_forges_report(_config.ROOT)
+    if forge_errors:
+        shown = "; ".join(forge_errors[:3]) + (" …" if len(forge_errors) > 3 else "")
+        return Result(
+            "charter.toml",
+            WARN,
+            detail=f"{len(forge_errors)} [[forge]] block(s) failed to resolve",
+            hint=f"{shown} — those hosts are NOT covered by the one-credential guard or "
+                 f"git-policy until fixed (other declared/default hosts still are).",
+        )
+    return Result("charter.toml", OK, detail="parsed cleanly" if _config.HAS_CONTROL_PLANE
+                  else "no control plane found")
 
 
 def check_inventory() -> Result:

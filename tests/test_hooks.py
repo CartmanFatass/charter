@@ -277,6 +277,62 @@ class TestSshGuardCoversEveryForge(PersonaIso):
         for host in ("GITHUB.COM", "GitLab.Com"):
             self.assertEqual(self._deny(f"git clone git@{host}:acme/api.git"), "deny", host)
 
+    # --- FINDING 2, sibling C: `--config-env=core.sshCommand=VAR` — `-c`'s documented twin
+    def test_config_env_sshcommand_attached_form_denied(self):
+        self.assertEqual(self._deny("git --config-env=core.sshCommand=VAR fetch"), "deny")
+
+    def test_config_env_sshcommand_split_form_denied(self):
+        self.assertEqual(self._deny("git --config-env core.sshCommand=VAR fetch"), "deny")
+
+    def test_config_env_sshcommand_case_insensitive_key(self):
+        self.assertEqual(self._deny("git --config-env=CORE.SSHCOMMAND=VAR fetch"), "deny")
+
+    def test_config_env_unrelated_key_is_fine(self):
+        self.assertIsNone(self._deny("git --config-env=user.name=VAR fetch"))
+
+    # --- FINDING 2, sibling D: `git config core.sshCommand …` — a PERSISTENT write, no
+    # --- SSH-shaped token left on the command line for a plain `git fetch` afterwards
+    def test_git_config_core_sshcommand_write_denied(self):
+        self.assertEqual(self._deny("git config core.sshCommand 'ssh -i k'"), "deny")
+
+    def test_git_config_core_sshcommand_write_denied_case_insensitive(self):
+        self.assertEqual(self._deny("git config CORE.SSHCOMMAND 'ssh -i k'"), "deny")
+
+    def test_git_config_core_sshcommand_read_stays_allowed(self):
+        self.assertIsNone(self._deny("git config --get core.sshCommand"))
+
+    def test_git_config_core_sshcommand_bare_read_stays_allowed(self):
+        # `git config core.sshCommand` with no value is git's own default GET form.
+        self.assertIsNone(self._deny("git config core.sshCommand"))
+
+    def test_git_config_unrelated_key_write_stays_allowed(self):
+        self.assertIsNone(self._deny("git config user.email foo@bar.com"))
+
+    # --- FINDING 2, sibling E: GIT_CONFIG_COUNT/KEY_n/VALUE_n — entirely via env vars
+    def test_git_config_count_key_value_env_mechanism_denied(self):
+        self.assertEqual(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.sshCommand "
+            "GIT_CONFIG_VALUE_0='ssh -i k' git fetch"), "deny")
+
+    def test_git_config_key_env_case_insensitive(self):
+        self.assertEqual(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=CORE.SSHCOMMAND "
+            "GIT_CONFIG_VALUE_0='ssh -i k' git fetch"), "deny")
+
+    def test_git_config_key_env_unrelated_key_is_fine(self):
+        self.assertIsNone(self._deny(
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name "
+            "GIT_CONFIG_VALUE_0=bob git fetch"))
+
+    # --- FINDING 3: a bad [[forge]] block next to a good one must not silently drop
+    # --- the good one's coverage — the live consequence: an SSH clone to the still-good
+    # --- declared host was becoming ALLOWED with no signal.
+    def test_a_bad_forge_block_does_not_silently_drop_a_good_siblings_coverage(self):
+        (config.ROOT / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n\n'
+            '[[forge]]\nkind = "bitbucket-typo"\nhost = "bad.example.com"\nowner = "x"\n')
+        self.assertEqual(self._deny("git clone git@git.internal:acme/api.git"), "deny")
+
 
 if __name__ == "__main__":
     unittest.main()

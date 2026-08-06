@@ -110,6 +110,138 @@ class TestKnownForges(unittest.TestCase):
             registry.resolve_host("https://bitbucket.example.org/a/b.git", self.root))
 
 
+class TestHostOfParsesTheHostComponent(unittest.TestCase):
+    """FINDING 1 — the primitive the fix rests on: pull the HOST out of a git remote
+    URL, never a substring match against the whole string."""
+
+    def test_scheme_url_shapes(self):
+        for url, host in (
+            ("https://github.com/a/b.git", "github.com"),
+            ("https://GitHub.COM/a/b.git", "github.com"),          # case-folded
+            ("ssh://git@gitlab.com/a/b.git", "gitlab.com"),
+            ("https://git.internal:8443/a/b.git", "git.internal"),  # port excluded
+            ("https://git.internal/a/b.git?x=1", "git.internal"),   # query excluded
+            ("https://git.internal/a/b.git#frag", "git.internal"),  # fragment excluded
+        ):
+            self.assertEqual(registry._host_of(url), host, url)
+
+    def test_scp_style_shapes(self):
+        for url, host in (
+            ("git@github.com:a/b.git", "github.com"),
+            ("git@GITHUB.COM:a/b.git", "github.com"),
+            ("git.internal:a/b.git", "git.internal"),  # no user@ prefix
+        ):
+            self.assertEqual(registry._host_of(url), host, url)
+
+    def test_the_live_reproduction_host_is_the_scp_host_not_the_path_substring(self):
+        self.assertEqual(
+            registry._host_of("git@git.internal:gitlab.com-mirror/api.git"), "git.internal")
+
+    def test_empty_and_unparseable_input_is_a_blank_host_never_a_raise(self):
+        self.assertEqual(registry._host_of(""), "")
+        self.assertEqual(registry._host_of(None), "")
+        self.assertEqual(registry._host_of("not a url at all"), "")
+
+
+class TestResolveHostMatchesHostComponentNotSubstring(unittest.TestCase):
+    """FINDING 1 — `resolve_host` used to substring-match the WHOLE url (``host in
+    url``), so any known host string appearing ANYWHERE — path, query string, a
+    branch-shaped ref — misresolved the forge. Reproduced live: a control plane
+    declaring ``host = "git.internal"`` resolved
+    ``git@git.internal:gitlab.com-mirror/api.git`` as GitLab's OWN gitlab.com forge
+    (because ``gitlab.com`` appears in the PATH), so GitLab's credential.helper +
+    insteadOf got written while the real ``git@git.internal:`` prefix was never
+    rewritten — `charter git-policy` printed a false '✓ token-only'."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-hostcomp-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+
+    def test_the_exact_live_reproduction(self):
+        forge = registry.resolve_host("git@git.internal:gitlab.com-mirror/api.git", self.root)
+        self.assertIsNotNone(forge)
+        self.assertEqual(forge.host, "git.internal")
+
+    def test_host_in_the_url_path_does_not_misresolve(self):
+        forge = registry.resolve_host(
+            "https://git.internal/gitlab.com-mirror/api.git", self.root)
+        self.assertEqual(forge.host, "git.internal")
+
+    def test_host_in_a_query_string_does_not_misresolve(self):
+        forge = registry.resolve_host(
+            "https://git.internal/acme/api.git?ref=gitlab.com-mirror", self.root)
+        self.assertEqual(forge.host, "git.internal")
+
+    def test_host_in_a_branch_like_fragment_does_not_misresolve(self):
+        forge = registry.resolve_host(
+            "https://git.internal/acme/api.git#gitlab.com-feature-branch", self.root)
+        self.assertEqual(forge.host, "git.internal")
+
+    def test_a_genuinely_unrelated_host_with_a_known_name_in_its_path_stays_unmanaged(self):
+        """No self-hosted declaration involved — a completely unrelated host merely
+        having 'gitlab.com' inside its PATH must not resolve to GitLab either (this is
+        the default-host half of the same substring bug, independent of charter.toml)."""
+        forge = registry.resolve_host("https://example.com/gitlab.com-mirror/api.git", self.root)
+        self.assertIsNone(forge)
+
+    def test_declared_hosts_are_checked_before_class_defaults(self):
+        """A control plane that (unusually) redeclares a default host's name under its
+        own [[forge]] block gets the DECLARED forge, not the class default silently
+        winning instead."""
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "github"\nhost = "gitlab.com"\nowner = "acme"\n')
+        forge = registry.resolve_host("https://gitlab.com/acme/api.git", self.root)
+        self.assertEqual(forge.kind, "github")
+
+
+class TestKnownForgesPartialFailure(unittest.TestCase):
+    """FINDING 3 (registry half) — a bad `[[forge]]` block (typo'd kind, wrong shape)
+    sitting next to a GOOD one must not drop the good block's host too. Before the fix,
+    `forges_for` raised on the FIRST bad block and `known_forges`'s bare `except
+    Exception: pass` swallowed that whole-list failure — every declared host vanished,
+    including the good one right next to the bad one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-partialfail-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+
+    def _write(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n\n'
+            '[[forge]]\nkind = "bitbucket-typo"\nhost = "bad.example.com"\nowner = "x"\n')
+
+    def test_a_bad_block_does_not_discard_a_good_sibling_blocks_host(self):
+        self._write()
+        forges = registry.known_forges(self.root)
+        self.assertIn("git.internal", forges, "the good block's host must survive")
+        self.assertNotIn("bad.example.com", forges)
+        self.assertIn("gitlab.com", forges)   # class defaults are untouched too
+        self.assertIn("github.com", forges)
+
+    def test_known_forges_report_surfaces_the_bad_blocks_error(self):
+        self._write()
+        forges, errors = registry.known_forges_report(self.root)
+        self.assertIn("git.internal", forges)
+        self.assertTrue(errors)
+        self.assertIn("bitbucket-typo", " ".join(errors))
+
+    def test_two_good_blocks_both_survive(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n\n'
+            '[[forge]]\nkind = "github"\nhost = "ghe.acme.com"\nowner = "acme"\n')
+        forges = registry.known_forges(self.root)
+        self.assertIn("git.internal", forges)
+        self.assertIn("ghe.acme.com", forges)
+
+    def test_a_wholly_malformed_charter_toml_still_keeps_only_the_defaults(self):
+        (self.root / "charter.toml").write_text("not [ valid toml")
+        forges, errors = registry.known_forges_report(self.root)
+        self.assertEqual(set(forges), {"gitlab.com", "github.com"})
+        self.assertTrue(errors)
+
+
 class TestKnownKindsAgreeWithInventory(unittest.TestCase):
     def test_inventory_find_recognizes_every_registry_kind(self):
         """`inventory.find` accepts a `<forge>:` qualifier only for a *known* kind — it

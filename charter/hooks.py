@@ -127,6 +127,110 @@ def _has_ssh_command_config(args: list[str]) -> bool:
               for i, a in enumerate(args))
 
 
+# --------------------------------------------------------------------------- #
+# three siblings of `-c core.sshCommand=…` — same override, different spelling  #
+# --------------------------------------------------------------------------- #
+# `--config-env` is `-c`'s documented twin: same effect, but the VALUE is read from an
+# env var instead of appearing on the command line. Git accepts both `--config-env=
+# name=envvar` (attached) and `--config-env name=envvar` (split, two argv tokens).
+_CONFIG_ENV_FLAG = "--config-env"
+
+
+def _has_config_env_sshcommand(args: list[str]) -> bool:
+    """True when ``--config-env=core.sshCommand=VAR`` (attached) or ``--config-env
+    core.sshCommand=VAR`` (split) appears anywhere in *args*. Case-insensitive on the
+    CONFIG KEY (git config keys are case-insensitive); the flag spelling itself is
+    checked case-insensitively too, defensively — a differently-cased flag git would
+    reject outright is not a bypass, but matching it anyway costs nothing and never
+    narrows coverage."""
+    for i, a in enumerate(args):
+        low = a.lower()
+        if low.startswith(_CONFIG_ENV_FLAG + "="):
+            value = a.split("=", 1)[1]
+            if _SSH_COMMAND_CONFIG_RE.match(value):
+                return True
+        elif low == _CONFIG_ENV_FLAG and i + 1 < len(args) and \
+                _SSH_COMMAND_CONFIG_RE.match(args[i + 1]):
+            return True
+    return False
+
+
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> — git's env-var-only
+# config mechanism (no `-c`/`--config-env` flag at all; the whole override lives in the
+# environment). Case-insensitive on the config key value, matching the key's own
+# case-insensitivity everywhere else in this module.
+_GIT_CONFIG_KEY_ENV_RE = re.compile(r"(?i)^GIT_CONFIG_KEY_\d+=(.*)$")
+
+
+def _has_git_config_env_sshcommand(env: list[str]) -> bool:
+    """True when a ``GIT_CONFIG_KEY_<n>=core.sshCommand`` env assignment appears in
+    *env* (git's ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n``
+    mechanism — the override never even touches the command line)."""
+    return any((m := _GIT_CONFIG_KEY_ENV_RE.match(e)) and
+              m.group(1).strip().lower() == "core.sshcommand" for e in env)
+
+
+# `git config core.sshCommand <value>` PERSISTS the override into the repo's config —
+# after this runs, a plain `git fetch`/`push` with NOTHING on the command line goes over
+# SSH. A read (`git config --get core.sshCommand`, or the bare `git config
+# core.sshCommand` form with no value, which git itself treats as a read) must stay
+# allowed — golden rule 0 is about not TRANSPORTING over SSH, not about looking.
+_CONFIG_KEY_RE = re.compile(r"(?i)^core\.sshcommand$")
+_CONFIG_READ_FLAGS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                      "--list", "-l", "--list-all")
+_CONFIG_WRITE_ONLY_FLAGS = ("--add", "--replace-all")
+#: Global git options that consume the NEXT token as a value (so it isn't mistaken for
+#: the subcommand when hunting for a bare `config` invocation, e.g. `git -C /repo
+#: config …`). Best-effort — git's full global-option grammar is larger than this, but
+#: these are the shapes that actually precede a subcommand in practice.
+_GIT_GLOBAL_FLAGS_WITH_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env")
+
+
+def _git_subcommand(args: list[str]) -> str | None:
+    """The git SUBCOMMAND (``config``, ``fetch``, …) — skips leading global options,
+    including ones that consume a following value, so ``git -C /repo config …`` is
+    still recognised as a ``config`` invocation. Returns ``None`` if no bare subcommand
+    token is found (never raises)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--") and "=" in a:      # e.g. --git-dir=x — self-contained
+            i += 1
+            continue
+        if a in _GIT_GLOBAL_FLAGS_WITH_VALUE:      # consumes the NEXT token
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        return a
+    return None
+
+
+def _is_sshcommand_config_write(args: list[str]) -> bool:
+    """True when a ``git config`` invocation (``args`` = everything after ``git``, i.e.
+    including the leading ``config`` token) SETS ``core.sshCommand`` — the classic
+    ``git config core.sshCommand <value>`` positional form, or an explicit write flag
+    (``--add``/``--replace-all``). A pure read (``--get``/``--get-all``/… or the bare
+    ``git config core.sshCommand`` form with no following value — git's own default GET
+    behaviour) returns False. Errs toward True on an ambiguous write shape — a guard
+    that degrades to LESS coverage is the exact failure this exists to close."""
+    positional = [a for a in args if not a.startswith("-")]
+    key_positions = [i for i, a in enumerate(positional)
+                     if _CONFIG_KEY_RE.match(a.split("=", 1)[0])]
+    if not key_positions:
+        return False
+    if any(a in _CONFIG_READ_FLAGS for a in args):
+        return False
+    for i in key_positions:
+        if "=" in positional[i]:                  # `core.sshCommand=value` inline
+            return True
+        if i + 1 < len(positional):                # a VALUE follows the key → a set
+            return True
+    return any(a in _CONFIG_WRITE_ONLY_FLAGS for a in args)
+
+
 def _segments(cmd: str) -> list[str]:
     """Split a shell command into separately-executed segments, so we inspect real
     invocations rather than scanning prose (a commit message may legitimately *mention*
@@ -218,9 +322,24 @@ def _single_credential_reason(cmd: str) -> str | None:
             if any(_GIT_SSH_ENV_RE.match(e) for e in env):
                 return fix + ("This forces git through an SSH transport "
                               "(GIT_SSH/GIT_SSH_COMMAND) — drop it.")
+            if _has_git_config_env_sshcommand(env):
+                return fix + ("`GIT_CONFIG_KEY_n=core.sshCommand`/`GIT_CONFIG_VALUE_n=…` "
+                              "forces the same SSH transport override, spelled entirely "
+                              "through environment variables (git's GIT_CONFIG_COUNT "
+                              "mechanism) — drop it.")
             if _has_ssh_command_config(args):
                 return fix + ("`-c core.sshCommand=…` forces the same SSH transport "
                               "override as GIT_SSH_COMMAND (its git-config twin) — drop it.")
+            if _has_config_env_sshcommand(args):
+                return fix + ("`--config-env=core.sshCommand=VAR` is `-c`'s documented "
+                              "twin — it reads the SSH override's VALUE from an "
+                              "environment variable instead of the command line — drop it.")
+            if _git_subcommand(args) == "config" and _is_sshcommand_config_write(args):
+                return fix + ("`git config core.sshCommand …` PERSISTS the SSH override "
+                              "into this repo's config — afterwards a plain `git fetch`/"
+                              "`push` goes over SSH with nothing on the command line to "
+                              "see. Drop it (a read, `git config --get core.sshCommand`, "
+                              "stays allowed).")
             # a URL only counts when the token IS the URL (a bare argument) — not when it's
             # mentioned inside a longer quoted string such as a commit message
             bad = next((a for a in _url_args(args) if a.lower().startswith(lower_prefixes)), None)
