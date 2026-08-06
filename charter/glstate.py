@@ -1,10 +1,11 @@
-"""Per-repo GitLab state (open MR + last CI/CD pipeline) for the status line,
+"""Per-repo forge state (open MR/PR + last CI status) for the status line,
 cached + refreshed in the background so a render never blocks on the network.
 
 The status line reads the cache (``read_for``) and, if it's stale, kicks off a
-**detached** ``charter gl-refresh`` (``maybe_spawn``) that queries GitLab via
-``glab`` and rewrites the cache. A SessionStart hook seeds it with a full
-``glab`` environment; ``charter gl-refresh`` runs it on demand.
+**detached** ``charter gl-refresh`` (``maybe_spawn``) that resolves each clone's
+own forge (``state_for_repo``, via ``charter.forge.registry``) and rewrites the
+cache — a GitLab clone is queried over ``glab``, a GitHub clone over ``gh``, so a
+mixed-forge workspace renders each repo's own notation.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from . import config
 DISPLAY_TTL = 7200    # show a cached value for up to 2h
 REFRESH_TTL = 300     # try to refresh entries older than 5 min
 SPAWN_COOLDOWN = 120  # at most one background refresh per this many seconds
+
+_EMPTY = {"change": None, "ci": None, "sigil": ""}
 
 
 def _cache_file() -> Path:
@@ -49,7 +52,15 @@ def _save(cache: dict) -> None:
 
 
 def read_for(dirs, branches: dict) -> dict:
-    """{dir: {"mr": iid|None, "ci": status|None}} for fresh, branch-matching entries."""
+    """{dir: {"change": int|None, "ci": status|None, "sigil": str}} for fresh,
+    branch-matching entries.
+
+    Reads defensively: a cache entry written by an OLDER charter (before this forge-
+    protocol upgrade) has ``mr`` instead of ``change``, and no ``sigil`` at all — both
+    are read with a fallback so a stale on-disk cache still renders after an upgrade
+    rather than raising a ``KeyError``. ``sigil`` falls back to ``""`` here; the render
+    path is what turns an absent sigil into the display default (``!``).
+    """
     cache = load()
     now = time.time()
     out = {}
@@ -59,7 +70,9 @@ def read_for(dirs, branches: dict) -> dict:
             continue
         if now - ent.get("ts", 0) > DISPLAY_TTL:
             continue
-        out[d] = {"mr": ent.get("mr"), "ci": ent.get("ci")}
+        out[d] = {"change": ent.get("change", ent.get("mr")),
+                  "ci": ent.get("ci"),
+                  "sigil": ent.get("sigil") or ""}
     return out
 
 
@@ -111,42 +124,59 @@ def maybe_spawn(dirs, workspace: str | None = None) -> None:
 # refresh (runs in the background / on demand — network allowed here)          #
 # --------------------------------------------------------------------------- #
 def refresh(dirs) -> dict:
-    """For each clone's current branch, fetch its open MR + last pipeline status."""
+    """For each clone's current branch, fetch its open change + last CI status,
+    via that clone's own forge (:func:`state_for_repo`)."""
     cache = load()
     now = time.time()
     for d in dirs:
         branch = _branch(d)
-        pwn = _remote_path(d)
-        mr = ci = None
-        if pwn and branch and branch != "?":
-            mr = _open_mr_iid(pwn, branch)
-            ci = _last_pipeline_status(pwn, branch)
-        cache[str(d)] = {"branch": branch, "mr": mr, "ci": ci, "ts": now}
+        state = state_for_repo(d, branch) if branch and branch != "?" else dict(_EMPTY)
+        cache[str(d)] = {"branch": branch, "ts": now, **state}
     _save(cache)
     return cache
 
 
-def _api(path: str):
+def state_for_repo(d: Path, branch: str) -> dict:
+    """``{"change": int|None, "ci": str|None, "sigil": str}`` for a clone's branch.
+
+    Takes the clone DIRECTORY, not a namespace string: the forge is inferred from that
+    clone's own ``origin``, which is what makes a mixed-forge workspace work — two
+    clones side by side can be hosted on different forges.
+
+    Resolves via ``registry.resolve_host`` rather than the parameterless ``for_host`` —
+    that's what also recognises a self-hosted forge this control plane's own
+    ``charter.toml`` declares, not just each kind's default host.
+
+    Best-effort by contract: this feeds the status line, which renders on every turn and
+    must never raise. No remote, an unknown host, a missing CLI, or an API failure all
+    degrade to empty state.
+    """
+    from .forge import registry
     try:
-        out = subprocess.run(
-            ["glab", "api", path],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15,
-        ).stdout.strip()
-        return json.loads(out) if out else None
+        url = _remote_url(d)
+        path = _remote_path(d)
+        if not url or not path:
+            return dict(_EMPTY)
+        forge = registry.resolve_host(url, config.ROOT)
+        if forge is None:
+            return dict(_EMPTY)
+        return {"change": forge.open_change(path, branch),
+                "ci": forge.ci_status(path, branch),
+                "sigil": forge.change_sigil}
+    except Exception:
+        return dict(_EMPTY)
+
+
+def _remote_url(d: Path) -> str | None:
+    """The clone's raw `origin` URL, for inferring which forge hosts it."""
+    try:
+        p = subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           text=True, timeout=10)
     except Exception:
         return None
-
-
-def _open_mr_iid(pwn: str, branch: str):
-    enc, br = urllib.parse.quote(pwn, safe=""), urllib.parse.quote(branch, safe="")
-    arr = _api(f"projects/{enc}/merge_requests?state=opened&source_branch={br}&per_page=1")
-    return arr[0].get("iid") if arr else None
-
-
-def _last_pipeline_status(pwn: str, branch: str):
-    enc, br = urllib.parse.quote(pwn, safe=""), urllib.parse.quote(branch, safe="")
-    arr = _api(f"projects/{enc}/pipelines?ref={br}&per_page=1")
-    return arr[0].get("status") if arr else None
+    url = (p.stdout or "").strip()
+    return url or None
 
 
 def _branch(d: Path) -> str:

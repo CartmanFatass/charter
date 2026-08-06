@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from charter import glstate
@@ -71,6 +72,93 @@ class MaybeSpawnCommandTests(PersonaIso):
             glstate.maybe_spawn(self._dirs())
 
         self.assertTrue(glstate._lock_file().exists(), "lock should be armed once the refresh launched")
+
+
+class TestForgeAwareState(unittest.TestCase):
+    """The status line renders `!42` for a GitLab MR and `#42` for a GitHub PR — each
+    audience sees its own forge's notation, never the other's.
+
+    Resolves via `registry.resolve_host` (not the parameterless `for_host`): Task 4
+    replaced host resolution with a host-component matcher that also consults the
+    active control plane's own declared forges, so a self-hosted host resolves too —
+    `state_for_repo` must go through that same resolver, not the narrower one.
+    """
+
+    def test_open_change_and_ci_come_from_the_repos_forge(self):
+        calls = {}
+
+        class FakeForge:
+            kind, host, cli, change_sigil = "github", "github.com", "gh", "#"
+            def open_change(self, path, branch):
+                calls["change"] = (path, branch); return 42
+            def ci_status(self, path, branch):
+                calls["ci"] = (path, branch); return "success"
+
+        with mock.patch("charter.forge.registry.resolve_host", return_value=FakeForge()), \
+             mock.patch("charter.glstate._remote_url", return_value="https://github.com/acme/api.git"), \
+             mock.patch("charter.glstate._remote_path", return_value="acme/api"):
+            got = glstate.state_for_repo(Path("/tmp/acme-api"), "main")
+        self.assertEqual(got["change"], 42)
+        self.assertEqual(got["ci"], "success")
+        self.assertEqual(got["sigil"], "#")
+        self.assertEqual(calls["change"], ("acme/api", "main"))
+
+    def test_an_unknown_host_yields_empty_state_not_a_crash(self):
+        with mock.patch("charter.forge.registry.resolve_host", return_value=None), \
+             mock.patch("charter.glstate._remote_url", return_value="https://example.com/a/b.git"), \
+             mock.patch("charter.glstate._remote_path", return_value="a/b"):
+            got = glstate.state_for_repo(Path("/tmp/x"), "main")
+        self.assertEqual(got, {"change": None, "ci": None, "sigil": ""})
+
+    def test_a_clone_with_no_remote_yields_empty_state(self):
+        with mock.patch("charter.glstate._remote_url", return_value=None), \
+             mock.patch("charter.glstate._remote_path", return_value=None):
+            got = glstate.state_for_repo(Path("/tmp/x"), "main")
+        self.assertEqual(got, {"change": None, "ci": None, "sigil": ""})
+
+    def test_a_forge_call_that_raises_yields_empty_state_not_a_crash(self):
+        """Best-effort by contract: an API failure inside the forge (network error,
+        missing CLI, ...) must degrade to empty state — the status line must never
+        raise no matter what the forge implementation does."""
+        class BoomForge:
+            kind, host, cli, change_sigil = "gitlab", "gitlab.com", "glab", "!"
+            def open_change(self, path, branch):
+                raise RuntimeError("glab: not authenticated")
+            def ci_status(self, path, branch):
+                return None
+
+        with mock.patch("charter.forge.registry.resolve_host", return_value=BoomForge()), \
+             mock.patch("charter.glstate._remote_url", return_value="https://gitlab.com/acme/api.git"), \
+             mock.patch("charter.glstate._remote_path", return_value="acme/api"):
+            got = glstate.state_for_repo(Path("/tmp/acme-api"), "main")
+        self.assertEqual(got, {"change": None, "ci": None, "sigil": ""})
+
+
+class TestReadForBackwardCompat(PersonaIso):
+    """`read_for` must read a cache entry written by an OLDER charter (the pre-forge-
+    protocol shape: `mr` instead of `change`, no `sigil` at all) without raising — a
+    stale on-disk cache degrades to the `!` display default, never a KeyError."""
+
+    def _write_cache(self, entry: dict) -> Path:
+        d = self.tmp / "old-repo"
+        d.mkdir(parents=True, exist_ok=True)
+        cache_file = glstate._cache_file()
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        import json, time
+        cache_file.write_text(json.dumps({str(d): {"ts": time.time(), **entry}}))
+        return d
+
+    def test_old_shape_entry_with_mr_key_still_renders(self):
+        d = self._write_cache({"branch": "main", "mr": 7, "ci": "success"})
+        got = glstate.read_for([d], {d: "main"})
+        self.assertEqual(got[d]["change"], 7)
+        self.assertEqual(got[d]["ci"], "success")
+        self.assertEqual(got[d]["sigil"], "")  # render path defaults this to "!"
+
+    def test_new_shape_entry_is_read_as_is(self):
+        d = self._write_cache({"branch": "main", "change": 9, "ci": "running", "sigil": "#"})
+        got = glstate.read_for([d], {d: "main"})
+        self.assertEqual(got[d], {"change": 9, "ci": "running", "sigil": "#"})
 
 
 if __name__ == "__main__":

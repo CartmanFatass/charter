@@ -89,7 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     sl.set_defaults(func=lambda args: statusline.main())
 
     gl = sub.add_parser("gl-refresh",
-                        help="Refresh the status line's GitLab state (open MRs + pipelines) from GitLab.")
+                        help="Refresh the status line's forge state (open MRs/PRs + CI) "
+                             "from each clone's own forge.")
     gl.add_argument("--workspace", "-w", help="Workspace to refresh (default: the active one).")
     gl.set_defaults(func=commands.cmd_gl_refresh)
 

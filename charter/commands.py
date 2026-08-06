@@ -502,7 +502,7 @@ def _clone_note(d: Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# gl-refresh (populate the status-line's GitLab state: open MR + last pipeline) #
+# gl-refresh (populate the status-line's forge state: open change + last CI)  #
 # --------------------------------------------------------------------------- #
 def cmd_gl_refresh(args) -> int:
     from . import glstate
@@ -513,12 +513,12 @@ def cmd_gl_refresh(args) -> int:
         util.info(f"No clones in workspace '{ws}'.")
         return 0
     cache = glstate.refresh(dirs)
-    util.ok(f"Refreshed GitLab state for {len(dirs)} repo(s) in '{ws}'.")
+    util.ok(f"Refreshed forge state for {len(dirs)} repo(s) in '{ws}'.")
     for d in dirs:
         ent = cache.get(str(d), {})
         bits = []
-        if ent.get("mr"):
-            bits.append(f"!{ent['mr']}")
+        if ent.get("change"):
+            bits.append(f"{ent.get('sigil') or '!'}{ent['change']}")
         if ent.get("ci"):
             bits.append(f"pipeline:{ent['ci']}")
         if bits:

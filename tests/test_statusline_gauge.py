@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from pathlib import Path
 
 from charter import statusline
 
@@ -202,6 +203,35 @@ class RebuildDetectionCase(unittest.TestCase):
                                                   "cache_creation_input_tokens": 1400}}}))
         self.assertIn("↻1 696k", out)          # cost stays on screen after the event
         self.assertIn("model/effort switch", out)  # and says what causes it
+
+
+class RepoRowSigilCase(unittest.TestCase):
+    """The change/MR cell renders each clone's OWN forge's notation — `!42` for a
+    GitLab MR, `#42` for a GitHub PR — never a hardcoded `!`. An entry from a cache
+    written by an older charter (no `sigil` at all, already normalised by
+    `glstate.read_for` to `sigil: ""`) must still render, falling back to `!`."""
+
+    def _row(self, gl_entry: dict) -> str:
+        d = Path("/tmp/repo-x")
+        rows = statusline._repo_rows([d], "ws", None, {}, {d: "main"}, {d: gl_entry})
+        self.assertEqual(len(rows), 1, "one clone, no worktrees -> exactly one row")
+        return statusline.tui.strip_ansi(rows[0].render(200)[0])
+
+    def test_gitlab_backed_repo_renders_bang(self):
+        self.assertIn("!42", self._row({"change": 42, "ci": None, "sigil": "!"}))
+
+    def test_github_backed_repo_renders_hash(self):
+        self.assertIn("#42", self._row({"change": 42, "ci": None, "sigil": "#"}))
+
+    def test_old_shape_cache_entry_falls_back_to_bang(self):
+        # what `glstate.read_for` hands back for an entry written before this upgrade:
+        # `change` recovered from the old `mr` key, `sigil` absent -> "".
+        self.assertIn("!7", self._row({"change": 7, "ci": None, "sigil": ""}))
+
+    def test_no_open_change_renders_no_cell(self):
+        line = self._row({"change": None, "ci": None, "sigil": ""})
+        self.assertNotIn("!", line)
+        self.assertNotIn("#", line)
 
 
 if __name__ == "__main__":

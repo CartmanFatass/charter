@@ -378,10 +378,11 @@ def _current(payload: dict) -> tuple[str, str] | None:
 def _repo_rows(dirs, active, cur, states, branches, gl) -> list[tui.Node]:
     """One table row per clone, nested under the workspace like a tree:
 
-        ├─ <repo>   <branch><markers>   <ci>   !<mr>
+        ├─ <repo>   <branch><markers>   <ci>   <sigil><change>
 
     repo in its own colour (current repo bold+underlined); dirty→branch yellow
-    `*`; ahead `↑N` cyan; behind `↓N` blue; pipeline ✓/✗/●/… ; open MR `!N` green.
+    `*`; ahead `↑N` cyan; behind `↓N` blue; pipeline ✓/✗/●/… ; open change `!N`/`#N`
+    green, in that clone's own forge's notation (GitLab `!`, GitHub `#`).
 
     Column widths are declared per cell; the kit pads/truncates so sibling
     rows stay aligned and nothing ever exceeds the render width.
@@ -429,8 +430,9 @@ def _repo_rows(dirs, active, cur, states, branches, gl) -> list[tui.Node]:
 
         info = gl.get(d, {})
         ci = tui.Cell(_ci_part(info.get("ci")), _CI_W)
-        mr = info.get("mr")
-        mr_cell = tui.Cell(f"{_GREEN}!{mr}{_R}" if mr else "", _MR_W)
+        change = info.get("change")
+        sigil = info.get("sigil") or "!"  # old caches (pre-forge-protocol) carry no sigil
+        mr_cell = tui.Cell(f"{_GREEN}{sigil}{change}{_R}" if change else "", _MR_W)
 
         rows.append(tui.Row(name, branch, ci, mr_cell, gap=_GAP))
 
