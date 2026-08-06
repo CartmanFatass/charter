@@ -142,24 +142,6 @@ def check_vaults() -> Result:
     return Result("vaults", OK, detail=f"{len(vs)} configured, all healthy")
 
 
-def check_browser() -> Result:
-    # Optional subsystem — WARN (never blocks) when its deps are missing.
-    from .browser import runtime
-
-    if not (shutil.which("node") and shutil.which("npx")):
-        return Result("browser", WARN, hint="node/npx missing — needed for chrome-devtools-mcp "
-                      "(`edm browser`). Optional.")
-    chrome = runtime.chrome_binary()
-    if not chrome:
-        return Result("browser", WARN,
-                      hint="no Chrome — `npx @puppeteer/browsers install chrome@stable` for `edm browser`.")
-    if not runtime.chrome_for_testing() and not runtime.loads_extensions(chrome):
-        return Result("browser", WARN, detail="branded Chrome only",
-                      hint="secret autofill needs Chrome for Testing: "
-                           "`npx @puppeteer/browsers install chrome@stable`.")
-    return Result("browser", OK, detail="node + Chrome for Testing ready")
-
-
 #: Order matters — cheap/local checks first, network checks last.
 CHECKS = (
     check_python,
@@ -169,7 +151,6 @@ CHECKS = (
     check_ssh,
     check_inventory,
     check_vaults,
-    check_browser,
 )
 
 

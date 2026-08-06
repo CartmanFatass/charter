@@ -74,22 +74,3 @@ PERSONA_STATE_DIR = EDM_HOME / "persona-state"
 #: Local pointer to the active persona (set by ``edm persona use``). Overridden
 #: by ``$EDM_PERSONA`` and by a command's ``--persona``. Gitignored (in EDM_HOME).
 ACTIVE_PERSONA_FILE = EDM_HOME / "active-persona"
-
-#: Committed browser assets, organized as: engine/ (system code — runners + the MV3
-#: extension), data/ (declarative config — autofill targets + matrix spec), flows/
-#: (user-defined predefined flows, one dir per flow), reports/ (generated).
-BROWSER_DIR = ROOT / "browser"
-BROWSER_ENGINE_DIR = BROWSER_DIR / "engine"   # system code (do not put user data here)
-BROWSER_DATA_DIR = BROWSER_DIR / "data"       # declarative config (targets, matrix spec)
-BROWSER_FLOWS_DIR = BROWSER_DIR / "flows"     # predefined flows: flows/<name>/flow.json
-
-#: Per-developer browser runtime — Chrome profiles, the loaded extension copy (with
-#: its broker token), and session state. Gitignored (under EDM_HOME).
-BROWSER_HOME = EDM_HOME / "browser"
-
-#: Fixed CDP port that ``chrome-devtools-mcp`` attaches to. One active browser
-#: session at a time (see docs/browser.md).
-BROWSER_DEBUG_PORT = 9222
-
-#: Chrome binary override; else common install paths are probed.
-CHROME_ENV = "EDM_CHROME"
