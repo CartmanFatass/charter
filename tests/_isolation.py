@@ -21,7 +21,7 @@ from charter import config, instance, persona, root
 
 _PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "EDM_HOME", "ACTIVE_PERSONA_FILE",
           "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE",
-          "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE")
+          "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE", "INVENTORY")
 
 
 class PersonaIso(unittest.TestCase):
@@ -47,6 +47,13 @@ class PersonaIso(unittest.TestCase):
         config.WORKSPACES_DIR = self.tmp / "workspaces"
         config.SESSIONS_DIR = config.EDM_HOME / "sessions"
         config.TERMINALS_DIR = config.EDM_HOME / "terminals"
+        # Task 1's fix round found a test that wrote a fake inventory/repos.json into the
+        # REAL checkout because this tuple omitted INVENTORY — every other well-known path
+        # was redirected into the tmp tree, but inventory.load()/save() kept resolving
+        # against the real repo's config.INVENTORY (ambient state). Derive it the same way
+        # config.py itself does (`ROOT / "inventory" / "repos.json"`), so a test reading or
+        # writing the inventory through PersonaIso is isolated like everything else.
+        config.INVENTORY = self.tmp / "inventory" / "repos.json"
         # Same derivation config.py itself uses at import time (`ROOT / MARKER`), but
         # re-run against the just-installed temp ROOT — otherwise a test reading this
         # flag through PersonaIso would see whatever the real process's ROOT happened

@@ -2,6 +2,12 @@
 
 ``inventory/repos.json`` is the durable source of truth for what exists in the
 group. It is tracked in git and stays complete even when zero repos are cloned.
+
+A control plane may span several forges (``[[forge]]`` blocks in ``charter.toml``);
+:func:`merge` combines their per-forge repo lists into one inventory, keyed by bare
+name, and :func:`find` accepts an optional ``<forge>:`` qualifier to disambiguate a
+name two forges both expose. See ``charter/forge/registry.py`` for how a forge block
+resolves to a backend.
 """
 
 from __future__ import annotations
@@ -72,9 +78,50 @@ def repos(doc: dict | None = None) -> list:
     return (doc or load()).get("repos", [])
 
 
-def find(name_or_path: str, doc: dict | None = None):
-    """Look a repo up by short name or full ``path_with_namespace``."""
-    for r in repos(doc):
+def merge(batches: list[list[dict]]) -> list[dict]:
+    """Combine per-forge repo lists into one inventory.
+
+    Repos are keyed by BARE NAME so every existing command, doc and habit keeps working.
+    A collision across forges is REFUSED rather than resolved by guessing: the workspace
+    path on disk is derived from that name, so picking one silently would let two
+    different repos clone over each other.
+    """
+    from .forge.registry import CollisionError
+    seen: dict[str, dict] = {}
+    for batch in batches:
+        for r in batch:
+            prev = seen.get(r["name"])
+            if prev is not None and prev.get("forge") != r.get("forge"):
+                raise CollisionError(
+                    f"both {prev.get('forge')} and {r.get('forge')} expose a repo named "
+                    f"{r['name']!r}. Qualify it — e.g. `{r.get('forge')}:{r['name']}` — "
+                    f"or exclude one in charter.toml.")
+            seen[r["name"]] = r
+    return sorted(seen.values(), key=lambda r: r["name"])
+
+
+def find(repos: list, name_or_path: str):
+    """Look a repo up by short name, full ``path_with_namespace``, or a
+    ``<forge>:<name>``-qualified name for disambiguating a cross-forge collision.
+
+    Takes the caller's repo list explicitly (rather than the whole inventory doc) so it
+    composes with :func:`merge` — both operate on plain ``list[dict]``.
+
+    The known-kinds check is a deferred import of ``registry.KINDS`` rather than a
+    duplicated literal: nothing under ``charter.forge`` imports back into ``inventory``
+    or ``config`` (they only reach ``charter.util`` and stdlib), so there is no import
+    cycle to dodge — a plain (if deferred, to keep this module cheap to import before
+    any forge backend is needed) import is all that's required.
+    """
+    from .forge import registry
+    kind, sep, bare = (name_or_path or "").partition(":")
+    if sep and kind in registry.KINDS:
+        for r in repos:
+            if r.get("forge") == kind and (r["name"] == bare
+                                           or r["path_with_namespace"] == bare):
+                return r
+        return None
+    for r in repos:
         if r["name"] == name_or_path or r["path_with_namespace"] == name_or_path:
             return r
     return None

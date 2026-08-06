@@ -59,5 +59,32 @@ class TestIsolationHarnessHasControlPlane(unittest.TestCase):
             config.HAS_CONTROL_PLANE = original
 
 
+class TestIsolationHarnessInventory(unittest.TestCase):
+    """During Task 1's fix round, a test wrote a fake `inventory/repos.json` straight
+    into the real checkout because `_PATCH` omitted `INVENTORY` — every other
+    well-known config path was redirected into the harness's tmp tree, but
+    `inventory.load()`/`save()` kept resolving `config.INVENTORY` against whatever the
+    real, un-isolated repo happened to have (ambient state), exactly the same landmine
+    shape as `HAS_CONTROL_PLANE` above. This pins the fix."""
+
+    def test_patch_tuple_includes_inventory(self):
+        self.assertIn("INVENTORY", _PATCH)
+
+    def test_setup_derives_inventory_from_the_temp_root_not_the_real_repo(self):
+        original = config.INVENTORY
+        case = PersonaIso()
+        case.setUp()
+        try:
+            # Not the real repo's inventory/repos.json …
+            self.assertNotEqual(config.INVENTORY, original)
+            # … but derived from the harness's own tmp ROOT, the same way config.py
+            # itself derives it at import time (`ROOT / "inventory" / "repos.json"`).
+            self.assertEqual(config.INVENTORY, config.ROOT / "inventory" / "repos.json")
+            self.assertTrue(str(config.INVENTORY).startswith(str(config.ROOT)))
+        finally:
+            case._restore()
+            self.assertEqual(config.INVENTORY, original)  # restored on cleanup
+
+
 if __name__ == "__main__":
     unittest.main()

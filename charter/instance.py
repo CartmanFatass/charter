@@ -46,19 +46,28 @@ def load(root: Path) -> dict:
     return cfg
 
 
-def _first_forge(cfg: dict) -> dict:
+def _forge_at(cfg: dict, index: int) -> dict:
+    """The ``index``-th ``[[forge]]`` block, or ``{}`` if there is none — covers both a
+    control plane with no ``[[forge]]`` blocks at all and an out-of-range index."""
     forges = cfg.get("forge") or []
-    return forges[0] if forges else {}
+    return forges[index] if 0 <= index < len(forges) else {}
 
 
-def group_of(cfg: dict, fallback: str) -> str:
-    """The group/org whose repos this control plane tracks."""
-    return _first_forge(cfg).get("group") or fallback
+def group_of(cfg: dict, fallback: str, index: int = 0) -> str:
+    """The group/org tracked by forge block ``index`` (default: the first — the group
+    a single-forge control plane cares about, which is what every caller but
+    multi-forge ``discover`` wants: ``config.GROUP`` is deliberately "the first forge's
+    group", not "all of them", since it is only used as a human-readable label and a
+    back-compat fallback owner when no ``[[forge]]`` block is declared at all)."""
+    return _forge_at(cfg, index).get("group") or fallback
 
 
-def exclude_of(cfg: dict) -> set[str]:
-    """Repo names that must never enter the inventory."""
-    return set(_first_forge(cfg).get("exclude") or ())
+def exclude_of(cfg: dict, index: int = 0) -> set[str]:
+    """Repo names that must never enter the inventory, from forge block ``index``
+    (default: the first). A control plane with several ``[[forge]]`` blocks gives each
+    its own ``exclude`` — ``discover`` calls this once per block (``index`` 0, 1, …) so
+    a block's excludes are applied only to *that* block's repos, never another's."""
+    return set(_forge_at(cfg, index).get("exclude") or ())
 
 
 def default_workspace_of(cfg: dict, fallback: str) -> str:

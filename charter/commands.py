@@ -46,51 +46,95 @@ def _origin_https(root) -> str | None:
 # --------------------------------------------------------------------------- #
 # discover                                                                     #
 # --------------------------------------------------------------------------- #
+def _build_repo(forge, p: dict, no_probe: bool) -> dict:
+    stack = "unknown"
+    if not no_probe:
+        files = forge.repo_tree(p, p.get("default_branch"))
+        stack = inventory.classify_stack(files)
+    return {
+        "name": p["name"],
+        "path_with_namespace": p["path_with_namespace"],
+        "ssh_url": p["ssh_url"],
+        "default_branch": p.get("default_branch") or "main",
+        "kind": inventory.classify_kind(p["name"]),
+        "stack": stack,
+        "description": (p.get("description") or "").strip(),
+        "topics": p.get("topics") or [],
+        "web_url": p.get("web_url", ""),
+        # Which forge this record came from, so a mixed inventory stays unambiguous
+        # once records from several forges are merged (see inventory.merge/find).
+        "forge": p.get("forge") or forge.kind,
+    }
+
+
+def _build_batch(forge, projects: list[dict], no_probe: bool) -> list[dict]:
+    if no_probe:
+        return [_build_repo(forge, p, no_probe) for p in projects]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        return list(ex.map(lambda p: _build_repo(forge, p, no_probe), projects))
+
+
+def _forges_to_query(cfg: dict):
+    """``[(forge, owner, exclude), …]`` for every declared ``[[forge]]`` block, or a
+    single back-compat GitLab default (``config.GROUP``/``config.EXCLUDE``) when the
+    control plane declares none — the shape every control plane had before multi-forge
+    support existed, and still what a fresh `charter init` produces."""
+    from . import instance as _instance
+    from .forge import registry
+
+    pairs = registry.forges_for(cfg)
+    if pairs:
+        return [(forge, owner, _instance.exclude_of(cfg, i))
+                for i, (forge, owner) in enumerate(pairs)]
+    return [(GitLabForge(), config.GROUP, config.EXCLUDE)]
+
+
 def cmd_discover(args) -> int:
-    forge = GitLabForge()
-    try:
-        forge.check_auth()
-    except ForgeError as e:
-        raise SystemExit(str(e))
-    util.info(f"Querying GitLab group `{config.GROUP}` …")
-    try:
-        projects = [
-            p for p in forge.list_repos(config.GROUP)
-            if p["name"] not in config.EXCLUDE
-        ]
-    except ForgeError as e:
-        raise SystemExit(str(e))
-    util.info(
-        f"Found {len(projects)} projects. "
-        + ("Skipping stack probe." if args.no_probe else "Probing repo stacks …")
-    )
+    from .forge import registry
 
-    def build(p: dict) -> dict:
-        stack = "unknown"
-        if not args.no_probe:
-            files = forge.repo_tree(p, p.get("default_branch"))
-            stack = inventory.classify_stack(files)
-        return {
-            "name": p["name"],
-            "path_with_namespace": p["path_with_namespace"],
-            "ssh_url": p["ssh_url"],
-            "default_branch": p.get("default_branch") or "main",
-            "kind": inventory.classify_kind(p["name"]),
-            "stack": stack,
-            "description": (p.get("description") or "").strip(),
-            "topics": p.get("topics") or [],
-            "web_url": p.get("web_url", ""),
-        }
+    try:
+        cfg = _instance_load_root()
+    except Exception as e:
+        raise SystemExit(str(e))
 
-    if args.no_probe:
-        built = [build(p) for p in projects]
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-            built = list(ex.map(build, projects))
+    try:
+        # An unknown `kind` in a `[[forge]]` block (e.g. a typo, or a forge charter
+        # doesn't support) is a config mistake, not a crash — same "clear error, not a
+        # traceback" discipline as the CollisionError handling below.
+        to_query = _forges_to_query(cfg)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    batches: list[list[dict]] = []
+    for forge, owner, exclude in to_query:
+        util.info(f"Querying {forge.kind} group `{owner}` …")
+        try:
+            forge.check_auth()
+        except ForgeError as e:
+            raise SystemExit(str(e))
+        try:
+            projects = [p for p in forge.list_repos(owner) if p["name"] not in exclude]
+        except ForgeError as e:
+            raise SystemExit(str(e))
+        util.info(
+            f"Found {len(projects)} project(s) on {forge.kind}. "
+            + ("Skipping stack probe." if args.no_probe else "Probing repo stacks …")
+        )
+        # Built (and appended) immediately after a successful list_repos, but nothing
+        # is saved until every declared forge has succeeded — see the merge/save step
+        # below. A forge failing here raises before inventory.save is ever reached, so
+        # a partial multi-forge failure can never wipe (or half-write) the inventory,
+        # the same discipline the single-forge `_api_strict` split enforces.
+        batches.append(_build_batch(forge, projects, args.no_probe))
+
+    try:
+        merged = inventory.merge(batches)
+    except registry.CollisionError as e:
+        raise SystemExit(str(e))
 
     before = {r["name"] for r in inventory.repos()}
-    doc = inventory.save(built)
-    after = {r["name"] for r in built}
+    doc = inventory.save(merged)
+    after = {r["name"] for r in merged}
 
     rel = config.INVENTORY.relative_to(config.ROOT)
     util.ok(f"Wrote {doc['count']} repos to {rel}")
@@ -103,6 +147,18 @@ def cmd_discover(args) -> int:
     if not args.no_docs:
         cmd_docs(args)
     return 0
+
+
+def _instance_load_root() -> dict:
+    """Re-parse ``charter.toml`` against the *current* ``config.ROOT`` rather than
+    trusting the module-level ``config._cfg`` cached at import time. Necessary for
+    ``cmd_discover`` specifically: it's the one command whose forge list must reflect
+    whatever ``config.ROOT`` names right now, including in tests that redirect ROOT to
+    an isolated tmp dir (``PersonaIso``) after import already happened — reading the
+    stale cached ``_cfg`` would silently see the real process's charter.toml (or lack
+    of one) instead of the tmp control plane a test just set up."""
+    from . import instance as _instance
+    return _instance.load(config.ROOT)
 
 
 # --------------------------------------------------------------------------- #
@@ -296,8 +352,9 @@ def cmd_save(args) -> int:
 
 def _resolve_targets(args, doc) -> list:
     out = []
+    all_repos = inventory.repos(doc)
     for name in args.repos:
-        r = inventory.find(name, doc)
+        r = inventory.find(all_repos, name)
         if r:
             out.append(r)
         else:

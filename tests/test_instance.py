@@ -61,6 +61,26 @@ class TestConfigWiring(InstanceIso):
         self.assertEqual(instance.group_of(cfg, "unused"), "acme")
         self.assertEqual(instance.exclude_of(cfg), {"x"})
 
+    def test_group_and_exclude_are_resolvable_per_forge_block(self):
+        """A multi-forge control plane gives each `[[forge]]` block its own group and
+        exclude list — `index` picks which block, so `discover` can apply each block's
+        excludes only to that block's own repos rather than to every forge's batch."""
+        cfg = {"forge": [
+            {"kind": "gitlab", "group": "acme", "exclude": ["acme-control"]},
+            {"kind": "github", "owner": "diazoxide", "exclude": ["sandbox"]},
+        ]}
+        self.assertEqual(instance.group_of(cfg, "unused", index=0), "acme")
+        self.assertEqual(instance.exclude_of(cfg, index=0), {"acme-control"})
+        # github's block uses `owner`, not `group` — group_of only reads `group`
+        # (forges_for is what accepts either key; see test_forge_registry.py).
+        self.assertEqual(instance.group_of(cfg, "unused", index=1), "unused")
+        self.assertEqual(instance.exclude_of(cfg, index=1), {"sandbox"})
+
+    def test_an_out_of_range_index_falls_back_to_empty(self):
+        cfg = {"forge": [{"kind": "gitlab", "group": "acme", "exclude": ["x"]}]}
+        self.assertEqual(instance.group_of(cfg, "fallback", index=5), "fallback")
+        self.assertEqual(instance.exclude_of(cfg, index=5), set())
+
 
 if __name__ == "__main__":
     unittest.main()
