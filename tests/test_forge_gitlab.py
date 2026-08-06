@@ -52,6 +52,78 @@ class TestGitLabForge(unittest.TestCase):
         self.assertEqual(repos[0]["forge"], "gitlab")
         self.assertEqual(repos[0]["path_with_namespace"], "acme/api")
 
+    def test_list_repos_returns_empty_for_a_genuinely_empty_group(self):
+        """A group with zero projects is a legal, successful result — must NOT be
+        confused with a failed call (that's F1)."""
+        with mock.patch("charter.util.run", return_value=_proc("[]")):
+            self.assertEqual(self.f.list_repos("acme"), [])
+
+    def test_list_repos_raises_on_page1_failure_rather_than_returning_empty(self):
+        """F1: a transient failure on the very first page must never look like "the
+        group has no repos" — that's how an expired token wipes the inventory."""
+        with mock.patch("charter.util.run", return_value=_proc("", rc=1)):
+            with self.assertRaises(base.ForgeError):
+                self.f.list_repos("acme")
+
+    def test_list_repos_error_names_the_owner(self):
+        with mock.patch("charter.util.run", return_value=_proc("", rc=1)):
+            with self.assertRaises(base.ForgeError) as cm:
+                self.f.list_repos("acme-group")
+        self.assertIn("acme-group", str(cm.exception))
+
+    def test_list_repos_raises_on_mid_pagination_failure_rather_than_truncating(self):
+        """F1: page 1 succeeds (a full 100-item page, so pagination continues), page 2
+        fails — the old `or []` behavior would silently stop and return only page 1."""
+        page1 = json.dumps([
+            {"id": i, "name": f"repo{i}", "path": f"repo{i}",
+             "path_with_namespace": f"acme/repo{i}", "default_branch": "main"}
+            for i in range(100)
+        ])
+
+        def side_effect(cmd, **kwargs):
+            # NB: match on "&page=1" (not "page=1") — "per_page=100" also contains the
+            # substring "page=1" (from "page=100"), which would otherwise make every
+            # page look like page 1 and loop forever.
+            if "&page=1" in cmd[-1]:
+                return _proc(page1)
+            return _proc("", rc=1)  # page 2 fails
+
+        with mock.patch("charter.util.run", side_effect=side_effect):
+            with self.assertRaises(base.ForgeError):
+                self.f.list_repos("acme")
+
+    def test_list_repos_raises_on_malformed_json(self):
+        with mock.patch("charter.util.run", return_value=_proc("{not json")):
+            with self.assertRaises(base.ForgeError):
+                self.f.list_repos("acme")
+
+    def test_repo_tree_paginates_beyond_one_page(self):
+        """F2: a repo with >100 root entries must not be silently truncated to the
+        first page — that's how stack detection goes wrong for a big monorepo."""
+        page1 = json.dumps([{"name": f"f{i}"} for i in range(100)])
+        page2 = json.dumps([{"name": "nx.json"}])
+
+        def side_effect(cmd, **kwargs):
+            # See the note in test_list_repos_raises_on_mid_pagination_failure...: match
+            # on "&page=N", not "page=N" — "per_page=100" would otherwise self-match.
+            if "&page=1" in cmd[-1]:
+                return _proc(page1)
+            if "&page=2" in cmd[-1]:
+                return _proc(page2)
+            return _proc("[]")
+
+        with mock.patch("charter.util.run", side_effect=side_effect):
+            names = self.f.repo_tree({"id": 7})
+        self.assertEqual(len(names), 101)
+        self.assertIn("nx.json", names)
+
+    def test_repo_tree_single_short_page_needs_no_second_call(self):
+        with mock.patch("charter.util.run",
+                        return_value=_proc(json.dumps([{"name": "README.md"}]))) as m:
+            names = self.f.repo_tree({"id": 7})
+        self.assertEqual(names, ["README.md"])
+        self.assertEqual(m.call_count, 1)
+
     def test_open_change_returns_the_iid(self):
         with mock.patch("charter.util.run",
                         return_value=_proc(json.dumps([{"iid": 42}]))):
@@ -87,6 +159,19 @@ class TestGitLabForge(unittest.TestCase):
         with mock.patch("charter.util.run", return_value=_proc("", rc=1)):
             with self.assertRaises(base.ForgeError):
                 self.f.check_auth()
+
+    def test_check_auth_raises_when_exit_zero_but_not_actually_logged_in(self):
+        """F3: `glab auth status` can exit 0 while its output says something other than
+        "Logged in" (e.g. a config/host mismatch). `doctor.check_forge_auth` treats that
+        as failure via the `"Logged in" in blob` check; `check_auth` must agree."""
+        with mock.patch("charter.util.run", return_value=_proc("not logged in to any hosts")):
+            with self.assertRaises(base.ForgeError):
+                self.f.check_auth()
+
+    def test_check_auth_passes_when_logged_in_reported(self):
+        with mock.patch("charter.util.run",
+                        return_value=_proc("✓ Logged in to gitlab.com as me\n")):
+            self.f.check_auth()  # must not raise
 
 
 if __name__ == "__main__":

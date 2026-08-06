@@ -40,10 +40,29 @@ class GitLabForge:
         except ValueError:
             return None
 
+    def _api_strict(self, path: str):
+        """JSON GET for pagination-driven callers that must tell "the call failed" apart
+        from "the result was empty" — an expired token and a genuinely empty group must
+        never look the same, because collapsing them is how a `list_repos` failure
+        silently wipes the inventory. Raises :class:`ForgeError` (naming the failing path
+        and glab's own error text) on a non-zero exit or unparsable JSON; a clean empty
+        body is returned as ``[]``, which is a legal, successful result."""
+        p = self._glab(["api", path], check=False)
+        if p.returncode != 0:
+            detail = (p.stderr or p.stdout or "").strip() or f"glab exited {p.returncode}"
+            raise ForgeError(f"GitLab API call failed ({path}): {detail}")
+        if not p.stdout.strip():
+            return []
+        try:
+            return json.loads(p.stdout)
+        except ValueError as e:
+            raise ForgeError(f"GitLab API returned malformed JSON ({path}): {e}") from e
+
     # --- protocol -----------------------------------------------------------------
     def check_auth(self) -> None:
         p = self._glab(["auth", "status"], check=False)
-        if p.returncode != 0:
+        blob = (p.stdout or "") + (p.stderr or "")
+        if p.returncode != 0 or "Logged in" not in blob:
             raise ForgeError(
                 f"glab is not authenticated for {self.host}. Run: glab auth login")
 
@@ -51,9 +70,12 @@ class GitLabForge:
         enc = urllib.parse.quote(owner, safe="")
         out, page = [], 1
         while True:
-            batch = self._api(
-                f"groups/{enc}/projects?per_page=100&page={page}"
-                "&include_subgroups=true&archived=false") or []
+            try:
+                batch = self._api_strict(
+                    f"groups/{enc}/projects?per_page=100&page={page}"
+                    "&include_subgroups=true&archived=false")
+            except ForgeError as e:
+                raise ForgeError(f"listing repos for GitLab group '{owner}' failed: {e}") from e
             if not batch:
                 break
             out.extend(batch)
@@ -77,10 +99,18 @@ class GitLabForge:
 
     def repo_tree(self, repo: dict, ref: str | None = None) -> list[str]:
         rid = repo.get("id")
-        q = f"projects/{rid}/repository/tree?per_page=100"
-        if ref:
-            q += f"&ref={urllib.parse.quote(str(ref), safe='')}"
-        return [e.get("name", "") for e in (self._api(q) or [])]
+        ref_q = f"&ref={urllib.parse.quote(str(ref), safe='')}" if ref else ""
+        out, page = [], 1
+        while True:
+            batch = self._api(
+                f"projects/{rid}/repository/tree?per_page=100&page={page}{ref_q}") or []
+            if not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return [e.get("name", "") for e in out]
 
     def open_change(self, path: str, branch: str) -> int | None:
         enc = urllib.parse.quote(path, safe="")

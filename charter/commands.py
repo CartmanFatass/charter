@@ -53,10 +53,13 @@ def cmd_discover(args) -> int:
     except ForgeError as e:
         raise SystemExit(str(e))
     util.info(f"Querying GitLab group `{config.GROUP}` …")
-    projects = [
-        p for p in forge.list_repos(config.GROUP)
-        if p["name"] not in config.EXCLUDE
-    ]
+    try:
+        projects = [
+            p for p in forge.list_repos(config.GROUP)
+            if p["name"] not in config.EXCLUDE
+        ]
+    except ForgeError as e:
+        raise SystemExit(str(e))
     util.info(
         f"Found {len(projects)} projects. "
         + ("Skipping stack probe." if args.no_probe else "Probing repo stacks …")
