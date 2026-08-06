@@ -16,8 +16,8 @@ import sys
 import time
 from types import SimpleNamespace
 
-from . import config, util, workspace
-from .commands import (_GLAB_CRED, _git, _origin_https, cmd_clone, commit_memory_reactive,
+from . import config, gitpolicy, util, workspace
+from .commands import (_cred_flag, _git, _origin_https, cmd_clone, commit_memory_reactive,
                        commit_push)
 
 
@@ -329,9 +329,10 @@ def cmd_workspace_restore(args) -> int:
         if not workspace.is_git_repo(d):
             util.warn(f"  {r['name']}: not cloned (no access?) — skipped.")
             continue
-        _git([*_GLAB_CRED, "fetch", "origin", r["branch"]], cwd=d)
+        cred = _cred_flag(gitpolicy.forge_for(d))  # THIS clone's own forge — never a
+        _git([*cred, "fetch", "origin", r["branch"]], cwd=d)  # hardcoded one.
         if _git(["checkout", r["branch"]], cwd=d).returncode == 0:
-            _git([*_GLAB_CRED, "pull", "--ff-only"], cwd=d)  # latest of the recorded branch
+            _git([*cred, "pull", "--ff-only"], cwd=d)  # latest of the recorded branch
             util.ok(f"  {r['name']} @ {r['branch']}")
             ok += 1
         else:
@@ -346,10 +347,11 @@ def cmd_workspace_sync(args) -> int:
     root = config.ROOT
     https = _origin_https(root)
     if not https:
-        util.warn("origin isn't a gitlab.com remote — pull manually.")
+        util.warn("origin isn't on a forge charter knows (gitlab.com/github.com/…) — "
+                  "pull manually.")
         return 0
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root).stdout.strip()
-    p = _git([*_GLAB_CRED, "pull", "--ff-only", https, branch], cwd=root)
+    p = _git([*_cred_flag(gitpolicy.forge_for(root)), "pull", "--ff-only", https, branch], cwd=root)
     if p.returncode == 0:
         util.ok("Synced — fresh workspace manifests + memory pulled from the control plane.")
         return 0
@@ -361,7 +363,8 @@ def cmd_workspace_sync(args) -> int:
 
 def cmd_workspace_save(args) -> int:
     """Commit + push THIS workspace's committed metadata (workspace.json + memory/),
-    secret-scanned, via glab — the manual counterpart to the debounced auto-save."""
+    secret-scanned, via the control plane's own forge — the manual counterpart to the
+    debounced auto-save."""
     name = getattr(args, "name", None) or workspace.resolve()
     if not workspace.is_live(name):
         util.err(f"workspace '{name}' is LOCAL (private) — nothing is committed. "
@@ -414,17 +417,19 @@ def cmd_workspace_autosave(args) -> int:
 
 
 def cmd_workspace_pushbg(args) -> int:
-    """Internal: push HEAD to the control plane via glab (the background half of autosave)."""
+    """Internal: push HEAD to the control plane via its own forge's CLI (the background
+    half of autosave)."""
     root = config.ROOT
     https = _origin_https(root)
     if not https:
         return 0
+    cred = _cred_flag(gitpolicy.forge_for(root))
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root).stdout.strip()
-    p = _git([*_GLAB_CRED, "push", https, f"HEAD:{branch}"], cwd=root)
+    p = _git([*cred, "push", https, f"HEAD:{branch}"], cwd=root)
     if p.returncode != 0 and any(s in (p.stderr or "") for s in ("fetch first", "non-fast-forward", "rejected")):
-        _git([*_GLAB_CRED, "fetch", https, branch], cwd=root)
+        _git([*cred, "fetch", https, branch], cwd=root)
         if _git(["rebase", "FETCH_HEAD"], cwd=root).returncode == 0:
-            p = _git([*_GLAB_CRED, "push", https, f"HEAD:{branch}"], cwd=root)
+            p = _git([*cred, "push", https, f"HEAD:{branch}"], cwd=root)
         else:
             _git(["rebase", "--abort"], cwd=root)
             return 0

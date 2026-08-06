@@ -121,15 +121,18 @@ def check_forge_auth() -> Result:
 
 
 def check_ssh() -> Result:
-    """Golden rule: **one credential** — the glab token over HTTPS. SSH is deliberately NOT
-    used, so this no longer probes for a key (that was a contradictory hard requirement).
-    Instead it verifies the control plane's own repo carries the token-only git policy."""
+    """Golden rule 0: **one credential — per forge** — each repo's OWN forge's token over
+    HTTPS (glab for GitLab, gh for GitHub, …). SSH is deliberately NOT used, so this no
+    longer probes for a key (that was a contradictory hard requirement). Instead it
+    verifies every repo in scope carries ITS forge's token-only git policy
+    (`gitpolicy.forge_for` resolves which forge per repo)."""
     from . import config as _config, gitpolicy
     scope = gitpolicy.repos(_config.ROOT, _config.WORKSPACES_DIR)
     bad = [r for r in scope if gitpolicy.check(r)]
     if not bad:
         return Result("git auth", OK,
-                      detail=f"token-only across {len(scope)} repo(s) (glab HTTPS; no SSH/signing)")
+                      detail=f"token-only across {len(scope)} repo(s) (each forge's own "
+                             f"HTTPS token; no SSH/signing)")
     names = ", ".join(r.name for r in bad[:3]) + (" …" if len(bad) > 3 else "")
     return Result(
         "git auth",

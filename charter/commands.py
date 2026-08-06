@@ -16,30 +16,57 @@ def _git(args, cwd=None):
     return util.run(["git", *args], cwd=cwd, check=False)
 
 
-# Route git auth through glab's token over HTTPS — no SSH keys, no 1Password agent
-# (which is where all the signing/permission pain comes from). `!glab auth git-credential`
-# is glab's git credential helper; git appends the get/store/erase operation.
-_GLAB_CRED = ["-c", "credential.helper=!glab auth git-credential"]
+# Route git auth through THAT REPO'S OWN FORGE's token over HTTPS — no SSH keys, no
+# 1Password agent (which is where all the signing/permission pain comes from). One
+# credential PER FORGE: `!glab auth git-credential` for GitLab, `!gh auth git-credential`
+# for GitHub, each forge's own git credential helper — git appends the get/store/erase
+# operation. `_cred_flag` resolves this per call (never a single hardcoded forge), so a
+# GitHub-hosted clone — like this control plane itself — authenticates correctly instead
+# of silently being handed GitLab's helper.
+def _cred_flag(forge) -> list[str]:
+    """``-c credential.helper=<forge's>`` — makes ONE git invocation use *that forge's*
+    token-holding CLI, regardless of what (if anything) local config already has. Belt
+    and braces for the very first ``git clone``, before `gitpolicy.apply` has had a
+    chance to write the repo's own local config."""
+    return ["-c", f"credential.helper={forge.credential_helper()}"]
 
 
 def _https_url(r: dict) -> str:
-    """HTTPS clone URL for a repo (so cloning uses the glab token, not SSH)."""
+    """HTTPS clone URL for a repo (so cloning uses that repo's own forge's token, never
+    SSH) — rewritten via THAT forge's own SSH forms (`registry.for_repo`, from the
+    inventory's ``forge`` stamp — see ``charter/forge/registry.py``), not a hardcoded
+    gitlab.com prefix, so a GitHub-recorded repo's SSH ``ssh_url`` rewrites correctly too."""
     web = (r.get("web_url") or "").rstrip("/")
     if web.startswith("https://"):
         return web + ".git"
     ssh = r.get("ssh_url") or ""
-    if ssh.startswith("git@gitlab.com:"):
-        return "https://gitlab.com/" + ssh[len("git@gitlab.com:"):]
+    from .forge import registry
+    https_base, ssh_forms = registry.for_repo(r).insteadof()
+    for prefix in ssh_forms:
+        if ssh.startswith(prefix):
+            return https_base + ssh[len(prefix):]
     return ssh
 
 
 def _origin_https(root) -> str | None:
-    """The gitlab.com origin as an HTTPS URL (rewriting an SSH one), or None."""
+    """The control plane's own ``origin`` as an HTTPS URL (rewriting an SSH one via ITS
+    forge's own rewrite rule — ``registry.for_host`` + ``insteadof()``), or ``None`` when
+    there's no origin yet, or its host isn't a forge this charter knows. Generalized from
+    a gitlab.com-only check so a GitHub-hosted control plane (e.g. this one) is recognized
+    too, instead of being told its origin is wrong."""
     url = _git(["remote", "get-url", "origin"], cwd=root).stdout.strip()
-    if url.startswith("git@gitlab.com:"):
-        return "https://gitlab.com/" + url[len("git@gitlab.com:"):]
-    if url.startswith("https://") and "gitlab.com" in url:
+    if not url:
+        return None
+    from .forge import registry
+    forge = registry.for_host(url)
+    if forge is None:
+        return None
+    https_base, ssh_forms = forge.insteadof()
+    if url.startswith(https_base):
         return url
+    for prefix in ssh_forms:
+        if url.startswith(prefix):
+            return https_base + url[len(prefix):]
     return None
 
 
@@ -221,6 +248,8 @@ def cmd_clone(args) -> int:
         util.err(str(e))
         return 1
 
+    from .forge import registry
+
     failures = 0
     for r in targets:
         dest = wd / r["name"]
@@ -228,16 +257,17 @@ def cmd_clone(args) -> int:
             util.info(f"{r['name']}: already cloned in '{ws}'")
             _hint_repo_docs(dest, r)
             continue
-        util.info(f"Cloning {r['name']} ({r['default_branch']}) into '{ws}' via glab (HTTPS) …")
-        proc = _git([*_GLAB_CRED, "clone", "--branch", r["default_branch"], _https_url(r), str(dest)])
+        forge = registry.for_repo(r)
+        util.info(f"Cloning {r['name']} ({r['default_branch']}) into '{ws}' via {forge.cli} (HTTPS) …")
+        proc = _git([*_cred_flag(forge), "clone", "--branch", r["default_branch"], _https_url(r), str(dest)])
         if proc.returncode != 0:
             failures += 1
             util.err(
-                f"{r['name']}: clone failed — no access, network, or glab isn't authed "
-                "(`glab auth status`). Skipping.\n" + (proc.stderr or "").strip()
+                f"{r['name']}: clone failed — no access, network, or {forge.cli} isn't authed "
+                f"(`{forge.cli} auth status`). Skipping.\n" + (proc.stderr or "").strip()
             )
             continue
-        # Golden rule: every git op from this clone uses the glab token over HTTPS —
+        # Golden rule 0: every git op from this clone uses ITS FORGE's token over HTTPS —
         # credential helper + signing off + SSH→HTTPS rewrites (see charter/gitpolicy.py).
         from . import gitpolicy
         gitpolicy.apply(dest)
@@ -270,9 +300,10 @@ def commit_memory_reactive(paths: list[str], title: str) -> int:
 
 def commit_push(root, add_cmd: list, message: str | None,
                 sign: bool = False, no_push: bool = False, background: bool = False) -> int:
-    """Stage (``add_cmd``) → secret-scan staged memory/refs → commit → push via glab's
-    HTTPS token (rebase-retry on non-ff). Shared by `charter save` and `charter workspace save`
-    so the secret-guard + no-SSH push path is identical everywhere."""
+    """Stage (``add_cmd``) → secret-scan staged memory/refs → commit → push via the
+    control plane's OWN FORGE's token (`gitpolicy.forge_for`; rebase-retry on non-ff).
+    Shared by `charter save` and `charter workspace save` so the secret-guard + no-SSH
+    push path is identical everywhere, on whichever forge the control plane lives on."""
     _git(add_cmd, cwd=root)
     if _git(["diff", "--cached", "--quiet"], cwd=root).returncode == 0:
         util.info("Nothing to save — the control-plane working tree is clean.")
@@ -312,20 +343,25 @@ def commit_push(root, add_cmd: list, message: str | None,
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root).stdout.strip()
     https = _origin_https(root)
     if not https:
-        util.warn("origin isn't a gitlab.com remote — committed locally; push manually.")
+        util.warn("origin isn't on a forge charter knows (gitlab.com/github.com/…) — "
+                  "committed locally; push manually.")
         return 0
     if background:
         _spawn_bg_push(root)
         util.info("→ pushing to the control plane in the background.")
         return 0
 
+    from . import gitpolicy
+    forge = gitpolicy.forge_for(root)
+    cred = _cred_flag(forge)
+
     def push():
-        return _git([*_GLAB_CRED, "push", https, f"HEAD:{branch}"], cwd=root)
+        return _git([*cred, "push", https, f"HEAD:{branch}"], cwd=root)
 
     p = push()
     if p.returncode != 0 and any(s in (p.stderr or "") for s in ("fetch first", "non-fast-forward", "rejected")):
         util.info("remote moved — fetching + rebasing, then retrying …")
-        _git([*_GLAB_CRED, "fetch", https, branch], cwd=root)
+        _git([*cred, "fetch", https, branch], cwd=root)
         if _git(["rebase", "FETCH_HEAD"], cwd=root).returncode != 0:
             _git(["rebase", "--abort"], cwd=root)
             util.warn("Committed locally, but rebase hit a conflict — resolve manually, then `charter save`.")
@@ -333,19 +369,19 @@ def commit_push(root, add_cmd: list, message: str | None,
         p = push()
     if p.returncode == 0:
         _git(["update-ref", f"refs/remotes/origin/{branch}", "HEAD"], cwd=root)  # sync tracking
-        util.ok(f"Pushed {branch} via glab (HTTPS token — no SSH, no 1Password).")
+        util.ok(f"Pushed {branch} via {forge.cli} (HTTPS token — no SSH, no 1Password).")
     else:
-        util.warn("Committed, but the glab push failed:")
+        util.warn(f"Committed, but the {forge.cli} push failed:")
         for ln in (p.stderr or p.stdout or "").splitlines()[-4:]:
             util.warn("  " + ln)
-        util.info("Check `glab auth status`.")
+        util.info(f"Check `{forge.cli} auth status`.")
     return 0
 
 
 def cmd_save(args) -> int:
-    """Commit + push the CONTROL PLANE's own changes in one step, via glab's HTTPS token —
-    no SSH keys, no 1Password signing hang. (For a *clone's* changes, work in a
-    repo-rooted session; this is only the control plane's orchestration files.)"""
+    """Commit + push the CONTROL PLANE's own changes in one step, via ITS OWN FORGE's
+    HTTPS token — no SSH keys, no 1Password signing hang. (For a *clone's* changes, work
+    in a repo-rooted session; this is only the control plane's orchestration files.)"""
     return commit_push(config.ROOT, ["add", "-A"], args.message,
                        sign=getattr(args, "sign", False), no_push=getattr(args, "no_push", False))
 
@@ -552,8 +588,9 @@ def cmd_recall(args) -> int:
 
 
 def cmd_git_policy(args) -> int:
-    """**Golden rule: one credential.** Report (or `--apply`) the token-only git policy on the
-    control plane and every clone: glab-token credential helper over HTTPS, signing off, and
+    """**Golden rule 0: one credential — PER FORGE.** Report (or `--apply`) the token-only
+    git policy on the control plane and every clone, resolved per repo from ITS OWN forge
+    (`gitpolicy.forge_for`): that forge's own credential helper over HTTPS, signing off, and
     SSH→HTTPS URL rewrites so even an SSH remote transports over the token. Local config only —
     a developer's global git config is never touched."""
     from . import gitpolicy
@@ -582,7 +619,8 @@ def cmd_git_policy(args) -> int:
             for d in drift[:4]:
                 util.info(f"    {d}")
     if not drifted:
-        util.ok(f"All {len(targets)} repo(s) are token-only (glab HTTPS, no SSH, no signing).")
+        util.ok(f"All {len(targets)} repo(s) are token-only (each forge's own HTTPS token, "
+                f"no SSH, no signing).")
     elif apply:
         util.ok(f"Applied the single-credential policy to {fixed} of {len(targets)} repo(s).")
     else:

@@ -98,13 +98,14 @@ def _leak_reason(cmd: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# A2: SINGLE-CREDENTIAL guard — the control plane's golden rule is that every git op #
-# authenticates with the glab TOKEN over HTTPS: no SSH keys, no commit signing.   #
-# `charter git-policy` makes that automatic (credential.helper + insteadOf rewrites), #
-# so these denials only catch a DELIBERATE bypass, and each names the fix.        #
+# A2: SINGLE-CREDENTIAL guard — golden rule 0: every git op authenticates with ITS  #
+# FORGE's own token over HTTPS (glab for GitLab, gh for GitHub, …): no SSH keys, no  #
+# commit signing, on ANY host the control plane knows about — never a hardcoded     #
+# gitlab.com literal (a guard that covers only some hosts is worse than no guard,   #
+# because it still LOOKS present). `charter git-policy` makes that automatic per    #
+# repo (credential.helper + insteadOf rewrites — see `gitpolicy.forge_for`), so     #
+# these denials only catch a DELIBERATE bypass, and each names the fix + the host.  #
 # --------------------------------------------------------------------------- #
-_SSH_GITLAB = r"(?:git@gitlab\.com:|ssh://git@gitlab\.com/)"
-_SSH_URL_RE = re.compile(_SSH_GITLAB)
 _GIT_SSH_ENV_RE = re.compile(r"^GIT_SSH(?:_COMMAND)?=")
 # signing: `--gpg-sign`, `-c commit/tag.gpgsign=true`, or `-S` on a COMMITTING verb only —
 # `git log -S<string>` is the pickaxe content search and must stay allowed.
@@ -150,13 +151,58 @@ def _url_args(args: list[str]) -> list[str]:
     return out
 
 
+def _known_forges() -> dict[str, object]:
+    """``host -> a Forge instance`` for every host the one-credential-PER-FORGE rule must
+    cover — the set the SSH guard (and its denial messages) is built from.
+
+    **Base set: every registered kind's DEFAULT host**, from ``registry.KINDS`` — never a
+    hardcoded literal. A guard built from string literals (``"gitlab.com"``) silently stops
+    covering a second forge the day one is added; building it from the registry instead
+    means a third forge kind is covered automatically the day it's registered, with no
+    separate edit here.
+
+    **Widened by the ACTIVE control plane's own ``charter.toml``**, when one is present —
+    this is what covers a *self-hosted* forge (``host = "git.internal"``), which a class's
+    default host never matches. A control plane that declares one is exactly the case the
+    registry defaults can't see on their own, so the configured host — not just the kind's
+    default — is what the guard must key off. Reading it is best-effort: this runs on every
+    Bash ``PreToolUse`` call, so a missing/unreadable/malformed ``charter.toml`` must never
+    raise or block a turn — it just leaves the guard at the class-default hosts."""
+    from .forge import registry
+    forges: dict[str, object] = {cls().host: cls() for cls in registry.KINDS.values()}
+    try:
+        from . import instance
+        cfg = instance.load(config.ROOT)
+        for forge, _owner in registry.forges_for(cfg):
+            forges[forge.host] = forge
+    except Exception:
+        pass
+    return forges
+
+
+def _ssh_prefix_hosts(forges: dict[str, object]) -> dict[str, str]:
+    """``ssh-prefix -> host`` for every forge in *forges*, from each forge's own
+    ``insteadof()`` — the SAME SSH forms `gitpolicy` rewrites, so the guard and the
+    rewrite it backstops can never drift apart."""
+    out: dict[str, str] = {}
+    for host, forge in forges.items():
+        _https_base, ssh_forms = forge.insteadof()
+        for prefix in ssh_forms:
+            out[prefix] = host
+    return out
+
+
 def _single_credential_reason(cmd: str) -> str | None:
-    """Deny a git action that would depend on SSH or commit signing instead of the one
-    shared credential (the glab token over HTTPS). Inspects only segments that actually
-    invoke ``git``/``ssh``; returns the reason + the remedy."""
-    fix = ("The control plane is **token-only**: git auth is the glab token over HTTPS "
-           "(`charter git-policy --apply` configures every clone; `charter save` / `charter workspace save` "
-           "already use it). ")
+    """Deny a git action that would depend on SSH or commit signing instead of that
+    repo's own forge's credential (its token over HTTPS) — golden rule 0, per forge.
+    Inspects only segments that actually invoke ``git``/``ssh``; returns the reason +
+    the remedy, naming the actual host involved."""
+    fix = ("The control plane is **token-only**: git auth is each forge's own CLI token "
+           "over HTTPS (`charter git-policy --apply` configures every clone; `charter save` "
+           "/ `charter workspace save` already use it). ")
+    forges = _known_forges()
+    ssh_prefix_hosts = _ssh_prefix_hosts(forges)
+    ssh_prefixes = tuple(ssh_prefix_hosts)
     for seg in _segments(cmd):
         prog, env, argv = _invocation(seg)
         base = prog.rsplit("/", 1)[-1]
@@ -167,10 +213,11 @@ def _single_credential_reason(cmd: str) -> str | None:
                               "(GIT_SSH/GIT_SSH_COMMAND) — drop it.")
             # a URL only counts when the token IS the URL (a bare argument) — not when it's
             # mentioned inside a longer quoted string such as a commit message
-            if any(a.startswith(("git@gitlab.com:", "ssh://git@gitlab.com/"))
-                   for a in _url_args(args)):
-                return fix + ("This hands git an SSH GitLab URL — use the HTTPS form "
-                              "(`https://gitlab.com/<group>/<repo>.git`); SSH remotes are "
+            bad = next((a for a in _url_args(args) if a.startswith(ssh_prefixes)), None)
+            if bad is not None:
+                host = next(h for p, h in ssh_prefix_hosts.items() if bad.startswith(p))
+                return fix + (f"This hands git an SSH {host} URL — use the HTTPS form "
+                              f"(`https://{host}/<group>/<repo>.git`); SSH remotes are "
                               "auto-rewritten, so you never need to type one.")
             if any(a == "--gpg-sign" or a.startswith("--gpg-sign=") for a in args) or \
                any(re.fullmatch(r"(?:commit|tag)\.gpgsign=true", a) for a in args) or \
@@ -179,9 +226,11 @@ def _single_credential_reason(cmd: str) -> str | None:
                               "an agent) — commit unsigned; `charter save` handles control-plane "
                               "commits.")
         elif base == "ssh":
-            if any("git@gitlab.com" in a for a in argv[1:]):
-                return fix + ("SSH to gitlab.com isn't used — check the credential with "
-                              "`glab auth status` instead.")
+            host = next((h for h in forges if any(f"git@{h}" in a for a in argv[1:])), None)
+            if host is not None:
+                cli = forges[host].cli
+                return fix + (f"SSH to {host} isn't used — check the credential with "
+                              f"`{cli} auth status` instead.")
     return None
 
 

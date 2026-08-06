@@ -1,7 +1,9 @@
-"""**Golden rule: one credential.** Every git operation in the control plane — and in every
-repo clone under it — authenticates with the **glab token over HTTPS**. No SSH keys, no
-1Password agent, no commit signing. A single credential the whole org shares, so an agent
-never stalls on a key prompt, a signer hang, or a missing SSH config.
+"""**Golden rule 0: one credential — PER FORGE.** Every git operation in a control plane —
+and in every repo clone under it — authenticates with *that repo's own forge's* token over
+HTTPS. No SSH keys, no 1Password agent, no commit signing. One credential per forge (not one
+credential, full stop — a GitLab clone uses ``glab``'s token, a GitHub clone uses ``gh``'s),
+so an agent never stalls on a key prompt, a signer hang, or a missing SSH config, on *any*
+forge the control plane spans.
 
 **SCOPE — the control plane and its clones, nothing outside.** Everything here is written
 with ``git config --local``, so it applies to the control-plane repo and the clones under
@@ -12,17 +14,23 @@ an agent stalling on a signer prompt. Do **not** widen this to ``--global`` / an
 stanza — tests assert the boundary (`test_git_policy.py`).
 
 This module makes that **mechanically true** rather than merely documented, by writing three
-things into a repo's *local* git config (never global — we don't touch a developer's machine):
+things into a repo's *local* git config (never global — we don't touch a developer's machine),
+each derived from the ONE forge that repo actually talks to (:func:`forge_for`, resolved from
+its ``origin`` remote):
 
-1. ``credential.helper = !glab auth git-credential`` — git asks glab for the token.
-2. ``commit.gpgsign=false`` / ``tag.gpgsign=false`` — signing can't hang the agent.
-3. ``url.https://gitlab.com/.insteadOf`` for both SSH forms — so even a repo whose *remote is
-   an SSH URL* transparently transports over HTTPS+token. This is what makes a plain
-   ``git push`` typed by any agent (or any persona sub-agent) work without SSH.
+1. ``credential.helper = !<cli> auth git-credential`` — git asks *that forge's* CLI for the
+   token (:func:`policy_for`).
+2. ``commit.gpgsign=false`` / ``tag.gpgsign=false`` — signing can't hang the agent, on any
+   forge (:func:`policy_for`).
+3. ``url.<https-base>.insteadOf`` for both of that forge's SSH forms — so even a repo whose
+   *remote is an SSH URL* transparently transports over HTTPS+token (:func:`insteadof_for`).
+   This is what makes a plain ``git push`` typed by any agent (or any persona sub-agent) work
+   without SSH, whichever forge the repo lives on.
 
 With (3) in place the rule holds even for clones the control plane didn't create; the
 PreToolUse guard in :mod:`charter.hooks` then blocks the deliberate bypasses (explicit SSH
-remotes, ``GIT_SSH_COMMAND``, ``-S``/``--gpg-sign``).
+remotes, ``GIT_SSH_COMMAND``, ``-S``/``--gpg-sign``) — widened the same way, across every
+forge host the control plane knows about (see ``hooks._known_forges``).
 """
 
 from __future__ import annotations
@@ -30,17 +38,32 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import util
+from .forge.gitlab import GitLabForge
 
-#: Simple ``key = value`` settings every repo gets.
-POLICY: dict[str, str] = {
-    "credential.helper": "!glab auth git-credential",
-    "commit.gpgsign": "false",
-    "tag.gpgsign": "false",
-}
 
-#: SSH URL prefixes rewritten to HTTPS (multi-valued ``insteadOf`` under one url key).
-HTTPS_BASE = "https://gitlab.com/"
-SSH_FORMS = ("git@gitlab.com:", "ssh://git@gitlab.com/")
+def policy_for(forge) -> dict[str, str]:
+    """The `key = value` settings a repo on *forge* gets. One credential per forge: the
+    forge's own CLI holds the token, and signing is off so no signer prompt can hang an
+    agent."""
+    return {
+        "credential.helper": forge.credential_helper(),
+        "commit.gpgsign": "false",
+        "tag.gpgsign": "false",
+    }
+
+
+def insteadof_for(forge) -> tuple[str, tuple[str, ...]]:
+    """`(https_base, ssh_forms)` so even a repo whose remote is an SSH URL transports
+    over HTTPS with a token."""
+    return forge.insteadof()
+
+
+#: Back-compat defaults, kept as *derived* values (never a separately-maintained literal) —
+#: GitLab was the only forge before this module went per-forge, and stays the fallback a
+#: fresh/originless repo gets (see `forge_for`). Existing callers/tests that read these
+#: module-level names keep working unchanged; `check`/`apply` themselves resolve per-repo.
+POLICY: dict[str, str] = policy_for(GitLabForge())
+HTTPS_BASE, SSH_FORMS = insteadof_for(GitLabForge())
 _URL_KEY = f"url.{HTTPS_BASE}.insteadOf"
 
 
@@ -71,19 +94,37 @@ def _get_all(repo: Path, key: str) -> list[str]:
     return _local_config(repo).get(key.lower(), [])
 
 
+def forge_for(repo: Path) -> object:
+    """Which forge governs *repo*'s policy — inferred from its ``origin`` remote via
+    ``registry.for_host``, falling back to GitLab (today's only forge before multi-forge
+    support existed, and the sane default for a repo with no origin yet, e.g. right after
+    ``git init``) when the host isn't a known forge. This is what makes `check`/`apply`
+    per-forge: a GitHub clone gets ``gh``'s credential helper and github.com's SSH→HTTPS
+    rewrite, a GitLab clone gets ``glab``'s and gitlab.com's — same mechanism, per repo."""
+    from .forge import registry
+    url = _git(["remote", "get-url", "origin"], cwd=repo).stdout.strip()
+    forge = registry.for_host(url) if url else None
+    return forge or GitLabForge()
+
+
 def check(repo: Path, cfg: dict[str, list[str]] | None = None) -> list[str]:
-    """Policy settings that are MISSING/wrong in ``repo``'s local config (empty = compliant).
-    Pass ``cfg`` to reuse an already-read config (avoids a second git call)."""
+    """Policy settings that are MISSING/wrong in ``repo``'s local config (empty = compliant),
+    against *that repo's own forge* (see `forge_for`). Pass ``cfg`` to reuse an
+    already-read config (avoids a second git call)."""
     cfg = _local_config(repo) if cfg is None else cfg
+    forge = forge_for(repo)
+    policy = policy_for(forge)
+    https_base, ssh_forms = insteadof_for(forge)
+    url_key = f"url.{https_base}.insteadOf"
     drift = []
-    for key, want in POLICY.items():
+    for key, want in policy.items():
         got = cfg.get(key.lower(), [])
         if not got or got[-1] != want:
             drift.append(f"{key} != {want}")
-    have = set(cfg.get(_URL_KEY.lower(), []))
-    for ssh in SSH_FORMS:
+    have = set(cfg.get(url_key.lower(), []))
+    for ssh in ssh_forms:
         if ssh not in have:
-            drift.append(f"{_URL_KEY} missing {ssh}")
+            drift.append(f"{url_key} missing {ssh}")
     return drift
 
 
@@ -93,22 +134,26 @@ def non_compliant(root: Path, workspaces_dir: Path) -> list[Path]:
 
 
 def apply(repo: Path) -> list[str]:
-    """Write the token-only policy into ``repo``'s **local** config (idempotent).
-    Returns the settings changed. Never touches global/system config."""
+    """Write the token-only policy for *repo's own forge* into its **local** config
+    (idempotent). Returns the settings changed. Never touches global/system config."""
     repo = Path(repo)
     if not is_git_repo(repo):
         return []
+    forge = forge_for(repo)
+    policy = policy_for(forge)
+    https_base, ssh_forms = insteadof_for(forge)
+    url_key = f"url.{https_base}.insteadOf"
     changed = []
-    for key, want in POLICY.items():
+    for key, want in policy.items():
         got = _get_all(repo, key)
         if not got or got[-1] != want:
             _git(["config", "--local", key, want], cwd=repo)
             changed.append(f"{key}={want}")
-    have = set(_get_all(repo, _URL_KEY))
-    for ssh in SSH_FORMS:
+    have = set(_get_all(repo, url_key))
+    for ssh in ssh_forms:
         if ssh not in have:
-            _git(["config", "--local", "--add", _URL_KEY, ssh], cwd=repo)
-            changed.append(f"rewrite {ssh} → {HTTPS_BASE}")
+            _git(["config", "--local", "--add", url_key, ssh], cwd=repo)
+            changed.append(f"rewrite {ssh} → {https_base}")
     return changed
 
 

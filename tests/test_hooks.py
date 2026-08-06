@@ -228,5 +228,36 @@ class TestCommitmentGate(PersonaIso):  # F — ask before you build
                                     "session_id": "sess-2"}))
 
 
+class TestSshGuardCoversEveryForge(PersonaIso):
+    """The guard denied SSH for gitlab.com only. Under two forges that is worse than no
+    guard — it holds for one host and silently lapses for the other, while still LOOKING
+    present. Every configured forge host must be covered."""
+
+    def _deny(self, cmd):
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": cmd}})
+        return (r or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+
+    def test_ssh_remote_denied_for_both_hosts(self):
+        for host in ("gitlab.com", "github.com"):
+            self.assertEqual(self._deny(f"git clone git@{host}:acme/api.git"), "deny", host)
+            self.assertEqual(self._deny(f"git remote add o ssh://git@{host}/acme/api.git"),
+                             "deny", host)
+
+    def test_ssh_probe_denied_for_both_hosts(self):
+        for host in ("gitlab.com", "github.com"):
+            self.assertEqual(self._deny(f"ssh -T git@{host}"), "deny", host)
+
+    def test_git_ssh_command_bypass_denied(self):
+        self.assertEqual(self._deny("GIT_SSH_COMMAND=ssh git fetch"), "deny")
+
+    def test_signing_flags_denied(self):
+        self.assertEqual(self._deny("git commit -S -m x"), "deny")
+        self.assertEqual(self._deny("git commit --gpg-sign -m x"), "deny")
+
+    def test_https_clone_is_allowed_for_both_hosts(self):
+        for host in ("gitlab.com", "github.com"):
+            self.assertIsNone(self._deny(f"git clone https://{host}/acme/api.git"), host)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -197,5 +197,35 @@ class SingleCredentialGuardCase(unittest.TestCase):
         self.assertIsNone(self._deny("cd repo && git log -S'token' --oneline"))
 
 
+class TestPerForgePolicy(unittest.TestCase):
+    """Golden rule 0 restated: ONE CREDENTIAL PER FORGE. The invariant was never the
+    `glab` binary — it is *the forge's CLI holds the token, git speaks HTTPS, never SSH,
+    never signing*. `gh auth git-credential` satisfies it identically."""
+
+    def test_each_forge_contributes_its_own_helper(self):
+        from charter import gitpolicy
+        from charter.forge.github import GitHubForge
+        from charter.forge.gitlab import GitLabForge
+        self.assertIn("glab", gitpolicy.policy_for(GitLabForge())["credential.helper"])
+        self.assertIn("gh", gitpolicy.policy_for(GitHubForge())["credential.helper"])
+
+    def test_signing_stays_off_for_every_forge(self):
+        from charter import gitpolicy
+        from charter.forge.github import GitHubForge
+        from charter.forge.gitlab import GitLabForge
+        for f in (GitLabForge(), GitHubForge()):
+            p = gitpolicy.policy_for(f)
+            self.assertEqual(p["commit.gpgsign"], "false")
+            self.assertEqual(p["tag.gpgsign"], "false")
+
+    def test_no_policy_value_mentions_ssh(self):
+        from charter import gitpolicy
+        from charter.forge.github import GitHubForge
+        from charter.forge.gitlab import GitLabForge
+        for f in (GitLabForge(), GitHubForge()):
+            for v in gitpolicy.policy_for(f).values():
+                self.assertNotIn("ssh", v.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
