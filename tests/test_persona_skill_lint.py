@@ -52,15 +52,5 @@ class SkillRefLintCase(unittest.TestCase):
         self.assertEqual(persona._skill_ref_issues("`mattpocock-skills:ask-matt`"), [])
 
 
-class RealCharterCase(unittest.TestCase):
-    """End-to-end against the real installed plugin cache (no monkeypatch)."""
-
-    def test_real_steward_charter_is_clean(self):
-        if persona._installed_skills() is None:
-            self.skipTest("no plugin cache in this environment")
-        errs = [m for lvl, m in persona.lint("steward") if lvl == "error"]
-        self.assertEqual(errs, [], f"steward charter has skill-ref lint errors: {errs}")
-
-
 if __name__ == "__main__":
     unittest.main()

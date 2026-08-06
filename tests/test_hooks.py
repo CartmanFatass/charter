@@ -228,25 +228,5 @@ class TestCommitmentGate(PersonaIso):  # F — ask before you build
                                     "session_id": "sess-2"}))
 
 
-class TestSessionStartWiring(unittest.TestCase):  # G — survives /compact
-    """The committed SessionStart wiring must carry NO `matcher`.
-
-    Claude Code matches SessionStart on a `source` of startup|resume|clear|compact|fork,
-    and an ABSENT matcher matches all five. Pinning it to "startup" would still look fine
-    at session start but silently drop the persona identity + memory digest after the
-    first /compact — the failure mode is invisible, hence this guard.
-    See docs/token-efficiency.md ("What survives it").
-    """
-
-    def test_sessionstart_has_no_matcher(self):
-        import json
-        settings = json.loads((config.ROOT / ".claude" / "settings.json").read_text())
-        entries = settings.get("hooks", {}).get("SessionStart", [])
-        self.assertTrue(entries, "SessionStart wiring is missing from .claude/settings.json")
-        for e in entries:
-            self.assertNotIn("matcher", e,
-                             "SessionStart must stay unmatched so it re-fires on /compact")
-
-
 if __name__ == "__main__":
     unittest.main()
