@@ -17,10 +17,10 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from charter import config, persona
+from charter import config, persona, root
 
 _PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "EDM_HOME", "ACTIVE_PERSONA_FILE",
-          "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR")
+          "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE")
 
 
 class PersonaIso(unittest.TestCase):
@@ -39,6 +39,12 @@ class PersonaIso(unittest.TestCase):
         config.WORKSPACES_DIR = self.tmp / "workspaces"
         config.SESSIONS_DIR = config.EDM_HOME / "sessions"
         config.TERMINALS_DIR = config.EDM_HOME / "terminals"
+        # Same derivation config.py itself uses at import time (`ROOT / MARKER`), but
+        # re-run against the just-installed temp ROOT — otherwise a test reading this
+        # flag through PersonaIso would see whatever the real process's ROOT happened
+        # to be (ambient state), not something consistent with the tmp dir every other
+        # patched attribute above already points at.
+        config.HAS_CONTROL_PLANE = (config.ROOT / root.MARKER).is_file()
         config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
         self.addCleanup(self._restore)
 

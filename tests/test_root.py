@@ -62,6 +62,43 @@ class TestFindRoot(RootIso):
         self.assertEqual(root.find_root_or_cwd(self.plane), self.plane)
         self.assertEqual(root.find_root_or_cwd(self.tmp), self.tmp)
 
+    # -- Finding 1: find_root_or_cwd must swallow environmental errors, not just
+    #    ControlPlaneNotFound. find_root itself must keep raising them (unchanged). --
+
+    def test_find_root_propagates_permission_error_during_walk(self):
+        """is_file() only swallows ENOENT/ENOTDIR/EBADF/ELOOP — EACCES propagates.
+        find_root's raising contract must be untouched by the find_root_or_cwd fix."""
+        with mock.patch.object(Path, "is_file", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                root.find_root(self.plane / "deep" / "nested")
+
+    def test_find_root_or_cwd_survives_permission_error_during_walk(self):
+        with mock.patch.object(Path, "is_file", side_effect=PermissionError):
+            result = root.find_root_or_cwd(self.plane / "deep" / "nested")
+        self.assertIsInstance(result, Path)
+
+    def test_find_root_propagates_cwd_unavailable(self):
+        """Path.cwd() runs unguarded (outside any try) in find_root — a deleted cwd
+        must still raise there, unchanged."""
+        with mock.patch.object(Path, "cwd", side_effect=FileNotFoundError):
+            with self.assertRaises(FileNotFoundError):
+                root.find_root()
+
+    def test_find_root_or_cwd_survives_cwd_unavailable(self):
+        with mock.patch.object(Path, "cwd", side_effect=FileNotFoundError):
+            result = root.find_root_or_cwd()
+        self.assertIsInstance(result, Path)
+
+    def test_find_root_propagates_symlink_loop_on_resolve(self):
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            with self.assertRaises(RuntimeError):
+                root.find_root(self.plane)
+
+    def test_find_root_or_cwd_survives_symlink_loop_on_resolve(self):
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            result = root.find_root_or_cwd(self.plane)
+        self.assertIsInstance(result, Path)
+
 
 if __name__ == "__main__":
     unittest.main()
