@@ -329,8 +329,13 @@ def cmd_workspace_restore(args) -> int:
         if not workspace.is_git_repo(d):
             util.warn(f"  {r['name']}: not cloned (no access?) — skipped.")
             continue
-        cred = _cred_flag(gitpolicy.forge_for(d))  # THIS clone's own forge — never a
-        _git([*cred, "fetch", "origin", r["branch"]], cwd=d)  # hardcoded one.
+        forge = gitpolicy.forge_for(d)  # THIS clone's own forge — never a hardcoded one.
+        if forge is None:
+            # Unrecognised host (not a default forge, not declared in charter.toml) —
+            # never guess a credential helper for it; skip rather than mis-authenticate.
+            util.warn(f"  {r['name']}: origin host isn't a known/declared forge — skipped.")
+            continue
+        cred = _cred_flag(forge)
         if _git(["checkout", r["branch"]], cwd=d).returncode == 0:
             _git([*cred, "pull", "--ff-only"], cwd=d)  # latest of the recorded branch
             util.ok(f"  {r['name']} @ {r['branch']}")

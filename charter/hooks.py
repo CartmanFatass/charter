@@ -107,10 +107,24 @@ def _leak_reason(cmd: str) -> str | None:
 # these denials only catch a DELIBERATE bypass, and each names the fix + the host.  #
 # --------------------------------------------------------------------------- #
 _GIT_SSH_ENV_RE = re.compile(r"^GIT_SSH(?:_COMMAND)?=")
+# `-c core.sshCommand=…` is `GIT_SSH_COMMAND`'s exact config twin — same SSH-transport
+# override, spelled as a git config flag instead of an env var. Git config keys are
+# case-insensitive, so match that way too (`CORE.SSHCOMMAND=` is the same key).
+_SSH_COMMAND_CONFIG_RE = re.compile(r"(?i)^core\.sshcommand=")
 # signing: `--gpg-sign`, `-c commit/tag.gpgsign=true`, or `-S` on a COMMITTING verb only —
 # `git log -S<string>` is the pickaxe content search and must stay allowed.
 _SIGN_VERBS = ("commit", "tag", "merge", "revert", "cherry-pick", "rebase", "am")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _has_ssh_command_config(args: list[str]) -> bool:
+    """True when ``-c core.sshCommand=…`` appears anywhere in *args* — checked in ANY
+    position relative to the subcommand (before or after), not just where git's own
+    grammar places a global ``-c`` (strictly before). A defensive guard should cover the
+    shape wherever it lands rather than rely on git's parse order — degrading to "covers
+    more, not less" on the ambiguous case is the safe direction for a denial."""
+    return any(a == "-c" and i + 1 < len(args) and _SSH_COMMAND_CONFIG_RE.match(args[i + 1])
+              for i, a in enumerate(args))
 
 
 def _segments(cmd: str) -> list[str]:
@@ -155,29 +169,17 @@ def _known_forges() -> dict[str, object]:
     """``host -> a Forge instance`` for every host the one-credential-PER-FORGE rule must
     cover — the set the SSH guard (and its denial messages) is built from.
 
-    **Base set: every registered kind's DEFAULT host**, from ``registry.KINDS`` — never a
-    hardcoded literal. A guard built from string literals (``"gitlab.com"``) silently stops
-    covering a second forge the day one is added; building it from the registry instead
-    means a third forge kind is covered automatically the day it's registered, with no
-    separate edit here.
-
-    **Widened by the ACTIVE control plane's own ``charter.toml``**, when one is present —
-    this is what covers a *self-hosted* forge (``host = "git.internal"``), which a class's
-    default host never matches. A control plane that declares one is exactly the case the
-    registry defaults can't see on their own, so the configured host — not just the kind's
-    default — is what the guard must key off. Reading it is best-effort: this runs on every
-    Bash ``PreToolUse`` call, so a missing/unreadable/malformed ``charter.toml`` must never
-    raise or block a turn — it just leaves the guard at the class-default hosts."""
+    Delegates to ``registry.known_forges`` (shared with `gitpolicy.forge_for` /
+    `commands._origin_https`, so the guard's denial set and the "is this repo compliant"
+    check are always built from the exact same hosts — they can never drift apart): every
+    registered kind's DEFAULT host, widened by the ACTIVE control plane's own
+    ``charter.toml`` — which is what covers a *self-hosted* forge (``host =
+    "git.internal"``), a case no class's default host can ever match on its own.
+    Best-effort — this runs on every Bash ``PreToolUse`` call, so a missing/unreadable/
+    malformed ``charter.toml`` must never raise or block a turn; it just leaves the guard
+    at the class-default hosts."""
     from .forge import registry
-    forges: dict[str, object] = {cls().host: cls() for cls in registry.KINDS.values()}
-    try:
-        from . import instance
-        cfg = instance.load(config.ROOT)
-        for forge, _owner in registry.forges_for(cfg):
-            forges[forge.host] = forge
-    except Exception:
-        pass
-    return forges
+    return registry.known_forges(config.ROOT)
 
 
 def _ssh_prefix_hosts(forges: dict[str, object]) -> dict[str, str]:
@@ -202,7 +204,12 @@ def _single_credential_reason(cmd: str) -> str | None:
            "/ `charter workspace save` already use it). ")
     forges = _known_forges()
     ssh_prefix_hosts = _ssh_prefix_hosts(forges)
-    ssh_prefixes = tuple(ssh_prefix_hosts)
+    # git treats hostnames case-insensitively (`GITHUB.COM` == `github.com` on the wire),
+    # so the guard must match that way too — matching only the canonical lowercase form
+    # is worse than no guard: it still LOOKS present while a differently-cased host walks
+    # straight through it.
+    lower_prefix_hosts = {p.lower(): h for p, h in ssh_prefix_hosts.items()}
+    lower_prefixes = tuple(lower_prefix_hosts)
     for seg in _segments(cmd):
         prog, env, argv = _invocation(seg)
         base = prog.rsplit("/", 1)[-1]
@@ -211,11 +218,15 @@ def _single_credential_reason(cmd: str) -> str | None:
             if any(_GIT_SSH_ENV_RE.match(e) for e in env):
                 return fix + ("This forces git through an SSH transport "
                               "(GIT_SSH/GIT_SSH_COMMAND) — drop it.")
+            if _has_ssh_command_config(args):
+                return fix + ("`-c core.sshCommand=…` forces the same SSH transport "
+                              "override as GIT_SSH_COMMAND (its git-config twin) — drop it.")
             # a URL only counts when the token IS the URL (a bare argument) — not when it's
             # mentioned inside a longer quoted string such as a commit message
-            bad = next((a for a in _url_args(args) if a.startswith(ssh_prefixes)), None)
+            bad = next((a for a in _url_args(args) if a.lower().startswith(lower_prefixes)), None)
             if bad is not None:
-                host = next(h for p, h in ssh_prefix_hosts.items() if bad.startswith(p))
+                low = bad.lower()
+                host = next(h for p, h in lower_prefix_hosts.items() if low.startswith(p))
                 return fix + (f"This hands git an SSH {host} URL — use the HTTPS form "
                               f"(`https://{host}/<group>/<repo>.git`); SSH remotes are "
                               "auto-rewritten, so you never need to type one.")
@@ -226,7 +237,8 @@ def _single_credential_reason(cmd: str) -> str | None:
                               "an agent) — commit unsigned; `charter save` handles control-plane "
                               "commits.")
         elif base == "ssh":
-            host = next((h for h in forges if any(f"git@{h}" in a for a in argv[1:])), None)
+            host = next((h for h in forges
+                        if any(f"git@{h}".lower() in a.lower() for a in argv[1:])), None)
             if host is not None:
                 cli = forges[host].cli
                 return fix + (f"SSH to {host} isn't used — check the credential with "

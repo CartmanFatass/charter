@@ -50,15 +50,18 @@ def _https_url(r: dict) -> str:
 
 def _origin_https(root) -> str | None:
     """The control plane's own ``origin`` as an HTTPS URL (rewriting an SSH one via ITS
-    forge's own rewrite rule — ``registry.for_host`` + ``insteadof()``), or ``None`` when
-    there's no origin yet, or its host isn't a forge this charter knows. Generalized from
-    a gitlab.com-only check so a GitHub-hosted control plane (e.g. this one) is recognized
-    too, instead of being told its origin is wrong."""
+    forge's own rewrite rule — ``registry.resolve_host`` + ``insteadof()``), or ``None``
+    when there's no origin yet, or its host isn't a forge this charter knows about — a
+    DEFAULT host (gitlab.com/github.com) or one DECLARED in this control plane's own
+    ``charter.toml`` (see ``gitpolicy.forge_for``, which resolves the same way). An
+    unrecognised host deliberately returns ``None`` rather than guessing: `commit_push`
+    then warns and skips the push instead of silently trying (and failing) against the
+    wrong forge."""
     url = _git(["remote", "get-url", "origin"], cwd=root).stdout.strip()
     if not url:
         return None
     from .forge import registry
-    forge = registry.for_host(url)
+    forge = registry.resolve_host(url, config.ROOT)
     if forge is None:
         return None
     https_base, ssh_forms = forge.insteadof()
@@ -599,7 +602,7 @@ def cmd_git_policy(args) -> int:
         util.info("No git repos found (control plane + workspace clones).")
         return 0
     apply = getattr(args, "apply", False)
-    drifted = fixed = 0
+    drifted = fixed = unmanaged = 0
     for repo in targets:
         try:
             rel = repo.relative_to(config.ROOT)
@@ -608,6 +611,12 @@ def cmd_git_policy(args) -> int:
         name = str(rel) if str(rel) != "." else "control plane"
         drift = gitpolicy.check(repo)
         if not drift:
+            continue
+        if drift == [gitpolicy.UNMANAGED_FORGE]:
+            # Honest "can't tell" — never silently reported green, and never guessed at
+            # via `apply` either (see gitpolicy.forge_for / UNMANAGED_FORGE).
+            unmanaged += 1
+            util.warn(f"{name}: {gitpolicy.UNMANAGED_FORGE}")
             continue
         drifted += 1
         if apply:
@@ -618,11 +627,16 @@ def cmd_git_policy(args) -> int:
             util.warn(f"{name}: {len(drift)} setting(s) not token-only")
             for d in drift[:4]:
                 util.info(f"    {d}")
-    if not drifted:
+    if not drifted and not unmanaged:
         util.ok(f"All {len(targets)} repo(s) are token-only (each forge's own HTTPS token, "
                 f"no SSH, no signing).")
-    elif apply:
-        util.ok(f"Applied the single-credential policy to {fixed} of {len(targets)} repo(s).")
     else:
-        util.info(f"{drifted} of {len(targets)} repo(s) drifted — fix: charter git-policy --apply")
+        if apply:
+            util.ok(f"Applied the single-credential policy to {fixed} of {len(targets)} repo(s).")
+        elif drifted:
+            util.info(f"{drifted} of {len(targets)} repo(s) drifted — fix: charter git-policy --apply")
+        if unmanaged:
+            util.warn(f"{unmanaged} repo(s) have an unrecognised forge — not covered by "
+                      f"any policy. Declare the host in charter.toml's [[forge]] to bring "
+                      f"{'it' if unmanaged == 1 else 'them'} under management.")
     return 0

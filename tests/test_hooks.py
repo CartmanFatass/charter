@@ -258,6 +258,25 @@ class TestSshGuardCoversEveryForge(PersonaIso):
         for host in ("gitlab.com", "github.com"):
             self.assertIsNone(self._deny(f"git clone https://{host}/acme/api.git"), host)
 
+    def test_declared_self_hosted_forge_is_covered_too(self):
+        """FINDING 1's guard half: a self-hosted host DECLARED in charter.toml must be
+        denied exactly like a default host — the guard already widened via
+        `registry.known_forges`; this pins that the widening survived the refactor that
+        shares it with `gitpolicy.forge_for`/`commands._origin_https`."""
+        (config.ROOT / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        self.assertEqual(self._deny("git clone git@git.internal:acme/api.git"), "deny")
+
+    # --- FINDING 2, shape A: `-c core.sshCommand=…` — GIT_SSH_COMMAND's config twin
+    def test_core_sshcommand_config_denied_before_and_after_subcommand(self):
+        self.assertEqual(self._deny("git -c core.sshCommand=ssh fetch"), "deny")
+        self.assertEqual(self._deny("git fetch -c core.sshCommand=ssh"), "deny")
+
+    # --- FINDING 2, shape B: git treats hostnames case-insensitively
+    def test_ssh_remote_denied_regardless_of_host_case(self):
+        for host in ("GITHUB.COM", "GitLab.Com"):
+            self.assertEqual(self._deny(f"git clone git@{host}:acme/api.git"), "deny", host)
+
 
 if __name__ == "__main__":
     unittest.main()

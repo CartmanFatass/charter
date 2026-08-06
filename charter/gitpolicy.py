@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import util
+from . import config, util
 from .forge.gitlab import GitLabForge
 
 
@@ -94,25 +94,58 @@ def _get_all(repo: Path, key: str) -> list[str]:
     return _local_config(repo).get(key.lower(), [])
 
 
-def forge_for(repo: Path) -> object:
-    """Which forge governs *repo*'s policy — inferred from its ``origin`` remote via
-    ``registry.for_host``, falling back to GitLab (today's only forge before multi-forge
-    support existed, and the sane default for a repo with no origin yet, e.g. right after
-    ``git init``) when the host isn't a known forge. This is what makes `check`/`apply`
-    per-forge: a GitHub clone gets ``gh``'s credential helper and github.com's SSH→HTTPS
-    rewrite, a GitLab clone gets ``glab``'s and gitlab.com's — same mechanism, per repo."""
+#: `check` returns exactly this (and only this) when a repo's origin host is neither a
+#: default forge host nor one DECLARED in the active control plane's ``charter.toml`` —
+#: genuinely unrecognised. Distinguished from ordinary drift (`key != value`) because it
+#: can't be fixed by `apply`: there's no forge to apply a policy FOR. Before this existed,
+#: an unrecognised host silently fell back to GitLab's policy, so `check` returned `[]`
+#: (compliant) for a repo it had never actually verified — a false green that is worse
+#: than no check at all, because it still LOOKS like the golden rule is enforced.
+UNMANAGED_FORGE = ("forge unknown — origin host is not a default forge host and isn't "
+                   "declared in charter.toml; the token-only policy can't be verified or "
+                   "applied. Declare it under [[forge]] (host = \"…\") to bring it under "
+                   "management.")
+
+
+def forge_for(repo: Path) -> object | None:
+    """Which forge governs *repo*'s policy — inferred from its ``origin`` remote.
+
+    Recognises two things: each registered kind's DEFAULT host (``gitlab.com``,
+    ``github.com``), and any self-hosted host the ACTIVE control plane DECLARES in its
+    own ``charter.toml`` (``registry.resolve_host`` — the same host set the SSH guard
+    uses, see ``hooks._known_forges``). This is what makes `check`/`apply` per-forge: a
+    GitHub clone gets ``gh``'s credential helper and github.com's SSH→HTTPS rewrite, a
+    self-hosted GitLab clone gets ``glab``'s and ITS OWN host's rewrite — never
+    gitlab.com's, which would leave its real SSH remote unrewritten.
+
+    Returns ``None`` when *repo* has an origin whose host is genuinely unrecognised —
+    not a default, not declared. Callers MUST treat that as unmanaged, never silently
+    fall back to another forge's policy (see `UNMANAGED_FORGE`); "do not simply widen
+    the fallback" is the whole point — a wrong-but-plausible-looking policy is worse than
+    an honest "can't tell".
+
+    A repo with NO origin at all (a fresh ``git init``, nothing pushed yet) is a
+    different case — there's no host to be wrong about — and keeps the pre-multi-forge
+    default (GitLab), unchanged from before multi-forge support existed."""
     from .forge import registry
     url = _git(["remote", "get-url", "origin"], cwd=repo).stdout.strip()
-    forge = registry.for_host(url) if url else None
-    return forge or GitLabForge()
+    if not url:
+        return GitLabForge()
+    return registry.resolve_host(url, config.ROOT)
 
 
 def check(repo: Path, cfg: dict[str, list[str]] | None = None) -> list[str]:
     """Policy settings that are MISSING/wrong in ``repo``'s local config (empty = compliant),
     against *that repo's own forge* (see `forge_for`). Pass ``cfg`` to reuse an
-    already-read config (avoids a second git call)."""
-    cfg = _local_config(repo) if cfg is None else cfg
+    already-read config (avoids a second git call).
+
+    An unrecognised forge (`forge_for` → ``None``) returns ``[UNMANAGED_FORGE]`` —
+    never ``[]``. Reporting compliant for a repo whose policy was never actually checked
+    is the false-green bug this exists to prevent."""
     forge = forge_for(repo)
+    if forge is None:
+        return [UNMANAGED_FORGE]
+    cfg = _local_config(repo) if cfg is None else cfg
     policy = policy_for(forge)
     https_base, ssh_forms = insteadof_for(forge)
     url_key = f"url.{https_base}.insteadOf"
@@ -135,11 +168,17 @@ def non_compliant(root: Path, workspaces_dir: Path) -> list[Path]:
 
 def apply(repo: Path) -> list[str]:
     """Write the token-only policy for *repo's own forge* into its **local** config
-    (idempotent). Returns the settings changed. Never touches global/system config."""
+    (idempotent). Returns the settings changed. Never touches global/system config.
+
+    A no-op (returns ``[]``) when the forge is unrecognised (`forge_for` → ``None``) —
+    there's nothing safe to apply for a host we can't identify; guessing would just
+    reintroduce the false-green bug one layer down."""
     repo = Path(repo)
     if not is_git_repo(repo):
         return []
     forge = forge_for(repo)
+    if forge is None:
+        return []
     policy = policy_for(forge)
     https_base, ssh_forms = insteadof_for(forge)
     url_key = f"url.{https_base}.insteadOf"

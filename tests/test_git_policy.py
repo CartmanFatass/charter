@@ -10,8 +10,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from charter import gitpolicy, hooks
+from charter import config, gitpolicy, hooks
 
 _ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
 # built from parts so the literal never appears in a command this repo's own guard scans
@@ -158,6 +159,25 @@ class SingleCredentialGuardCase(unittest.TestCase):
     def test_denies_ssh_probe_to_gitlab(self):
         self.assertIsNotNone(self._deny("ssh -T " + "git" + "@gitlab.com"))
 
+    # --- FINDING 2, shape A: `-c core.sshCommand=…` is GIT_SSH_COMMAND's exact config twin
+    def test_denies_core_sshcommand_config_before_subcommand(self):
+        self.assertIsNotNone(self._deny("git -c core.sshCommand='ssh -i ~/.ssh/id' fetch"))
+
+    def test_denies_core_sshcommand_config_after_subcommand(self):
+        self.assertIsNotNone(self._deny("git fetch -c core.sshCommand='ssh -i ~/.ssh/id'"))
+
+    def test_denies_core_sshcommand_case_insensitive_key(self):
+        # git config keys are case-insensitive — `CORE.SSHCOMMAND` is the same key.
+        self.assertIsNotNone(self._deny("git -c CORE.SSHCOMMAND=ssh push origin main"))
+
+    # --- FINDING 2, shape B: git treats hostnames case-insensitively — so must the guard
+    def test_denies_uppercase_host_in_ssh_url(self):
+        self.assertIsNotNone(self._deny("git clone git@GITHUB.COM:acme/api.git"))
+        self.assertIsNotNone(self._deny("git clone git@GitLab.Com:easydmarc/x.git"))
+
+    def test_denies_uppercase_host_ssh_probe(self):
+        self.assertIsNotNone(self._deny("ssh -T git@GITHUB.COM"))
+
     def test_allows_normal_git_over_https(self):
         for ok in ("git push origin main", "git pull --ff-only", "git status",
                    "git clone https://gitlab.com/easydmarc/x.git", "git commit -m 'x'"):
@@ -225,6 +245,138 @@ class TestPerForgePolicy(unittest.TestCase):
         for f in (GitLabForge(), GitHubForge()):
             for v in gitpolicy.policy_for(f).values():
                 self.assertNotIn("ssh", v.lower())
+
+
+class DeclaredSelfHostedForgeCase(unittest.TestCase):
+    """FINDING 1 — a repo whose origin lives on a DECLARED self-hosted forge (GitLab
+    Enterprise / GHE, named in this control plane's own charter.toml) must get THAT
+    forge's own policy, not a silent GitLab-default false green.
+
+    Verified live by the reviewer, before this fix: `forge_for` only recognised
+    gitlab.com/github.com (the registry's class DEFAULTS), so a self-hosted host fell
+    through to the GitLab fallback — wrong CLI's helper entirely on a GHE host, and on
+    self-hosted GitLab the credential helper LOOKED right (`glab`) while the insteadOf
+    rewrite still targeted gitlab.com, so the real `git@git.internal:` SSH remote was
+    NEVER rewritten — `check()` still reported `[]` (token-only) while a plain `git push`
+    genuinely transported over SSH, the exact hang golden rule 0 exists to prevent."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-selfhost-root-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        self.repo = Path(tempfile.mkdtemp(prefix="edm-selfhost-repo-"))
+        self.addCleanup(lambda: shutil.rmtree(self.repo, ignore_errors=True))
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       capture_output=True, env={**os.environ, **_ENV})
+
+    def _declare(self, body: str) -> None:
+        (self.root / "charter.toml").write_text(body)
+
+    def _origin(self, url: str) -> None:
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", url],
+                       check=True, capture_output=True)
+
+    def test_self_hosted_gitlab_gets_its_own_helper_and_insteadof(self):
+        self._declare('[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        self._origin("https://git.internal/acme/api.git")
+        with mock.patch.object(config, "ROOT", self.root):
+            forge = gitpolicy.forge_for(self.repo)
+            self.assertIsNotNone(forge, "a declared self-hosted host must resolve")
+            self.assertEqual(forge.host, "git.internal")
+            self.assertEqual(forge.credential_helper(), "!glab auth git-credential")
+            https_base, ssh_forms = gitpolicy.insteadof_for(forge)
+            self.assertEqual(https_base, "https://git.internal/")
+            self.assertIn("git@git.internal:", ssh_forms)
+
+    def test_self_hosted_github_enterprise_gets_gh_not_glab(self):
+        self._declare('[[forge]]\nkind = "github"\nhost = "ghe.acme.com"\nowner = "acme"\n')
+        self._origin("https://ghe.acme.com/acme/api.git")
+        with mock.patch.object(config, "ROOT", self.root):
+            forge = gitpolicy.forge_for(self.repo)
+            self.assertIsNotNone(forge)
+            # The live bug: a GHE host fell back to GitLab's policy — the WRONG CLI
+            # entirely, not just the wrong host rewrite.
+            self.assertEqual(forge.credential_helper(), "!gh auth git-credential")
+
+    def test_apply_writes_the_declared_hosts_insteadof_not_gitlab_coms(self):
+        self._declare('[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        self._origin("git" + "@git.internal:acme/api.git")  # the live bug: an SSH remote
+        with mock.patch.object(config, "ROOT", self.root):
+            changed = gitpolicy.apply(self.repo)
+            self.assertTrue(changed)
+            self.assertEqual(gitpolicy.check(self.repo), [])   # honestly compliant now
+        got = subprocess.run(["git", "-C", str(self.repo), "config", "--local", "--get-all",
+                              "url.https://git.internal/.insteadOf"],
+                             capture_output=True, text=True).stdout.split()
+        self.assertIn("git@git.internal:", got)
+        # …and gitlab.com's rewrite was NOT written (that would still leave the real SSH
+        # remote unrewritten — the exact false-green shape the reviewer found live).
+        gitlab_com = subprocess.run(["git", "-C", str(self.repo), "config", "--local",
+                                     "--get-all", "url.https://gitlab.com/.insteadOf"],
+                                    capture_output=True, text=True)
+        self.assertNotIn("git.internal", gitlab_com.stdout)
+
+    def test_origin_https_resolves_the_self_hosted_ssh_remote(self):
+        self._declare('[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        self._origin("git" + "@git.internal:acme/api.git")
+        with mock.patch.object(config, "ROOT", self.root):
+            from charter.commands import _origin_https
+            self.assertEqual(_origin_https(self.repo), "https://git.internal/acme/api.git")
+
+
+class UnrecognizedForgeIsUnmanagedCase(unittest.TestCase):
+    """CRITICAL CONSTRAINT — an origin host that is neither a default forge nor declared
+    in charter.toml must NEVER read as compliant. Before this fix, `forge_for` fell back
+    to GitLab's policy for ANY unrecognised host, so `check()` returned `[]` (green) for
+    a repo whose policy was never actually verified — worse than no check at all, because
+    it still LOOKS like golden rule 0 is enforced. The fix must not simply widen the
+    fallback: an unrecognised host has to read as honestly unmanaged."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-unknown-root-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+        self.repo = Path(tempfile.mkdtemp(prefix="edm-unknown-repo-"))
+        self.addCleanup(lambda: shutil.rmtree(self.repo, ignore_errors=True))
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True,
+                       capture_output=True, env={**os.environ, **_ENV})
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
+                        "https://bitbucket.example.org/acme/api.git"],
+                       check=True, capture_output=True)
+
+    def test_forge_for_is_none_not_a_silent_gitlab_fallback(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            self.assertIsNone(gitpolicy.forge_for(self.repo))
+
+    def test_check_reports_unmanaged_never_a_false_green(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            drift = gitpolicy.check(self.repo)
+        self.assertNotEqual(drift, [], "an unrecognised host must never report compliant")
+        self.assertEqual(drift, [gitpolicy.UNMANAGED_FORGE])
+
+    def test_apply_never_guesses_a_policy_for_it(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            changed = gitpolicy.apply(self.repo)
+        self.assertEqual(changed, [])
+        local = subprocess.run(["git", "-C", str(self.repo), "config", "--local", "--list"],
+                               capture_output=True, text=True).stdout
+        self.assertNotIn("credential.helper", local)
+
+    def test_origin_https_is_none_for_an_unrecognised_host(self):
+        with mock.patch.object(config, "ROOT", self.root):
+            from charter.commands import _origin_https
+            self.assertIsNone(_origin_https(self.repo))
+
+    def test_a_repo_with_no_origin_at_all_still_defaults_to_gitlab(self):
+        """Back-compat: this is a DIFFERENT case from an unrecognised host — a fresh
+        `git init` has no host to be wrong about, so it keeps the pre-multi-forge
+        default, unchanged."""
+        fresh = Path(tempfile.mkdtemp(prefix="edm-fresh-"))
+        self.addCleanup(lambda: shutil.rmtree(fresh, ignore_errors=True))
+        subprocess.run(["git", "init", "-q", str(fresh)], check=True, capture_output=True,
+                       env={**os.environ, **_ENV})
+        with mock.patch.object(config, "ROOT", self.root):
+            forge = gitpolicy.forge_for(fresh)
+        self.assertIsNotNone(forge)
+        self.assertEqual(forge.kind, "gitlab")
 
 
 if __name__ == "__main__":

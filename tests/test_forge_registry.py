@@ -4,7 +4,10 @@ A control plane may declare several `[[forge]]` blocks and track repos from all 
 because organisations genuinely drift across forges."""
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 from charter.forge import registry
 from charter.forge.github import GitHubForge
@@ -62,6 +65,49 @@ class TestForHost(unittest.TestCase):
 
     def test_an_unknown_host_is_none(self):
         self.assertIsNone(registry.for_host("https://example.com/a/b.git"))
+
+
+class TestKnownForges(unittest.TestCase):
+    """`known_forges`/`resolve_host` are the shared helper behind BOTH the SSH guard
+    (`hooks._known_forges`) and forge resolution (`gitpolicy.forge_for`,
+    `commands._origin_https`) — this is what lets a control plane's DECLARED self-hosted
+    forge (not just gitlab.com/github.com) be recognised everywhere consistently, instead
+    of a self-hosted host silently falling back to another forge's policy."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="edm-knownforges-"))
+        self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
+
+    def test_with_no_charter_toml_only_the_registered_defaults_are_known(self):
+        forges = registry.known_forges(self.root)
+        self.assertEqual(set(forges), {"gitlab.com", "github.com"})
+
+    def test_a_declared_self_hosted_host_widens_the_set(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "gitlab"\nhost = "git.internal"\ngroup = "acme"\n')
+        forges = registry.known_forges(self.root)
+        self.assertIn("git.internal", forges)
+        self.assertEqual(forges["git.internal"].kind, "gitlab")
+
+    def test_a_malformed_charter_toml_never_raises_and_keeps_the_defaults(self):
+        (self.root / "charter.toml").write_text("not [ valid toml")
+        forges = registry.known_forges(self.root)   # must not raise
+        self.assertEqual(set(forges), {"gitlab.com", "github.com"})
+
+    def test_resolve_host_recognises_a_declared_self_hosted_host(self):
+        (self.root / "charter.toml").write_text(
+            '[[forge]]\nkind = "github"\nhost = "ghe.acme.com"\nowner = "acme"\n')
+        forge = registry.resolve_host("https://ghe.acme.com/acme/api.git", self.root)
+        self.assertIsNotNone(forge)
+        self.assertEqual(forge.kind, "github")
+
+    def test_resolve_host_still_recognises_the_registered_defaults(self):
+        forge = registry.resolve_host("https://github.com/acme/api.git", self.root)
+        self.assertEqual(forge.kind, "github")
+
+    def test_resolve_host_is_none_for_a_genuinely_unknown_host(self):
+        self.assertIsNone(
+            registry.resolve_host("https://bitbucket.example.org/a/b.git", self.root))
 
 
 class TestKnownKindsAgreeWithInventory(unittest.TestCase):
