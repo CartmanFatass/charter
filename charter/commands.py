@@ -596,14 +596,32 @@ def cmd_reinit(args) -> int:
         return 1
     from . import instance as _instance
 
-    created, present = [], []
+    created, present, blocked = [], [], []
     for d in _instance.BASELINE_DIRS:
         p = config.ROOT / d
         if p.is_dir():
             present.append(f"{d}/")
+        elif p.exists():
+            # FINDING C1: a baseline path occupied by a FILE (or anything else that
+            # isn't a directory) used to fall through straight into `mkdir()`, raising
+            # an uncaught FileExistsError. The additive rule means we never delete or
+            # rename the user's file to make room — surface it and let them decide.
+            blocked.append((d, p))
         else:
             p.mkdir(parents=True, exist_ok=True)
             created.append(f"{d}/")
+
+    if blocked:
+        for d, p in blocked:
+            util.err(f"{d}/ can't be created — {p} already exists and is not a "
+                     f"directory. charter never deletes or renames existing content; "
+                     f"move or remove it yourself, then re-run `charter reinit`.")
+        if created:
+            util.info(f"  created: {', '.join(created)}")
+        if present:
+            util.info(f"  already present: {', '.join(present)}")
+        return 1
+
     if not created:
         util.ok(f"Up to date (schema {_instance.SCHEMA}) — nothing to do.")
         return 0

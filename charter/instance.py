@@ -133,9 +133,21 @@ def drift(root: Path) -> list[str]:
 
     Empty means current. This is the *detect* half of the stamp/detect/heal pattern; the
     stamp is ``schema`` in charter.toml and the heal is ``charter reinit``.
+
+    A baseline path can be "not a directory" two different ways, and the message must
+    not conflate them: genuinely absent (``reinit`` just creates it) versus occupied by
+    a file or other non-directory (FINDING C1 — ``reinit`` will *refuse*, because
+    deleting or renaming a user's file to make room would break the additive rule).
+    ``is_dir()`` alone can't tell these apart, so this also checks ``exists()``.
     """
     out = []
     for d in BASELINE_DIRS:
-        if not (Path(root) / d).is_dir():
+        p = Path(root) / d
+        if p.is_dir():
+            continue
+        if p.exists():
+            out.append(f"{d}/ is occupied by a file, not a directory — reinit will "
+                       f"refuse to touch it")
+        else:
             out.append(f"missing directory: {d}/")
     return out

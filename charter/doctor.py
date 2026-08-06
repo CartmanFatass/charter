@@ -257,7 +257,7 @@ def check_control_plane_schema() -> Result:
     return Result(
         "schema",
         WARN,
-        detail=f"{len(found)} missing: " + "; ".join(found),
+        detail=f"{len(found)} issue(s): " + "; ".join(found),
         hint="Run: charter reinit  (creates what's missing; never touches existing content).",
     )
 
