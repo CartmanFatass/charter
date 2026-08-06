@@ -5,9 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-#: The GitLab group that owns every EasyDMARC repo.
-GROUP = "easydmarc"
-
 from . import root as _root
 
 #: The control plane this invocation operates on — located by a ``charter.toml`` marker,
@@ -19,23 +16,42 @@ ROOT = _root.find_root_or_cwd()
 #: and fail with a clear message; ``--version`` and ``init`` do not.
 HAS_CONTROL_PLANE = (ROOT / _root.MARKER).is_file()
 
+from . import instance as _instance
+
+#: Fallbacks used when a control plane declares nothing (or none was found).
+GROUP_FALLBACK = ""
+DEFAULT_WORKSPACE_FALLBACK = "default"
+
+#: Parsed once at import time. ``config`` is imported by every command (including
+#: ``charter --version``), so a malformed ``charter.toml`` or a too-new schema must never
+#: crash import — ``instance.load`` keeps raising (its own tests pin that); here the
+#: failure is caught and recorded instead of propagated. ``doctor`` surfaces it to the user.
+try:
+    _cfg = _instance.load(ROOT)
+    CONFIG_ERROR: str | None = None
+except Exception as e:  # malformed TOML, schema too new, unreadable file
+    _cfg, CONFIG_ERROR = {}, str(e)
+
+#: The group/org whose repos this control plane tracks — from charter.toml, not baked in.
+GROUP = _instance.group_of(_cfg, GROUP_FALLBACK)
+
+#: Repos that must never appear in the inventory (typically the control plane itself).
+EXCLUDE = _instance.exclude_of(_cfg)
+
+#: The always-present workspace used when none is selected — from charter.toml, not baked in.
+DEFAULT_WORKSPACE = _instance.default_workspace_of(_cfg, DEFAULT_WORKSPACE_FALLBACK)
+
 #: Per-task workspaces live here: ``workspaces/<workspace>/<repo>`` (on-demand repo
 #: clones) plus the workspace's own ``memory/`` and ``refs/``. Gitignored — a
 #: workspace is a private, per-developer, per-task environment. (Renamed from the
 #: old ``repos/``; ``workspace._ensure_layout`` migrates an existing ``repos/``.)
 WORKSPACES_DIR = ROOT / "workspaces"
 
-#: The always-present workspace used when none is selected.
-DEFAULT_WORKSPACE = "default"
-
 #: The durable source of truth: every repo in the group + metadata.
 INVENTORY = ROOT / "inventory" / "repos.json"
 
 #: Generated documentation.
 DOCS_DIR = ROOT / "docs"
-
-#: Repos that must never appear in the inventory (the umbrella itself).
-EXCLUDE = {"easydmarc-umbrella"}
 
 #: Per-developer secrets home — vault registry + plain-file vaults. Gitignored,
 #: never committed. Override with ``$EDM_HOME`` (e.g. to share across clones).

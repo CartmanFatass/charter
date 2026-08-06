@@ -17,10 +17,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from charter import config, persona, root
+from charter import config, instance, persona, root
 
 _PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "EDM_HOME", "ACTIVE_PERSONA_FILE",
-          "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE")
+          "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE",
+          "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE")
 
 
 class PersonaIso(unittest.TestCase):
@@ -45,6 +46,19 @@ class PersonaIso(unittest.TestCase):
         # to be (ambient state), not something consistent with the tmp dir every other
         # patched attribute above already points at.
         config.HAS_CONTROL_PLANE = (config.ROOT / root.MARKER).is_file()
+        # Same derivation config.py itself uses at import time (`instance.load(ROOT)` +
+        # group_of/exclude_of/default_workspace_of), re-run against the temp ROOT — a
+        # test reading GROUP/EXCLUDE/DEFAULT_WORKSPACE/CONFIG_ERROR through PersonaIso
+        # must see values consistent with the tmp dir, not whatever real charter.toml
+        # (or absence of one) happened to be ambient in the process that ran the suite.
+        try:
+            _cfg = instance.load(config.ROOT)
+            config.CONFIG_ERROR = None
+        except Exception as e:
+            _cfg, config.CONFIG_ERROR = {}, str(e)
+        config.GROUP = instance.group_of(_cfg, config.GROUP_FALLBACK)
+        config.EXCLUDE = instance.exclude_of(_cfg)
+        config.DEFAULT_WORKSPACE = instance.default_workspace_of(_cfg, config.DEFAULT_WORKSPACE_FALLBACK)
         config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
         self.addCleanup(self._restore)
 

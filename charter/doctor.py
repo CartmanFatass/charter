@@ -110,6 +110,24 @@ def check_ssh() -> Result:
     )
 
 
+def check_control_plane_config() -> Result:
+    """``charter.toml`` failed to parse (malformed TOML, or a schema newer than this
+    charter understands). ``config`` swallows the exception so the CLI stays usable
+    (see ``config.CONFIG_ERROR``); this is where a user would look to find out why."""
+    from . import config as _config
+
+    if _config.CONFIG_ERROR is None:
+        return Result("charter.toml", OK, detail="parsed cleanly" if _config.HAS_CONTROL_PLANE
+                      else "no control plane found")
+    return Result(
+        "charter.toml",
+        FAIL,
+        detail=_first_line(_config.CONFIG_ERROR),
+        hint="Fix or remove charter.toml, then re-run. Falling back to empty "
+             "group/exclude/workspace defaults until it does.",
+    )
+
+
 def check_inventory() -> Result:
     n = inventory.load().get("count", 0)
     if n:
@@ -149,6 +167,7 @@ CHECKS = (
     check_glab,
     check_glab_auth,
     check_ssh,
+    check_control_plane_config,
     check_inventory,
     check_vaults,
 )
