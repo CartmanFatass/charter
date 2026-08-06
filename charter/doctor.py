@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 
 from . import inventory, util
+from .forge.gitlab import GitLabForge
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -87,32 +88,34 @@ def check_git_identity() -> Result:
     )
 
 
-def check_glab() -> Result:
-    if not shutil.which("glab"):
+def check_forge_cli() -> Result:
+    cli = GitLabForge().cli
+    if not shutil.which(cli):
         return Result(
-            "glab",
+            cli,
             FAIL,
-            hint="Install glab: brew install glab  (see https://gitlab.com/gitlab-org/cli).",
+            hint=f"Install {cli}: brew install glab  (see https://gitlab.com/gitlab-org/cli).",
         )
-    return Result("glab", OK, detail=_first_line(util.run(["glab", "--version"], check=False).stdout))
+    return Result(cli, OK, detail=_first_line(util.run([cli, "--version"], check=False).stdout))
 
 
-def check_glab_auth() -> Result:
-    if not shutil.which("glab"):
-        return Result("glab auth", FAIL, hint="Install glab first, then run: glab auth login.")
-    proc = util.run(["glab", "auth", "status"], check=False)
+def check_forge_auth() -> Result:
+    cli = GitLabForge().cli
+    if not shutil.which(cli):
+        return Result(f"{cli} auth", FAIL, hint=f"Install {cli} first, then run: {cli} auth login.")
+    proc = util.run([cli, "auth", "status"], check=False)
     blob = (proc.stdout or "") + (proc.stderr or "")
     if "Logged in" in blob:
         summary = next(
             (ln.strip() for ln in blob.splitlines() if "Logged in" in ln),
             "authenticated",
         )
-        return Result("glab auth", OK, detail=summary)
+        return Result(f"{cli} auth", OK, detail=summary)
     return Result(
-        "glab auth",
+        f"{cli} auth",
         FAIL,
         detail=_first_line(blob),
-        hint="Run: glab auth login  (pick gitlab.com; choose TOKEN/HTTPS — charter "
+        hint=f"Run: {cli} auth login  (pick gitlab.com; choose TOKEN/HTTPS — charter "
              "never uses SSH for git).",
     )
 
@@ -191,8 +194,8 @@ CHECKS = (
     check_python,
     check_git,
     check_git_identity,
-    check_glab,
-    check_glab_auth,
+    check_forge_cli,
+    check_forge_auth,
     check_ssh,
     check_control_plane_config,
     check_inventory,

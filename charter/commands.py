@@ -6,7 +6,9 @@ import concurrent.futures
 import json
 from pathlib import Path
 
-from . import config, doctor, gitlab, inventory, render, util, workspace
+from . import config, doctor, inventory, render, util, workspace
+from .forge import ForgeError
+from .forge.gitlab import GitLabForge
 
 
 def _git(args, cwd=None):
@@ -45,11 +47,15 @@ def _origin_https(root) -> str | None:
 # discover                                                                     #
 # --------------------------------------------------------------------------- #
 def cmd_discover(args) -> int:
-    gitlab.check_auth()
+    forge = GitLabForge()
+    try:
+        forge.check_auth()
+    except ForgeError as e:
+        raise SystemExit(str(e))
     util.info(f"Querying GitLab group `{config.GROUP}` …")
     projects = [
-        p for p in gitlab.list_group_projects(config.GROUP)
-        if p["path"] not in config.EXCLUDE
+        p for p in forge.list_repos(config.GROUP)
+        if p["name"] not in config.EXCLUDE
     ]
     util.info(
         f"Found {len(projects)} projects. "
@@ -59,14 +65,14 @@ def cmd_discover(args) -> int:
     def build(p: dict) -> dict:
         stack = "unknown"
         if not args.no_probe:
-            files = gitlab.repo_tree(p["id"], p.get("default_branch"))
+            files = forge.repo_tree(p, p.get("default_branch"))
             stack = inventory.classify_stack(files)
         return {
-            "name": p["path"],
+            "name": p["name"],
             "path_with_namespace": p["path_with_namespace"],
-            "ssh_url": p["ssh_url_to_repo"],
+            "ssh_url": p["ssh_url"],
             "default_branch": p.get("default_branch") or "main",
-            "kind": inventory.classify_kind(p["path"]),
+            "kind": inventory.classify_kind(p["name"]),
             "stack": stack,
             "description": (p.get("description") or "").strip(),
             "topics": p.get("topics") or [],
