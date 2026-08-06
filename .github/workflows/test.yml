@@ -1,5 +1,8 @@
 name: tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:      # lets CI be re-triggered without a noise commit
 jobs:
   test:
     runs-on: ubuntu-latest
