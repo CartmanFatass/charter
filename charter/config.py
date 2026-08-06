@@ -41,6 +41,9 @@ EXCLUDE = _instance.exclude_of(_cfg)
 #: The always-present workspace used when none is selected — from charter.toml, not baked in.
 DEFAULT_WORKSPACE = _instance.default_workspace_of(_cfg, DEFAULT_WORKSPACE_FALLBACK)
 
+#: How far a written memory travels — see charter.instance.SHARE_MODES.
+MEMORY_SHARE = _instance.share_of(_cfg)
+
 #: Per-task workspaces live here: ``workspaces/<workspace>/<repo>`` (on-demand repo
 #: clones) plus the workspace's own ``memory/`` and ``refs/``. Gitignored — a
 #: workspace is a private, per-developer, per-task environment. (Renamed from the

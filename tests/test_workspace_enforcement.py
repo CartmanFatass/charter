@@ -51,13 +51,19 @@ class TestCloneEditNudge(PersonaIso):
 
 class TestAutosaveGating(unittest.TestCase):
     """The Stop-hook autosave: no-op when nothing pending or within debounce; commits +
-    background-pushes when pending + debounce elapsed. Git + push are mocked."""
+    background-pushes when pending + debounce elapsed AND the control plane's declared
+    `memory.share` posture allows it. Git + push are mocked.
+
+    This checkout has no `charter.toml`, so `config.MEMORY_SHARE` defaults to `local` —
+    every scenario below sets it explicitly so the reactive-vs-posture wiring is tested
+    deliberately rather than accidentally passing on the safe default."""
 
     def setUp(self):
         import tempfile
         from pathlib import Path
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-autosave-"))
-        self._orig = {k: getattr(config, k) for k in ("ROOT", "EDM_HOME", "WORKSPACES_DIR")}
+        self._orig = {k: getattr(config, k) for k in
+                      ("ROOT", "EDM_HOME", "WORKSPACES_DIR", "MEMORY_SHARE")}
         config.ROOT = self.tmp
         config.EDM_HOME = self.tmp / ".edm"
         config.WORKSPACES_DIR = self.tmp / "workspaces"
@@ -72,7 +78,8 @@ class TestAutosaveGating(unittest.TestCase):
             setattr(config, k, v)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run(self, pending: bool, live: bool = True):
+    def _run(self, pending: bool, live: bool = True, share: str = "push"):
+        config.MEMORY_SHARE = share
         status = SimpleNamespace(stdout=(" M workspaces/default/memory/notes.md\n" if pending else ""))
         with mock.patch.object(cw, "_git", return_value=status), \
              mock.patch.object(cw, "commit_push", return_value=0) as cp, \
@@ -104,6 +111,19 @@ class TestAutosaveGating(unittest.TestCase):
         cp, popen = self._run(pending=True)
         cp.assert_not_called()
         popen.assert_not_called()
+
+    def test_local_posture_skips_even_when_live_and_pending(self):
+        """The safe default: a workspace memo never even reaches git, regardless of the
+        workspace's own LIVE/LOCAL setting."""
+        cp, popen = self._run(pending=True, live=True, share="local")
+        cp.assert_not_called()
+        popen.assert_not_called()
+
+    def test_commit_posture_commits_but_never_pushes(self):
+        cp, popen = self._run(pending=True, share="commit")
+        cp.assert_called_once()
+        self.assertTrue(cp.call_args.kwargs.get("no_push"))
+        popen.assert_not_called()           # `commit` records but never publishes
 
 
 if __name__ == "__main__":

@@ -392,9 +392,15 @@ def _ws_meta_paths(name: str) -> list[str]:
 
 def cmd_workspace_autosave(args) -> int:
     """Internal (Stop hook): debounced, secret-scanned auto-save of the active workspace's
-    manifest + memory. Commits locally (fast, scoped) then pushes in the BACKGROUND, so a
-    slow push never blocks the turn. Best-effort — never raises, never blocks."""
+    manifest + memory — a reactive, agent-triggered commit, so it honours the control
+    plane's declared ``config.MEMORY_SHARE`` posture (default ``local``: never even commits).
+    Under ``commit``/``push`` it commits locally (fast, scoped); under ``push`` it also
+    pushes in the BACKGROUND, so a slow push never blocks the turn. Best-effort — never
+    raises, never blocks."""
     try:
+        share = config.MEMORY_SHARE
+        if share == "local":
+            return 0  # the safe default → this workspace memo stays on disk, never committed
         name = workspace.resolve()
         if not workspace.is_live(name):
             return 0  # LOCAL workspace → private, never auto-committed
@@ -412,10 +418,11 @@ def cmd_workspace_autosave(args) -> int:
                        f"workspace({name}): auto-save memo + manifest", no_push=True) != 0:
             return 0
         marker.write_text(str(time.time()))
-        # detached background push — the turn returns immediately
-        subprocess.Popen([sys.executable, "-m", "charter", "workspace", "_pushbg"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(config.ROOT))
+        if share == "push":
+            # detached background push — the turn returns immediately
+            subprocess.Popen([sys.executable, "-m", "charter", "workspace", "_pushbg"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(config.ROOT))
     except Exception:
         pass
     return 0

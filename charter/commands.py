@@ -325,12 +325,25 @@ def _spawn_bg_push(root) -> None:
 
 
 def commit_memory_reactive(paths: list[str], title: str) -> int:
-    """**Reactive memory**: commit the just-written memory file(s) locally (scoped +
-    secret-scanned) and push in the BACKGROUND — so a memory reaches the shared repo the
-    moment it's recorded, without blocking the turn. Best-effort. Returns commit_push's rc
-    (0 = committed / nothing to do, 1 = a secret-shaped value was refused)."""
-    return commit_push(config.ROOT, ["add", "--", *paths], f"memory: {title}"[:100],
-                       background=True)
+    """**Reactive memory**: how far the just-written memory file(s) travel is declared per
+    control plane via ``config.MEMORY_SHARE`` (``charter.instance.SHARE_MODES``), defaulting
+    to ``local`` — safe for a control plane a stranger might run, where nothing should reach
+    a remote without a human between writing and disclosure:
+
+    - ``local``  — stays on disk only; nothing is committed.
+    - ``commit`` — committed locally (scoped + secret-scanned), never pushed.
+    - ``push``   — committed locally and pushed in the BACKGROUND — so a memory reaches the
+      shared repo the moment it's recorded, without blocking the turn. Best-effort.
+
+    Returns commit_push's rc (0 = committed / nothing to do / posture is local,
+    1 = a secret-shaped value was refused)."""
+    share = config.MEMORY_SHARE
+    if share == "local":
+        return 0
+    msg = f"memory: {title}"[:100]
+    if share == "commit":
+        return commit_push(config.ROOT, ["add", "--", *paths], msg, no_push=True)
+    return commit_push(config.ROOT, ["add", "--", *paths], msg, background=True)
 
 
 def commit_push(root, add_cmd: list, message: str | None,

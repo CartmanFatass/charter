@@ -81,3 +81,17 @@ def exclude_of(cfg: dict, index: int = 0) -> set[str]:
 
 def default_workspace_of(cfg: dict, fallback: str) -> str:
     return (cfg.get("workspace") or {}).get("default") or fallback
+
+
+#: How far a written memory travels. Ordered least → most public.
+SHARE_MODES = ("local", "commit", "push")
+
+
+def share_of(cfg: dict) -> str:
+    """The control plane's memory posture, defaulting to ``local``.
+
+    An unrecognised value falls back to ``local`` deliberately: a typo must fail *safe*,
+    because the failure mode on the other side is publishing an agent's notes.
+    """
+    v = (cfg.get("memory") or {}).get("share")
+    return v if v in SHARE_MODES else "local"

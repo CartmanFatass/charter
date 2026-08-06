@@ -21,7 +21,8 @@ from charter import config, instance, persona, root
 
 _PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "EDM_HOME", "ACTIVE_PERSONA_FILE",
           "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE",
-          "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE", "INVENTORY")
+          "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE", "INVENTORY",
+          "MEMORY_SHARE")
 
 
 class PersonaIso(unittest.TestCase):
@@ -73,6 +74,7 @@ class PersonaIso(unittest.TestCase):
         config.GROUP = instance.group_of(_cfg, config.GROUP_FALLBACK)
         config.EXCLUDE = instance.exclude_of(_cfg)
         config.DEFAULT_WORKSPACE = instance.default_workspace_of(_cfg, config.DEFAULT_WORKSPACE_FALLBACK)
+        config.MEMORY_SHARE = instance.share_of(_cfg)
         config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
         self.addCleanup(self._restore)
 

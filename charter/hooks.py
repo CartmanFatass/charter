@@ -870,7 +870,9 @@ def posttooluse_dispatch() -> int:
 
 
 def _commit_dispatch(path, agent: str) -> None:
-    """Commit the tally line, serialized against concurrent dispatches.
+    """Commit the tally line, serialized against concurrent dispatches — reactive and
+    agent-triggered, so it honours the control plane's declared `config.MEMORY_SHARE`
+    posture (default `local`: the tally stays on disk, never committed).
 
     `commit_push` already rebase-retries a remote race, but a fan-out of N sub-agents
     finishing together would have N processes racing on `.git/index.lock` locally — the
@@ -878,6 +880,9 @@ def _commit_dispatch(path, agent: str) -> None:
     into a short queue; the push itself stays in the background."""
     import fcntl
     from . import commands, config as _cfg
+    share = _cfg.MEMORY_SHARE
+    if share == "local":
+        return
     lock = _cfg.EDM_HOME / "dispatch-commit.lock"
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -885,8 +890,8 @@ def _commit_dispatch(path, agent: str) -> None:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
                 rel = str(Path(path).relative_to(_cfg.ROOT))
-                commands.commit_push(_cfg.ROOT, ["add", "--", rel],
-                                     f"dispatch: {agent}", background=True)
+                commands.commit_push(_cfg.ROOT, ["add", "--", rel], f"dispatch: {agent}",
+                                     no_push=(share == "commit"), background=(share == "push"))
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
     except Exception:

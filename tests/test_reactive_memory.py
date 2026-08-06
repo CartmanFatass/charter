@@ -28,12 +28,20 @@ def _git(*a, cwd):
 
 
 class ReactiveCommitCase(unittest.TestCase):
-    """The commit half, against a real repo with no remote (push is a no-op → no subprocess)."""
+    """The commit half, against a real repo with no remote (push is a no-op → no subprocess).
+
+    Exercises the ``push`` posture explicitly — this checkout has no ``charter.toml``, so
+    ``config.MEMORY_SHARE`` would otherwise default to ``local`` and these commits would
+    never happen; see ``TestShareOf``/``TestReactiveCommitHonoursPosture`` in
+    ``test_memory_share.py`` for the posture's own unit tests, including the ``local``
+    no-commit-at-all path this class deliberately opts out of."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-react-"))
         self._orig_root = config.ROOT
+        self._orig_share = config.MEMORY_SHARE
         config.ROOT = self.tmp
+        config.MEMORY_SHARE = "push"
         _git("init", "-q", cwd=self.tmp)
         # Local identity, not just env vars reaching this test's own `_git` helper — the
         # CODE UNDER TEST (charter.commands.commit_push) shells out via charter.util.run,
@@ -49,6 +57,7 @@ class ReactiveCommitCase(unittest.TestCase):
 
     def _restore(self):
         config.ROOT = self._orig_root
+        config.MEMORY_SHARE = self._orig_share
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _log_files(self):
@@ -71,6 +80,17 @@ class ReactiveCommitCase(unittest.TestCase):
         rc = commands.commit_memory_reactive(["personas/p/memory/s.md"], "p: s")
         self.assertEqual(rc, 1)
         self.assertNotIn("personas/p/memory/s.md", self._log_files())  # never committed
+
+    def test_local_posture_never_commits_even_against_a_real_repo(self):
+        """End-to-end companion to test_memory_share.py's mocked equivalent: with the
+        control plane's default posture, a written memory never even reaches git."""
+        config.MEMORY_SHARE = "local"
+        d = self.tmp / "personas" / "p" / "memory"
+        d.mkdir(parents=True)
+        (d / "m.md").write_text("# t\n\na durable fact\n")
+        rc = commands.commit_memory_reactive(["personas/p/memory/m.md"], "p: m")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("personas/p/memory/m.md", self._log_files())
 
 
 class ReactiveWiringCase(PersonaIso):
