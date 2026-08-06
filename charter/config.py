@@ -8,8 +8,16 @@ from pathlib import Path
 #: The GitLab group that owns every EasyDMARC repo.
 GROUP = "easydmarc"
 
-#: Umbrella repo root (this package lives at ``<root>/edm``).
-ROOT = Path(__file__).resolve().parent.parent
+from . import root as _root
+
+#: The control plane this invocation operates on — located by a ``charter.toml`` marker,
+#: NOT by where this package happens to live. That distinction is the whole point of the
+#: engine/instance split: one installed charter serves many control planes.
+ROOT = _root.find_root_or_cwd()
+
+#: False when no ``charter.toml`` was found. Commands that need a control plane check this
+#: and fail with a clear message; ``--version`` and ``init`` do not.
+HAS_CONTROL_PLANE = (ROOT / _root.MARKER).is_file()
 
 #: Per-task workspaces live here: ``workspaces/<workspace>/<repo>`` (on-demand repo
 #: clones) plus the workspace's own ``memory/`` and ``refs/``. Gitignored — a
