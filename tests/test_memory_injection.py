@@ -51,7 +51,7 @@ class MemoryInjectionBoundedCase(PersonaIso):
 
     def test_points_at_the_recall_gate(self):
         persona.remember("dev", "a shared fact", shared=True)
-        self.assertIn("edm recall", self._inject())
+        self.assertIn("charter recall", self._inject())
 
     def test_keeps_the_newest_memories_visible(self):
         for i in range(40):

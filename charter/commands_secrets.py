@@ -1,4 +1,4 @@
-"""``edm vault`` and ``edm secret`` command implementations.
+"""``charter vault`` and ``charter secret`` command implementations.
 
 The overriding rule here: **secret values must not leak into the model.**
 - write paths take values via stdin/file, never argv (argv shows in ps/history);
@@ -42,7 +42,7 @@ def cmd_vault_add(args) -> int:
     if not prov.available:
         util.warn(f"  provider '{args.provider}' is not implemented yet — registered for later use.")
     elif args.provider == "plain-file":
-        util.info(f"  add secrets with: edm secret set {args.name} <key> --stdin")
+        util.info(f"  add secrets with: charter secret set {args.name} <key> --stdin")
     return 0
 
 
@@ -51,7 +51,7 @@ def cmd_vault_list(args) -> int:
     vs = registry.vaults(doc)
     if not vs:
         util.info("No vaults configured. Add one: "
-                  "edm vault add <name> --provider plain-file --file <path>")
+                  "charter vault add <name> --provider plain-file --file <path>")
         return 0
     fmt = "{:<18} {:<16} {:<12} {}"
     print(fmt.format("VAULT", "PROVIDER", "PERSONA", "STATUS"))
@@ -170,7 +170,7 @@ def cmd_secret_get(args) -> int:
     if not args.reveal:
         digest = hashlib.sha256(value.encode()).hexdigest()[:12]
         print(f"{args.vault}/{args.key}: present · {len(value)} bytes · sha256:{digest}")
-        print("(value hidden — use `edm secret exec`/`cp` to consume it, or --reveal to print)")
+        print("(value hidden — use `charter secret exec`/`cp` to consume it, or --reveal to print)")
         return 0
 
     # --reveal: only for a human at an interactive terminal. Refuse the exact
@@ -178,7 +178,7 @@ def cmd_secret_get(args) -> int:
     if not sys.stdout.isatty() and not args.force:
         util.err(
             "Refusing to print a secret to non-interactive stdout — this is how it would "
-            "leak into an agent's context. Use `edm secret exec`/`cp` to consume it safely, "
+            "leak into an agent's context. Use `charter secret exec`/`cp` to consume it safely, "
             "or pass --force if you truly intend to print it."
         )
         return 2
@@ -218,7 +218,7 @@ def cmd_secret_exec(args) -> int:
     """Run a command with secrets injected as env vars and/or files, then redact.
 
     The model constructs the command using env-var *names* and never sees any
-    value; edm resolves the secrets at runtime and scrubs them from the output.
+    value; charter resolves the secrets at runtime and scrubs them from the output.
 
     With ``--exec`` the command *replaces* this process (``os.execvpe``) instead
     of being captured. Capturing buffers stdout until exit, which deadlocks any
@@ -237,7 +237,7 @@ def cmd_secret_exec(args) -> int:
         command = command[1:]
     if not command:
         util.err("No command given. Usage: "
-                 "edm secret exec <vault> --env NAME=key -- <command...>")
+                 "charter secret exec <vault> --env NAME=key -- <command...>")
         return 2
 
     exec_mode = bool(getattr(args, "exec_mode", False))
@@ -266,7 +266,7 @@ def cmd_secret_exec(args) -> int:
                 return 2
             val = prov.get(key)
             secret_values.append(val)
-            fd, path = tempfile.mkstemp(prefix=f"edm-{args.vault}-{key}-")
+            fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-{key}-")
             os.write(fd, val.encode())
             os.close(fd)
             os.chmod(path, 0o600)

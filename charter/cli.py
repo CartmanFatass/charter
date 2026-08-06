@@ -21,7 +21,7 @@ from .secrets.registry import PROVIDERS
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="charter",
-        description="EasyDMARC umbrella — discover, clone, and track org repos on demand.",
+        description="charter — discover, clone, and track org repos on demand.",
     )
     p.add_argument("--version", action="version", version=f"charter {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -60,8 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     doc.set_defaults(func=commands.cmd_docs)
 
     sv = sub.add_parser("save",
-                        help="Commit + push the umbrella's own changes via glab (HTTPS token — no SSH pain).")
-    sv.add_argument("message", nargs="?", help="Commit message (default: 'edm save: N file(s)').")
+                        help="Commit + push the control plane's own changes via glab (HTTPS token — no SSH pain).")
+    sv.add_argument("message", nargs="?", help="Commit message (default: 'charter save: N file(s)').")
     sv.add_argument("--sign", action="store_true", help="Sign the commit (default: unsigned, to avoid signer hangs).")
     sv.add_argument("--no-push", action="store_true", help="Commit only; don't push.")
     sv.set_defaults(func=commands.cmd_save)
@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gp = sub.add_parser("git-policy",
                         help="Golden rule: one credential — check/apply token-only git auth "
-                             "(glab HTTPS, no SSH, no signing) on the umbrella + every clone.")
+                             "(glab HTTPS, no SSH, no signing) on the control plane + every clone.")
     gp.add_argument("--apply", action="store_true", help="Write the policy (default: report drift).")
     gp.set_defaults(func=commands.cmd_git_policy)
 
@@ -179,7 +179,7 @@ def _add_workspace_parser(sub) -> None:
                          help="Upgrade a workspace's structure to the current layout "
                               "(create missing workspace.md/memory/refs; stamp the version).")
     ri.add_argument("name", nargs="?", help="Workspace to reinit (default: the active one).")
-    ri.add_argument("--all", action="store_true", help="Reinit every workspace (after an umbrella upgrade).")
+    ri.add_argument("--all", action="store_true", help="Reinit every workspace (after a charter upgrade).")
     ri.set_defaults(func=commands_workspace.cmd_workspace_reinit)
 
     rem = wsub.add_parser("remember",
@@ -197,7 +197,7 @@ def _add_workspace_parser(sub) -> None:
     rc.set_defaults(func=commands_workspace.cmd_workspace_recall)
 
     fg = wsub.add_parser("forget", help="Delete one workspace memory by slug or filename.")
-    fg.add_argument("slug", help="Memory slug or filename (see `edm workspace recall`).")
+    fg.add_argument("slug", help="Memory slug or filename (see `charter workspace recall`).")
     fg.add_argument("--workspace", "-w", help="Target workspace (default: the active one).")
     fg.set_defaults(func=commands_workspace.cmd_workspace_forget)
 
@@ -230,7 +230,7 @@ def _add_workspace_parser(sub) -> None:
     rst.set_defaults(func=commands_workspace.cmd_workspace_restore)
 
     syn = wsub.add_parser("sync",
-                          help="Pull the umbrella for fresh workspace manifests + memory (before working).")
+                          help="Pull the control plane for fresh workspace manifests + memory (before working).")
     syn.set_defaults(func=commands_workspace.cmd_workspace_sync)
 
     sav = wsub.add_parser("save",
@@ -295,7 +295,7 @@ def _add_vault_parser(sub) -> None:
     rm.set_defaults(func=commands_secrets.cmd_vault_remove)
 
 
-# Secret-operation arguments (shared by `edm secret` and `edm persona secret`).
+# Secret-operation arguments (shared by `charter secret` and `charter persona secret`).
 def _sa_set(p):
     p.add_argument("key")
     p.add_argument("--stdin", action="store_true", help="Read the value from stdin.")

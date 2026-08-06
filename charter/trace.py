@@ -1,5 +1,5 @@
 """Lightweight local observability: an append-only, per-session trace of the
-decisions and activity the umbrella actually took — guard denials, persona tool
+decisions and activity charter actually took — guard denials, persona tool
 approvals, secret-scan warnings, memory writes, persona switches.
 
 This is **not** OpenTelemetry — no collector, no network, no deps. It's a stdlib
@@ -54,7 +54,7 @@ def read(session: str | None = None, n: int | None = None) -> list[dict]:
 def for_persona(name: str, session: str | None = None, n: int | None = None) -> list[dict]:
     """This session's trace events attributed to a persona — its tool approvals,
     memory writes, switches, and manual `note`s. (The trace is the one activity
-    record; `edm persona log` writes `note` events into it.)"""
+    record; `charter persona log` writes `note` events into it.)"""
     evs = [e for e in read(session) if e.get("persona") == name]
     return evs[-n:] if n else evs
 

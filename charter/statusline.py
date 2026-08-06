@@ -1,4 +1,4 @@
-"""Claude Code status-line renderer for the umbrella.
+"""Claude Code status-line renderer for the control plane.
 
 Wired via ``.claude/settings.json`` → ``statusLine``. Claude Code pipes a JSON
 payload on stdin (session/model/workspace context) and renders this command's
@@ -10,7 +10,7 @@ never raise (fall back to a minimal string), and exit 0. ANSI colour and
 multiple lines are supported.
 
 This module only *gathers* content (repos, branches, CI, personas) and
-declares the layout; all width math lives in :mod:`edm.tui`, whose nodes
+declares the layout; all width math lives in :mod:`charter.tui`, whose nodes
 guarantee that no emitted line ever exceeds the terminal width — overflow is
 truncated with ``…``, never wrapped (a wrap shears every column below it).
 
@@ -244,7 +244,7 @@ def _context_gauge(payload: dict) -> list[str]:
 
 def _stale_structure(ws: str) -> bool:
     """True if the active workspace's on-disk structure is behind the current layout
-    (created by an older umbrella) → flag it with a reinit tip. Best-effort, fast."""
+    (created by an older version of charter) → flag it with a reinit tip. Best-effort, fast."""
     try:
         from . import workspace
         return workspace.needs_reinit(ws)
@@ -469,7 +469,7 @@ def _persona_line() -> str | None:
         active = persona.resolve_active()
         if not active:
             avail = f"{_DIM} · {_R}".join(f"{_DIM}{n}{_R}" for n in names)
-            return f"{_DIM}◆ persona none{_R} · {avail}{_DIM} · edm persona use <name>{_R}"
+            return f"{_DIM}◆ persona none{_R} · {avail}{_DIM} · charter persona use <name>{_R}"
         # Active (adopted) persona: name + vault health (the role reads as noise —
         # the name already says it).
         seg = f"{_MAGENTA}◆{_R} {_BOLD}{active}{_R}"
@@ -573,11 +573,11 @@ def render(payload: dict | None = None) -> str:
         gl = glstate.read_for(dirs, branches)
         glstate.maybe_spawn(dirs, active)
     except Exception:
-        return f"{_CYAN}⬢{_R} edm"
+        return f"{_CYAN}⬢{_R} charter"
 
     pin = f"{_YELLOW}*{_R}" if src == "$EDM_WORKSPACE" else ""
     # Reinit tip sits right after the name so it survives truncation on narrow panes.
-    reinit = f"{_YELLOW}⚠ reinit: {_BOLD}edm ws reinit{_R}" if _stale_structure(active) else None
+    reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
     summary = f"{_DIM} · {_R}".join(filter(None, [
         f"{_CYAN}⬢{_R} {_BOLD}{active}{_R}{pin}",
         reinit,

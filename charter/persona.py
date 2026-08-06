@@ -21,7 +21,7 @@ The active persona is resolved by precedence, mirroring workspaces:
 ``--persona`` flag → ``$EDM_PERSONA`` env → ``.edm/active-persona`` file → none.
 
 The legacy flat layout ``personas/<name>.md`` still resolves for read, so old
-checkouts keep working until migrated (``edm persona migrate``).
+checkouts keep working until migrated (``charter persona migrate``).
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ def default_persona() -> str | None:
 
 def resolve_active(explicit: str | None = None) -> str | None:
     """Active persona by precedence: ``--persona`` → ``$EDM_PERSONA`` → local
-    ``.edm/active-persona`` (``edm persona use``) → committed ``personas/.default`` → none."""
+    ``.edm/active-persona`` (``charter persona use``) → committed ``personas/.default`` → none."""
     if explicit:
         return explicit
     env = os.environ.get("EDM_PERSONA")
@@ -538,7 +538,7 @@ def forget(name: str, slug: str, *, shared: bool = False, ephemeral: bool = Fals
 # roster health — a persona's committed memory IS its activity trace, so mine it #
 # into a usage + (in-corpus) quality signal for the steward's observe loop. Read- #
 # only: count/recency = usage; verification-marker & near-dup ratios = a quality  #
-# *proxy* (a signal, not a verdict — volume ≠ value). Feeds `edm persona stats`.  #
+# *proxy* (a signal, not a verdict — volume ≠ value). Feeds `charter persona stats`.  #
 # --------------------------------------------------------------------------- #
 # The verification-discipline vocabulary personas actually use (freq-ranked in the
 # committed corpus): a memory asserting it was checked, not merely guessed.
@@ -607,8 +607,8 @@ def stats(name: str, recent_days: int = 14, shared: bool = False, today=None) ->
     }
 
 
-# (Persona activity now lives in the single session **trace** — see edm/trace.py.
-# `edm persona log` writes `note` events there; there is no separate per-persona log.)
+# (Persona activity now lives in the single session **trace** — see charter/trace.py.
+# `charter persona log` writes `note` events there; there is no separate per-persona log.)
 
 
 def gc_ephemeral(current: str | None = None, max_age_hours: float = 6.0) -> int:

@@ -1,7 +1,7 @@
 """Plain-file vault provider: a JSON object of key -> secret, mode 0600.
 
 The developer may point a vault at any file they already keep (``--file``), or
-let edm manage one under ``.edm/vaults/``. Values may be multi-line (e.g. a
+let charter manage one under ``.edm/vaults/``. Values may be multi-line (e.g. a
 kubeconfig or PEM), which JSON handles cleanly.
 """
 
@@ -56,7 +56,7 @@ class PlainFileProvider(VaultProvider):
         """Force a vault file to 0600 if any group/other bit is set (tighten only,
         never loosen). Self-heals a file created outside ``set`` — e.g. hand-authored
         JSON, which inherits the umask default (often 0644) — so plaintext secrets are
-        never left readable once edm touches the vault. Best-effort; never raises."""
+        never left readable once charter touches the vault. Best-effort; never raises."""
         try:
             if stat.S_IMODE(p.stat().st_mode) & 0o077:
                 os.chmod(p, 0o600)

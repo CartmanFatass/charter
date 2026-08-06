@@ -1,4 +1,4 @@
-"""Enable ``python3 -m edm``."""
+"""Enable ``python3 -m charter``."""
 
 import sys
 

@@ -14,7 +14,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from charter import config, instance, persona, root
@@ -30,6 +30,13 @@ class PersonaIso(unittest.TestCase):
     uncommitted-memory nudge) sees the tmp (a non-git dir), not the real checkout."""
 
     def setUp(self) -> None:
+        # Many `cmd_*` handlers print progress (util.ok/info/warn/err → stderr; some
+        # commands print results to stdout directly). Route both to a throwaway buffer by
+        # default so calling a handler directly doesn't leak onto the real test-run
+        # output — a test that needs to inspect what was printed enters its own nested
+        # redirect_stdout/redirect_stderr, which captures correctly (these nest cleanly).
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.enterContext(redirect_stderr(io.StringIO()))
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-test-"))
         self._orig = {k: getattr(config, k) for k in _PATCH}
         config.ROOT = self.tmp

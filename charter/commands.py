@@ -1,4 +1,4 @@
-"""Command implementations behind the ``edm`` CLI subcommands."""
+"""Command implementations behind the ``charter`` CLI subcommands."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def cmd_discover(args) -> int:
 def cmd_docs(args) -> int:
     doc = inventory.load()
     if not doc.get("repos"):
-        util.warn("Inventory is empty — run `edm discover` first.")
+        util.warn("Inventory is empty — run `charter discover` first.")
         return 1
 
     config.DOCS_DIR.mkdir(parents=True, exist_ok=True)
@@ -139,13 +139,13 @@ def refresh_readme_personas() -> bool:
 def cmd_clone(args) -> int:
     doc = inventory.load()
     if not doc.get("repos"):
-        util.err("Inventory is empty — run `edm discover` first.")
+        util.err("Inventory is empty — run `charter discover` first.")
         return 1
 
     targets = _resolve_targets(args, doc)
     if not targets:
         util.err("No matching repos. Give one or more repo names/paths from the inventory "
-                 "(see them: `edm status`; refresh from GitLab: `edm discover`).")
+                 "(see them: `charter status`; refresh from GitLab: `charter discover`).")
         return 1
 
     ws = workspace.resolve(getattr(args, "workspace", None))
@@ -173,7 +173,7 @@ def cmd_clone(args) -> int:
             )
             continue
         # Golden rule: every git op from this clone uses the glab token over HTTPS —
-        # credential helper + signing off + SSH→HTTPS rewrites (see edm/gitpolicy.py).
+        # credential helper + signing off + SSH→HTTPS rewrites (see charter/gitpolicy.py).
         from . import gitpolicy
         gitpolicy.apply(dest)
         util.ok(f"{r['name']} → {dest.relative_to(config.ROOT)}")
@@ -187,7 +187,7 @@ def _spawn_bg_push(root) -> None:
     import subprocess
     import sys
     try:
-        subprocess.Popen([sys.executable, "-m", "edm", "workspace", "_pushbg"],
+        subprocess.Popen([sys.executable, "-m", "charter", "workspace", "_pushbg"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(root))
     except Exception:
@@ -206,11 +206,11 @@ def commit_memory_reactive(paths: list[str], title: str) -> int:
 def commit_push(root, add_cmd: list, message: str | None,
                 sign: bool = False, no_push: bool = False, background: bool = False) -> int:
     """Stage (``add_cmd``) → secret-scan staged memory/refs → commit → push via glab's
-    HTTPS token (rebase-retry on non-ff). Shared by `edm save` and `edm workspace save`
+    HTTPS token (rebase-retry on non-ff). Shared by `charter save` and `charter workspace save`
     so the secret-guard + no-SSH push path is identical everywhere."""
     _git(add_cmd, cwd=root)
     if _git(["diff", "--cached", "--quiet"], cwd=root).returncode == 0:
-        util.info("Nothing to save — the umbrella working tree is clean.")
+        util.info("Nothing to save — the control-plane working tree is clean.")
         return 0
     staged = [ln for ln in _git(["diff", "--cached", "--name-only"], cwd=root).stdout.splitlines() if ln.strip()]
 
@@ -229,10 +229,10 @@ def commit_push(root, add_cmd: list, message: str | None,
         util.err("Refusing to save — a secret-shaped value in a memory/ref file:")
         for p, k in flagged:
             util.err(f"  {p}  ({k})")
-        util.info("Secrets belong in the vault (`edm persona secret set`). Remove it, then retry.")
+        util.info("Secrets belong in the vault (`charter persona secret set`). Remove it, then retry.")
         return 1
 
-    msg = message or f"edm save: {len(staged)} file(s)"
+    msg = message or f"charter save: {len(staged)} file(s)"
     # Unsigned by default so the 1Password signer never hangs; --sign to opt in.
     signcfg = [] if sign else ["-c", "commit.gpgsign=false"]
     _git([*signcfg, "commit", "-q", "-m", msg], cwd=root)
@@ -251,7 +251,7 @@ def commit_push(root, add_cmd: list, message: str | None,
         return 0
     if background:
         _spawn_bg_push(root)
-        util.info("→ pushing to the umbrella in the background.")
+        util.info("→ pushing to the control plane in the background.")
         return 0
 
     def push():
@@ -263,7 +263,7 @@ def commit_push(root, add_cmd: list, message: str | None,
         _git([*_GLAB_CRED, "fetch", https, branch], cwd=root)
         if _git(["rebase", "FETCH_HEAD"], cwd=root).returncode != 0:
             _git(["rebase", "--abort"], cwd=root)
-            util.warn("Committed locally, but rebase hit a conflict — resolve manually, then `edm save`.")
+            util.warn("Committed locally, but rebase hit a conflict — resolve manually, then `charter save`.")
             return 0
         p = push()
     if p.returncode == 0:
@@ -278,9 +278,9 @@ def commit_push(root, add_cmd: list, message: str | None,
 
 
 def cmd_save(args) -> int:
-    """Commit + push the UMBRELLA's own changes in one step, via glab's HTTPS token —
+    """Commit + push the CONTROL PLANE's own changes in one step, via glab's HTTPS token —
     no SSH keys, no 1Password signing hang. (For a *clone's* changes, work in a
-    repo-rooted session; this is only the umbrella's orchestration files.)"""
+    repo-rooted session; this is only the control plane's orchestration files.)"""
     return commit_push(config.ROOT, ["add", "-A"], args.message,
                        sign=getattr(args, "sign", False), no_push=getattr(args, "no_push", False))
 
@@ -292,8 +292,8 @@ def _resolve_targets(args, doc) -> list:
         if r:
             out.append(r)
         else:
-            util.warn(f"Unknown repo (not in inventory): {name} — check the name (`edm status`) "
-                      "or `edm discover` if it's new to the group.")
+            util.warn(f"Unknown repo (not in inventory): {name} — check the name (`charter status`) "
+                      "or `charter discover` if it's new to the group.")
     return out
 
 
@@ -380,7 +380,7 @@ def _status_for_workspace(ws: str, inv_by_name: dict, active: str) -> None:
     marker = " (active)" if ws == active else ""
     print(f"— workspace: {ws}{marker} · {len(clones)} cloned —")
     if not clones:
-        print(f"  (empty; `edm clone <repo> --workspace {ws}` to populate)\n")
+        print(f"  (empty; `charter clone <repo> --workspace {ws}` to populate)\n")
         return
     fmt = "  {:<38} {:<12} {}"
     print(fmt.format("REPO", "STACK", "BRANCH / NOTE"))
@@ -435,7 +435,7 @@ def cmd_doctor(args) -> int:
             indent=2,
         ))
     else:
-        print("Umbrella preflight:\n")
+        print("charter preflight:\n")
         for r in results:
             print(r.render())
         print()
@@ -447,7 +447,7 @@ def cmd_doctor(args) -> int:
 
     if failed:
         print("✗ " + f"{len(failed)} blocker(s): " + ", ".join(r.name for r in failed)
-              + ". Fix the → hints above, then re-run `edm doctor`.")
+              + ". Fix the → hints above, then re-run `charter doctor`.")
         return 1
     if warned:
         print("! " + f"{len(warned)} optional item(s) pending — see hints above.")
@@ -487,13 +487,13 @@ def cmd_recall(args) -> int:
 
 def cmd_git_policy(args) -> int:
     """**Golden rule: one credential.** Report (or `--apply`) the token-only git policy on the
-    umbrella and every clone: glab-token credential helper over HTTPS, signing off, and SSH→HTTPS
-    URL rewrites so even an SSH remote transports over the token. Local config only — a
-    developer's global git config is never touched."""
+    control plane and every clone: glab-token credential helper over HTTPS, signing off, and
+    SSH→HTTPS URL rewrites so even an SSH remote transports over the token. Local config only —
+    a developer's global git config is never touched."""
     from . import gitpolicy
     targets = gitpolicy.repos(config.ROOT, config.WORKSPACES_DIR)
     if not targets:
-        util.info("No git repos found (umbrella + workspace clones).")
+        util.info("No git repos found (control plane + workspace clones).")
         return 0
     apply = getattr(args, "apply", False)
     drifted = fixed = 0
@@ -502,7 +502,7 @@ def cmd_git_policy(args) -> int:
             rel = repo.relative_to(config.ROOT)
         except ValueError:
             rel = repo
-        name = str(rel) if str(rel) != "." else "umbrella"
+        name = str(rel) if str(rel) != "." else "control plane"
         drift = gitpolicy.check(repo)
         if not drift:
             continue
@@ -520,5 +520,5 @@ def cmd_git_policy(args) -> int:
     elif apply:
         util.ok(f"Applied the single-credential policy to {fixed} of {len(targets)} repo(s).")
     else:
-        util.info(f"{drifted} of {len(targets)} repo(s) drifted — fix: edm git-policy --apply")
+        util.info(f"{drifted} of {len(targets)} repo(s) drifted — fix: charter git-policy --apply")
     return 0

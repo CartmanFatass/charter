@@ -25,6 +25,20 @@ class TestPackaging(unittest.TestCase):
         cfg = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
         self.assertEqual(cfg["project"].get("dependencies", []), [])
 
+    def test_doctor_python_floor_matches_pyproject(self):
+        """`charter doctor` is the one command whose entire job is truthful environment
+        reporting — its Python-version gate must match `requires-python`, not drift from it."""
+        import re
+        import tomllib
+        from pathlib import Path
+        from charter import doctor
+        cfg = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+        m = re.match(r">=\s*(\d+)\.(\d+)", cfg["project"]["requires-python"])
+        self.assertIsNotNone(m, "unexpected requires-python format")
+        pinned = (int(m.group(1)), int(m.group(2)))
+        self.assertEqual(doctor.MIN_PYTHON, pinned,
+                         "doctor.MIN_PYTHON has drifted from pyproject.toml's requires-python")
+
 
 if __name__ == "__main__":
     unittest.main()

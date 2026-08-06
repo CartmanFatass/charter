@@ -1,12 +1,14 @@
-"""Umbrella *freshness*: is a running Claude session behind the committed umbrella
+"""Control-plane *freshness*: is a running Claude session behind the committed control-plane
 config? A session bakes ``CLAUDE.md`` + the system prompt into its context at start and
 only a *fresh* (non-resumed) session re-reads them, so when new features/prompts land the
 best we can do is *append* an awareness signal to the running session (a UserPromptSubmit
-nudge) — see :func:`edm.hooks.userpromptsubmit`.
+nudge) — see :func:`charter.hooks.userpromptsubmit`.
 
 "Behavior version" = the count of commits touching paths that change how a session
-behaves (``CLAUDE.md``, ``edm/``, ``.claude/``, ``docs/``). Persona/workspace *memory*
-churn is deliberately excluded — it doesn't change behavior, so it never triggers a nudge.
+behaves (``CLAUDE.md``, ``.claude/``, ``docs/``). Persona/workspace *memory* churn is
+deliberately excluded — it doesn't change behavior, so it never triggers a nudge. The
+engine's own code (this ``charter`` package) is installed separately from the control
+plane and versioned on its own — there is no in-repo source directory for it to watch here.
 Everything here is best-effort and never raises (git may be absent/shallow)."""
 
 from __future__ import annotations
@@ -16,10 +18,11 @@ import subprocess
 from . import config
 
 # Paths whose commits change how a session behaves (memory/refs churn excluded).
-_BEHAVIOR_PATHS = ["CLAUDE.md", "edm", ".claude", "docs"]
+_BEHAVIOR_PATHS = ["CLAUDE.md", ".claude", "docs"]
 # The subset a running session CANNOT pick up live → needs a fresh (non-resumed) session.
 # (CLAUDE.md is baked into context; settings.json hook wiring + generated sub-agents load
-# at startup. edm/ CLI+hook-logic and .claude/skills/ are live, so they're not here.)
+# at startup. .claude/skills/ is live, so it's not here — nor is the engine's own code,
+# which isn't tracked by this module at all; see the module docstring.)
 _RESTART_PATHS = ["CLAUDE.md", ".claude/settings.json", ".claude/agents"]
 
 

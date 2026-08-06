@@ -1,7 +1,7 @@
-"""``edm workspace`` commands: create/list/use/current/remove.
+"""``charter workspace`` commands: create/list/use/current/remove.
 
 Workspaces are isolated per-task environments of repo clones under
-``workspaces/<workspace>/``. See :mod:`edm.workspace` for how the active one is
+``workspaces/<workspace>/``. See :mod:`charter.workspace` for how the active one is
 resolved. Agents must operate within a single workspace and never mix them.
 """
 
@@ -26,7 +26,7 @@ def cmd_workspace_list(args) -> int:
     names = workspace.list_workspaces()
     if not names:
         util.info(f"No workspaces yet. Active resolves to '{active}'. "
-                  "Create one: edm workspace create <name>")
+                  "Create one: charter workspace create <name>")
         return 0
     print(f"Active workspace: {active}  (via {workspace.source()})\n")
     live = workspace.live_workspaces()
@@ -41,7 +41,7 @@ def cmd_workspace_list(args) -> int:
     stale_names = [n for n in names if workspace.needs_reinit(n)]
     if stale_names:
         util.warn(f"⚠ {len(stale_names)} workspace(s) need reinit ({', '.join(stale_names)}) — "
-                  f"bring their structure up to date: edm workspace reinit --all")
+                  f"bring their structure up to date: charter workspace reinit --all")
     return 0
 
 
@@ -56,7 +56,7 @@ def cmd_workspace_current(args) -> int:
     if vision:
         util.info(f"Vision: {vision.splitlines()[0].strip()}")
     else:
-        util.info(f'No vision set — describe the goal: edm workspace vision "…"')
+        util.info(f'No vision set — describe the goal: charter workspace vision "…"')
     return 0
 
 
@@ -74,13 +74,13 @@ def cmd_workspace_create(args) -> int:
     if live:
         workspace.set_live(args.name, True)
     mode = ("LIVE — charter + manifest + memory committed + shared + auto-saved" if live
-            else "LOCAL — private (nothing committed); `edm workspace live` to share")
+            else "LOCAL — private (nothing committed); `charter workspace live` to share")
     util.ok(f"Workspace '{args.name}' ready ({mode}) → {wd.relative_to(config.ROOT)}/")
     if vision:
         util.info(f"Vision recorded → {(wd / 'workspace.md').relative_to(config.ROOT)}")
     else:
         util.info('⬢ No vision yet — ask the developer what this workspace is for, then record it: '
-                  'edm workspace vision "<the goal>"  (it seeds workspaces/'
+                  'charter workspace vision "<the goal>"  (it seeds workspaces/'
                   f'{args.name}/workspace.md, the living charter a fork inherits).')
 
     if args.use:
@@ -96,7 +96,7 @@ def cmd_workspace_create(args) -> int:
     if args.repos:
         return cmd_clone(SimpleNamespace(repos=args.repos, workspace=args.name))
     if not args.use:
-        util.info(f"Select it with: edm workspace use {args.name}  "
+        util.info(f"Select it with: charter workspace use {args.name}  "
                   f"(or --workspace {args.name} per command)")
     return 0
 
@@ -121,7 +121,7 @@ def cmd_workspace_unlock(args) -> int:
     The escape hatch for the mid-session switch guard — use sparingly; a fresh
     session is the clean way to pick another workspace."""
     if workspace.unlock():
-        util.ok("Workspace unlocked for this session — `edm workspace use <name>` can switch now.")
+        util.ok("Workspace unlocked for this session — `charter workspace use <name>` can switch now.")
     else:
         util.info("No workspace lock was set for this session (nothing to unlock).")
     return 0
@@ -131,7 +131,7 @@ def _locked_msg(target: str) -> str:
     locked = workspace.is_locked() or "?"
     return (f"Workspace is 🔒 locked to '{locked}' for this session — switching to '{target}' "
             f"mid-session is disabled (never mix workspaces). Start a new session to pick another, "
-            f"or force it: `edm workspace use {target} --force` (or `edm workspace unlock` first).")
+            f"or force it: `charter workspace use {target} --force` (or `charter workspace unlock` first).")
 
 
 def cmd_workspace_remove(args) -> int:
@@ -247,7 +247,7 @@ def cmd_workspace_live(args) -> int:
     auto-saved) and LOCAL (`--off`: private, nothing committed)."""
     name = args.name
     if not workspace.workspace_dir(name).exists():
-        util.err(f"no workspace '{name}' (create it: edm workspace create {name})")
+        util.err(f"no workspace '{name}' (create it: charter workspace create {name})")
         return 1
     if getattr(args, "off", False):
         rel = _ws_meta_paths(name)
@@ -255,14 +255,14 @@ def cmd_workspace_live(args) -> int:
             _git(["rm", "-r", "--cached", "-q", "--", *rel], cwd=config.ROOT)
         workspace.set_live(name, False)
         util.ok(f"Workspace '{name}' is now LOCAL (private). Its manifest + memory are no "
-                "longer committed. Finalize the untracking: edm save")
+                "longer committed. Finalize the untracking: charter save")
         return 0
     workspace.scaffold(name)
     if not workspace.set_live(name, True):
         util.info(f"Workspace '{name}' is already LIVE.")
     else:
         util.ok(f"Workspace '{name}' is now LIVE — manifest + memory are committed + shared + auto-saved.")
-    util.info(f"Record its repos: edm workspace snapshot {name}  ·  share: edm workspace save {name}")
+    util.info(f"Record its repos: charter workspace snapshot {name}  ·  share: charter workspace save {name}")
     return 0
 
 
@@ -295,7 +295,7 @@ def cmd_workspace_snapshot(args) -> int:
     util.ok(f"Snapshot '{name}' → workspaces/{name}/workspace.json  ({len(m['repos'])} repo(s)):")
     for r in m["repos"]:
         util.info(f"  {r['name']} @ {r['branch']}")
-    util.info("Share it with the team: edm workspace save   (commits + pushes manifest + memory).")
+    util.info("Share it with the team: charter workspace save   (commits + pushes manifest + memory).")
     return 0
 
 
@@ -308,7 +308,7 @@ def cmd_workspace_restore(args) -> int:
     repos = m.get("repos") or []
     if not repos:
         util.err(f"no manifest for '{name}' (workspaces/{name}/workspace.json). "
-                 "Pull fresh metadata first: edm workspace sync")
+                 "Pull fresh metadata first: charter workspace sync")
         return 1
     workspace.ensure(name)
     workspace.scaffold(name)  # ensure the local structure (refs/, marker) + stamp version
@@ -317,7 +317,7 @@ def cmd_workspace_restore(args) -> int:
     if getattr(args, "on_demand", False):
         for r in repos:
             util.info(f"  on-demand: {r['name']} @ {r['branch']} (clone when you enter it)")
-        util.info("Enter the workspace and clone as you go: edm clone <repo> -w " + name)
+        util.info("Enter the workspace and clone as you go: charter clone <repo> -w " + name)
         return 0
     missing = [r["name"] for r in repos
                if not workspace.is_git_repo(workspace.workspace_dir(name) / r["name"])]
@@ -341,8 +341,8 @@ def cmd_workspace_restore(args) -> int:
 
 
 def cmd_workspace_sync(args) -> int:
-    """Pull the umbrella so you get every engineer's fresh workspace manifests + memory
-    BEFORE working — the umbrella is the shared metadata store."""
+    """Pull the control plane so you get every engineer's fresh workspace manifests + memory
+    BEFORE working — the control plane is the shared metadata store."""
     root = config.ROOT
     https = _origin_https(root)
     if not https:
@@ -351,9 +351,9 @@ def cmd_workspace_sync(args) -> int:
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root).stdout.strip()
     p = _git([*_GLAB_CRED, "pull", "--ff-only", https, branch], cwd=root)
     if p.returncode == 0:
-        util.ok("Synced — fresh workspace manifests + memory pulled from the umbrella.")
+        util.ok("Synced — fresh workspace manifests + memory pulled from the control plane.")
         return 0
-    util.warn("Pull wasn't fast-forward (local umbrella changes?). Run `edm save` first, then sync.")
+    util.warn("Pull wasn't fast-forward (local control-plane changes?). Run `charter save` first, then sync.")
     for ln in (p.stderr or "").splitlines()[-3:]:
         util.warn("  " + ln)
     return 1
@@ -365,7 +365,7 @@ def cmd_workspace_save(args) -> int:
     name = getattr(args, "name", None) or workspace.resolve()
     if not workspace.is_live(name):
         util.err(f"workspace '{name}' is LOCAL (private) — nothing is committed. "
-                 f"Make it shareable first: edm workspace live {name}")
+                 f"Make it shareable first: charter workspace live {name}")
         return 1
     rel = _ws_meta_paths(name)
     if not rel:
@@ -405,7 +405,7 @@ def cmd_workspace_autosave(args) -> int:
             return 0
         marker.write_text(str(time.time()))
         # detached background push — the turn returns immediately
-        subprocess.Popen([sys.executable, "-m", "edm", "workspace", "_pushbg"],
+        subprocess.Popen([sys.executable, "-m", "charter", "workspace", "_pushbg"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(config.ROOT))
     except Exception:
@@ -414,7 +414,7 @@ def cmd_workspace_autosave(args) -> int:
 
 
 def cmd_workspace_pushbg(args) -> int:
-    """Internal: push HEAD to the umbrella via glab (the background half of autosave)."""
+    """Internal: push HEAD to the control plane via glab (the background half of autosave)."""
     root = config.ROOT
     https = _origin_https(root)
     if not https:
@@ -464,9 +464,9 @@ def cmd_workspace_remember(args) -> int:
     util.ok(f"Remembered in '{name}' → workspaces/{name}/memory/{p.name}")
     if not workspace.is_live(name):
         util.info(f"  '{name}' is LOCAL (private) — memory stays on disk, not committed. "
-                  f"Make it shareable: edm workspace live {name}")
+                  f"Make it shareable: charter workspace live {name}")
     elif getattr(args, "no_sync", False):
-        util.info("  (--no-sync) recorded locally; share later with: edm workspace save.")
+        util.info("  (--no-sync) recorded locally; share later with: charter workspace save.")
     else:  # LIVE + reactive: the memory reaches the shared repo immediately
         rels = [str(p.relative_to(config.ROOT)),
                 str(workspace.memory_index(name).relative_to(config.ROOT))]
@@ -489,7 +489,7 @@ def cmd_workspace_recall(args) -> int:
             util.info(f"No memories in '{name}' match '{query}'.")
         else:
             util.info(f"workspace '{name}' has no memories yet. "
-                      f'Add one: edm workspace remember "<text>"')
+                      f'Add one: charter workspace remember "<text>"')
         return 0
     for p, title, score in results:
         tag = f"  ({score})" if score else ""
@@ -505,7 +505,7 @@ def cmd_workspace_forget(args) -> int:
     if workspace.forget_memory(name, args.slug):
         util.ok(f"Forgot '{args.slug}' from workspace '{name}'.")
         return 0
-    util.err(f"no memory '{args.slug}' in workspace '{name}' (list them: edm workspace recall).")
+    util.err(f"no memory '{args.slug}' in workspace '{name}' (list them: charter workspace recall).")
     return 1
 
 
@@ -528,7 +528,7 @@ def cmd_workspace_vision(args) -> int:
         print(vision)
     else:
         util.info(f"workspace '{name}' has no vision yet. Set it: "
-                  f'edm workspace vision "<the goal>"')
+                  f'charter workspace vision "<the goal>"')
     util.info(f"Full charter: workspaces/{name}/workspace.md "
               "(Vision · Context & decisions · Glossary — edit it as the work evolves).")
     return 0
@@ -539,7 +539,7 @@ def cmd_workspace_fork(args) -> int:
     charter (workspace.md: vision, context, glossary), the manifest (repos+branches),
     and the task memo — so you can branch off and continue with full context. The
     repo clones are not copied (they're reconstructible): pass --restore to clone them
-    from the manifest, or `edm clone` on demand. Starts LOCAL unless --live."""
+    from the manifest, or `charter clone` on demand. Starts LOCAL unless --live."""
     src, new = args.src, args.new
     if not workspace.valid_name(new):
         util.err(f"invalid workspace name '{new}' (use lowercase letters, digits, . _ -)")
@@ -580,21 +580,21 @@ def cmd_workspace_fork(args) -> int:
         util.info(f"Cloning {len(repos)} repo(s) from the inherited manifest…")
         return cmd_workspace_restore(SimpleNamespace(name=new, on_demand=False))
     if repos:
-        util.info(f"Clone its {len(repos)} recorded repo(s): edm workspace restore {new}  "
+        util.info(f"Clone its {len(repos)} recorded repo(s): charter workspace restore {new}  "
                   f"(or re-run fork with --restore).")
     else:
-        util.info(f"No repos recorded on '{src}' yet — clone into the fork: edm clone <repo> -w {new}")
+        util.info(f"No repos recorded on '{src}' yet — clone into the fork: charter clone <repo> -w {new}")
     if getattr(args, "live", False):
-        util.info(f"Share the fork: edm workspace save {new}")
+        util.info(f"Share the fork: charter workspace save {new}")
     return 0
 
 
 def cmd_workspace_reinit(args) -> int:
     """Bring a workspace's on-disk structure up to the current layout — create any missing
     baseline files (workspace.md charter, memory/, refs/) and stamp the structure version.
-    A workspace from an older umbrella is flagged (status line, `workspace list`) until this
-    runs. Idempotent + additive: existing content is never touched. `--all` fixes every
-    workspace at once (handy after an umbrella upgrade)."""
+    A workspace created by an older version of charter is flagged (status line,
+    `workspace list`) until this runs. Idempotent + additive: existing content is never
+    touched. `--all` fixes every workspace at once (handy after a charter upgrade)."""
     if getattr(args, "all", False):
         names = workspace.list_workspaces()
     else:
@@ -616,7 +616,7 @@ def cmd_workspace_reinit(args) -> int:
                 else f"structure v{before['version']} → v{before['target']}")
         util.ok(f"Reinitialized '{n}' → added {what}.")
         if workspace.is_live(n):
-            util.info(f"  '{n}' is LIVE — commit the restored files: edm workspace save {n}")
+            util.info(f"  '{n}' is LIVE — commit the restored files: charter workspace save {n}")
     if healed == 0:
         util.ok(f"Up to date (structure v{workspace.STRUCTURE_VERSION}) — nothing to do.")
     elif len(names) > 1:

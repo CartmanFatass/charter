@@ -1,7 +1,7 @@
-"""`edm worktree` — several working trees over one clone, for parallel pieces of a task.
+"""`charter worktree` — several working trees over one clone, for parallel pieces of a task.
 
 Handlers print and return an exit code. **Reads** (parsing `git worktree list`, checking
-dirty/detached/unpushed state) live in :mod:`edm.worktree`; the *mutating* git calls
+dirty/detached/unpushed state) live in :mod:`charter.worktree`; the *mutating* git calls
 (`worktree add`/`remove`, `branch -d`/`-D`) are issued directly by the handlers below,
 alongside the printing.
 """
@@ -25,7 +25,7 @@ def _resolve(args) -> tuple[str, Path | None]:
     clone = clone_for(ws, args.repo)
     if clone is None:
         util.err(f"'{args.repo}' isn't cloned in workspace '{ws}'.")
-        util.info(f"Clone it first: edm clone {args.repo} -w {ws}")
+        util.info(f"Clone it first: charter clone {args.repo} -w {ws}")
     return ws, clone
 
 
@@ -63,7 +63,7 @@ def cmd_worktree_add(args) -> int:
     else:
         if worktree.branch_exists(clone, args.piece):
             util.err(f"branch '{args.piece}' already exists in {args.repo}.")
-            util.info(f"Reuse it: edm worktree add {args.repo} {args.piece} "
+            util.info(f"Reuse it: charter worktree add {args.repo} {args.piece} "
                       f"--branch {args.piece}   (or pick another piece name)")
             return 1
         cmd = ["worktree", "add", str(path), "-b", args.piece]
@@ -112,7 +112,7 @@ def cmd_worktree_list(args) -> int:
             total += 1
     if not total:
         util.info("No worktrees. Create one: "
-                  f"edm worktree add <repo> <piece> -w {ws}")
+                  f"charter worktree add <repo> <piece> -w {ws}")
     return 0
 
 
@@ -133,7 +133,7 @@ def cmd_worktree_remove(args) -> int:
                      if r["piece"] == args.piece and r["prunable"]), None)
         if stale is None:
             util.err(f"no worktree '{args.piece}' for {args.repo} in workspace '{ws}'.")
-            util.info(f"See what exists: edm worktree list {args.repo} -w {ws}")
+            util.info(f"See what exists: charter worktree list {args.repo} -w {ws}")
             return 1
 
     force = getattr(args, "force", False)

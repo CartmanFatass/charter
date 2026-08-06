@@ -91,8 +91,8 @@ def save(repo_list: list) -> dict:
         "group": config.GROUP,
         "count": len(repo_list),
         "note": (
-            "Source of truth for repos in the easydmarc group. "
-            "Regenerate with `edm discover`; do not hand-edit."
+            f"Source of truth for repos in the {config.GROUP} group. "
+            "Regenerate with `charter discover`; do not hand-edit."
         ),
         "repos": repo_list,
     }

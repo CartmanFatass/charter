@@ -23,6 +23,12 @@ class WorktreeIso(PersonaIso):
 
     def setUp(self) -> None:
         super().setUp()
+        # `cmd_worktree_*` prints progress via `util.ok`/`util.info` (stderr) and some
+        # commands print to stdout too — route both to a throwaway buffer by default so
+        # they don't leak onto the real test-run output. A test that needs to inspect the
+        # output enters its own nested redirect, which captures correctly (these nest).
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.enterContext(redirect_stderr(io.StringIO()))
         self.ws = "demo"
         self.clone = self.tmp / "workspaces" / self.ws / "iam-service"
         self.clone.mkdir(parents=True)

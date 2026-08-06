@@ -1,4 +1,4 @@
-"""Umbrella freshness: the 'behavior version' + delta since a session's baseline, and the
+"""Control-plane freshness: the 'behavior version' + delta since a session's baseline, and the
 UserPromptSubmit nudge state machine (fires once per bump, silent on memory-only churn).
 Uses a real tiny git repo so the git plumbing is genuinely exercised."""
 
@@ -51,23 +51,23 @@ class FreshBase(unittest.TestCase):
 class TestVersionAndDelta(FreshBase):
     def test_behavior_count_excludes_memory(self):
         self._commit("CLAUDE.md", "c1")
-        self._commit("edm/x.py", "c2")
+        self._commit(".claude/skills/x.md", "c2")
         self._commit("personas/p/memory/m.md", "mem")   # not a behavior path
         self._commit("docs/y.md", "c4")
         self.assertEqual(fr.behavior_count("HEAD"), 3)   # c1, c2, c4 (not mem)
 
     def test_behavior_delta_filtered_newest_first(self):
         c1 = self._commit("CLAUDE.md", "c1")
-        self._commit("edm/x.py", "c2")
+        self._commit(".claude/skills/x.md", "c2")
         self._commit("personas/p/memory/m.md", "mem")
         self._commit("docs/y.md", "c4")
         self.assertEqual(fr.behavior_delta(c1), ["c4", "c2"])  # mem excluded, newest first
 
     def test_needs_fresh_session(self):
-        c1 = self._commit("edm/x.py", "live-only change")
+        c1 = self._commit(".claude/skills/x.md", "live-only change")
         self.assertFalse(fr.needs_fresh_session(c1))          # nothing after c1
-        self._commit("edm/y.py", "another live change")
-        self.assertFalse(fr.needs_fresh_session(c1))          # only edm/ → live
+        self._commit(".claude/skills/y.md", "another live change")
+        self.assertFalse(fr.needs_fresh_session(c1))          # only skills/ → live
         self._commit("CLAUDE.md", "prompt change")
         self.assertTrue(fr.needs_fresh_session(c1))           # CLAUDE.md → fresh session
 
@@ -89,9 +89,9 @@ class TestNudge(FreshBase):
 
     def test_behavior_update_nudges_once_then_quiet(self):
         c1 = self._commit("CLAUDE.md", "c1")
-        self._commit("edm/x.py", "feat: add command")
+        self._commit(".claude/skills/x.md", "feat: add command")
         msg = self._nudge("s1", seen=c1)
-        self.assertIn("Umbrella updated", msg)
+        self.assertIn("Control plane updated", msg)
         self.assertIn("feat: add command", msg)
         self.assertIn("(v1 → v2)", msg)
         self.assertEqual(self._nudge("s1"), "")   # baseline advanced → quiet next turn
@@ -102,13 +102,13 @@ class TestNudge(FreshBase):
         self.assertEqual(self._nudge("s1", seen=c1), "")
 
     def test_restart_hint_for_claude_md(self):
-        c1 = self._commit("edm/x.py", "c1")
+        c1 = self._commit(".claude/skills/x.md", "c1")
         self._commit("CLAUDE.md", "prompt change")
         self.assertIn("fresh", self._nudge("s1", seen=c1))
 
-    def test_live_hint_for_edm_only(self):
+    def test_live_hint_for_skills_only(self):
         c1 = self._commit("CLAUDE.md", "c1")
-        self._commit("edm/x.py", "cli change")
+        self._commit(".claude/skills/x.md", "skill change")
         self.assertIn("no restart needed", self._nudge("s1", seen=c1))
 
     def test_no_session_id_no_nudge(self):

@@ -51,7 +51,7 @@ def get_vault_config(name: str, doc: dict | None = None) -> dict:
     vc = vaults(doc).get(name)
     if not vc:
         raise VaultNotConfigured(
-            f"no vault named '{name}'. Register one with `edm vault add {name} "
+            f"no vault named '{name}'. Register one with `charter vault add {name} "
             f"--provider plain-file --file <path>`."
         )
     return vc

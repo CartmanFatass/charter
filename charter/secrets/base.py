@@ -57,7 +57,7 @@ class VaultProvider(ABC):
         """Return the secret names (never the values)."""
 
     def health(self) -> tuple[bool, str]:
-        """``(ok, detail)`` used by ``edm doctor`` and ``edm vault list``.
+        """``(ok, detail)`` used by ``charter doctor`` and ``charter vault list``.
 
         Must never include a secret value in ``detail``.
         """

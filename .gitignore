@@ -4,6 +4,9 @@ build/
 dist/
 *.egg-info/
 .venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
 
 # Per-developer secret vaults + registry (plaintext secrets, tokens, file paths).
 # NEVER commit this — it holds credentials. Also where local session/usage state

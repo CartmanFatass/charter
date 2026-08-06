@@ -30,6 +30,19 @@ def _payload(pct=None, read=None, write=None, usage=True):
 
 
 class ContextGaugeCase(unittest.TestCase):
+    def setUp(self):
+        # `test_gauge_appears_in_the_rendered_summary` calls `statusline.render`, which
+        # persists usage under `config.SESSIONS_DIR` — isolate it so the suite never
+        # writes into this repo's own `.edm/sessions/`.
+        import shutil, tempfile
+        from pathlib import Path
+        from charter import config
+        self.tmp = Path(tempfile.mkdtemp(prefix="edm-usage-"))
+        self._orig = config.SESSIONS_DIR
+        config.SESSIONS_DIR = self.tmp / "sessions"
+        self.addCleanup(lambda: (setattr(config, "SESSIONS_DIR", self._orig),
+                                 shutil.rmtree(self.tmp, ignore_errors=True)))
+
     def test_shows_context_percentage(self):
         self.assertIn("ctx 37%", _plain(statusline._context_gauge(_payload(pct=37.4))))
 

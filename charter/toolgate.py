@@ -14,7 +14,7 @@ Two deliberate properties:
   (``sudo``/``bash -c`` become the "binary" and won't match a tool) — so the
   gate can't be used to smuggle an unapproved command past the prompt.
 
-Kept dependency-light (only imports :mod:`edm.persona`) so it's cheap to run on
+Kept dependency-light (only imports :mod:`charter.persona`) so it's cheap to run on
 every Bash call.
 """
 

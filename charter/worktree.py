@@ -2,14 +2,14 @@
 
 **Git is the only registry.** Nothing here writes state: every read shells out to
 ``git worktree list --porcelain`` and parses it, so a worktree created by hand with plain
-git is visible to ``edm``, and one removed by hand cannot leave ``edm`` reporting a stale
+git is visible to ``charter``, and one removed by hand cannot leave ``charter`` reporting a stale
 entry. The alternative — recording worktrees in workspace state — would introduce a marker
 that can disagree with reality, a failure mode this repo has already been bitten by.
 
 Worktrees live at ``workspaces/<ws>/.worktrees/<repo>/<piece>``: OUTSIDE every clone, so
 nx/jest/maven never recurse into them and ``mvn clean`` / ``git clean -xfd`` inside the
 clone cannot destroy live work. ``workspaces/`` is gitignored, so none of it can reach the
-umbrella's history.
+control plane's history.
 """
 from __future__ import annotations
 

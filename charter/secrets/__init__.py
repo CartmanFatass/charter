@@ -1,4 +1,4 @@
-"""Provider-agnostic secret management for the umbrella.
+"""Provider-agnostic secret management for the control plane.
 
 A small abstraction over *vault providers* (plain-file today; more providers
 can be added later) so agents — and, in future, personas — can store and

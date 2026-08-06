@@ -78,7 +78,7 @@ class CliSmokeTest(unittest.TestCase):
         # may legitimately report failures (e.g. no glab auth). We only assert it
         # didn't blow up importing a nonexistent module.
         self._assert_clean(proc, allow_nonzero=True)
-        self.assertIn("Umbrella preflight", proc.stdout)
+        self.assertIn("charter preflight", proc.stdout)
 
     def test_doctor_json_runs_without_crashing(self) -> None:
         proc = self._run("doctor", "--json")

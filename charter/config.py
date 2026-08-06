@@ -1,4 +1,4 @@
-"""Static configuration and well-known paths for the umbrella."""
+"""Static configuration and well-known paths for the control plane."""
 
 from __future__ import annotations
 
@@ -95,6 +95,6 @@ SHARED_PERSONA = "_shared"
 #: never committed; this is the counterpart to the committed ``personas/*/memory``.
 PERSONA_STATE_DIR = EDM_HOME / "persona-state"
 
-#: Local pointer to the active persona (set by ``edm persona use``). Overridden
+#: Local pointer to the active persona (set by ``charter persona use``). Overridden
 #: by ``$EDM_PERSONA`` and by a command's ``--persona``. Gitignored (in EDM_HOME).
 ACTIVE_PERSONA_FILE = EDM_HOME / "active-persona"

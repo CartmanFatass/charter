@@ -1,7 +1,7 @@
-"""``edm persona`` commands: manage shared personas and use their vaults.
+"""``charter persona`` commands: manage shared personas and use their vaults.
 
 Persona *definitions* are committed (``personas/<name>.md``); their *secrets*
-live in a local vault the definition names. ``edm persona secret …`` proxies to
+live in a local vault the definition names. ``charter persona secret …`` proxies to
 that vault, so an agent adopting a persona reads/writes only that persona's
 credentials — and, per the secrets contract, never sees the plaintext.
 """
@@ -21,15 +21,15 @@ vault: {vault}
 
 # {role}
 
-You are the **{name}** persona for EasyDMARC — {role}. When this persona is
+You are the **{name}** persona — {role}. When this persona is
 active, adopt this role: its responsibilities, focus, and conventions.
 
 ## Responsibilities
 - (describe what this persona owns and does)
 
 ## How to work as this persona
-- Focus repos: (which repos this role typically works in — see `edm status`)
-- Credentials: use `edm persona secret …` (this persona's vault: `{vault}`).
+- Focus repos: (which repos this role typically works in — see `charter status`)
+- Credentials: use `charter persona secret …` (this persona's vault: `{vault}`).
   Never print secret values.
 - Conventions: (persona-specific norms, tools, definition of done)
 """
@@ -50,7 +50,7 @@ def cmd_persona_create(args) -> int:
 
     extends = getattr(args, "extends", None)
     if extends and not persona.load(extends):
-        util.err(f"--extends '{extends}': no such persona to inherit from (see `edm persona list`).")
+        util.err(f"--extends '{extends}': no such persona to inherit from (see `charter persona list`).")
         return 1
 
     vault = args.vault or args.name
@@ -81,7 +81,7 @@ def cmd_persona_create(args) -> int:
             util.warn(f"vault: {e}")
     else:
         util.info(f"Set up its vault locally when ready: "
-                  f"edm vault add {vault} --provider plain-file --persona {args.name}")
+                  f"charter vault add {vault} --provider plain-file --persona {args.name}")
 
     if args.use:
         persona.set_active(args.name)
@@ -94,7 +94,7 @@ def cmd_persona_list(args) -> int:
     names = persona.list_personas()
     active = persona.resolve_active()
     if not names:
-        util.info('No personas yet. Create one: edm persona create <name> --role "<Role>"')
+        util.info('No personas yet. Create one: charter persona create <name> --role "<Role>"')
         return 0
     print(f"Active persona: {active or '—'}  (via {persona.source()})\n")
     roles = {n: ((persona.load(n) or {"meta": {}})["meta"].get("role") or "") for n in names}
@@ -154,12 +154,12 @@ def _print_memory_summary(name: str) -> None:
     nrefs = len([p for p in refs.glob("*") if p.name != "README.md"]) if refs.exists() else 0
     print(f"memory:  {own} own · {shared} shared (persistent) · {eph} ephemeral · {nrefs} refs")
     print(f"         {persona.memory_dir(name).relative_to(config.ROOT)}/  ·  "
-          f"recall: edm persona recall {name}")
+          f"recall: charter persona recall {name}")
 
 
 def cmd_persona_use(args) -> int:
     if not persona.load(args.name):
-        util.err(f"no persona '{args.name}' (create it: edm persona create {args.name})")
+        util.err(f"no persona '{args.name}' (create it: charter persona create {args.name})")
         return 1
     persona.set_active(args.name)
     util.ok(f"Active persona set to '{args.name}'.")
@@ -185,39 +185,39 @@ def cmd_persona_clear(args) -> int:
 
 def cmd_persona_default(args) -> int:
     """Show / set / clear the committed team-wide default persona (personas/.default) —
-    the one adopted when no --persona / $EDM_PERSONA / `edm persona use` is set."""
+    the one adopted when no --persona / $EDM_PERSONA / `charter persona use` is set."""
     f = config.PERSONAS_DIR / ".default"
     if getattr(args, "clear", False):
         if f.exists():
             f.unlink()
-            util.ok("Cleared the committed default persona (commit with `edm save`).")
+            util.ok("Cleared the committed default persona (commit with `charter save`).")
         else:
             util.info("No committed default persona was set.")
         return 0
     if getattr(args, "name", None):
         if not persona.load(args.name):
-            util.err(f"no persona '{args.name}' — create it first (`edm persona create {args.name}`).")
+            util.err(f"no persona '{args.name}' — create it first (`charter persona create {args.name}`).")
             return 1
         config.PERSONAS_DIR.mkdir(parents=True, exist_ok=True)
         f.write_text(args.name + "\n")
         util.ok(f"Committed default persona set to '{args.name}' → personas/.default (shared; "
-                "commit with `edm save`).")
-        util.info("Overridden per-developer by `edm persona use` / $EDM_PERSONA / --persona.")
+                "commit with `charter save`).")
+        util.info("Overridden per-developer by `charter persona use` / $EDM_PERSONA / --persona.")
         return 0
     d = persona.default_persona()
     if d:
         print(d)
         util.info("committed team-wide default (personas/.default). "
-                  "Change: edm persona default <name>  ·  clear: --clear")
+                  "Change: charter persona default <name>  ·  clear: --clear")
     else:
-        util.info("No committed default persona. Set one: edm persona default <name>")
+        util.info("No committed default persona. Set one: charter persona default <name>")
     return 0
 
 
 def _dependents_of(name: str) -> list[str]:
     """Personas that would be left with a DANGLING reference if *name* went away —
     either `extends: <name>` (inherits its charter) or `uses: …, <name>, …` (shares its
-    vault/tools). `edm persona lint` reports a dangling ref as an error, but only after
+    vault/tools). `charter persona lint` reports a dangling ref as an error, but only after
     the fact; this lets `remove` refuse up front."""
     out = []
     for other in persona.list_personas():
@@ -245,7 +245,7 @@ def cmd_persona_remove(args) -> int:
             util.err(f"  {d}")
         util.info("Repoint or remove those first (an `extends:` parent's charter is inherited, "
                   "so folding it into the child before removing keeps the discipline).")
-        util.info(f"Override with: edm persona remove {args.name} --force")
+        util.info(f"Override with: charter persona remove {args.name} --force")
         return 1
     if persona.is_dir_layout(args.name):
         d = persona.dir_of(args.name)
@@ -258,7 +258,7 @@ def cmd_persona_remove(args) -> int:
         util.ok(f"Removed persona definition {p.relative_to(config.ROOT)} (commit the deletion).")
     if _remove_agent(args.name):
         util.info(f"  also removed generated .claude/agents/{args.name}.md.")
-    util.info("Its local vault (if any) is left untouched — remove with `edm vault remove <vault>`.")
+    util.info("Its local vault (if any) is left untouched — remove with `charter vault remove <vault>`.")
     if persona.resolve_active() == args.name and persona.source() == "active-file":
         persona.clear_active()
         util.info("Active persona cleared.")
@@ -271,16 +271,16 @@ def cmd_persona_remove(args) -> int:
 def _resolve_vault(args) -> str | None:
     name = persona.resolve_active(getattr(args, "persona", None))
     if not name:
-        util.err("no active persona. Select one: edm persona use <name>  (or pass --persona).")
+        util.err("no active persona. Select one: charter persona use <name>  (or pass --persona).")
         return None
     vault = persona.vault_of(name)
     if not vault:
         util.err(f"persona '{name}' has no vault. Add `vault:` to its file, or "
-                 f"`edm vault add <v> --persona {name}`.")
+                 f"`charter vault add <v> --persona {name}`.")
         return None
     if vault not in registry.vaults():
         util.err(f"persona '{name}' vault '{vault}' isn't set up on this machine. "
-                 f"Create it: edm vault add {vault} --provider plain-file --persona {name}.")
+                 f"Create it: charter vault add {vault} --provider plain-file --persona {name}.")
         return None
     return vault
 
@@ -314,7 +314,7 @@ def _warn_env(name: str) -> None:
 # --------------------------------------------------------------------------- #
 # sync-agents: generate a Claude Code sub-agent per persona                    #
 # --------------------------------------------------------------------------- #
-_AGENT_MARKER = "GENERATED by `edm persona sync-agents`"
+_AGENT_MARKER = "GENERATED by `charter persona sync-agents`"
 
 
 def _agents_dir():
@@ -335,7 +335,7 @@ def _agent_description(name: str, meta: dict) -> str:
     # The `delegate-when` triggers are what let the agent auto-route work here; a
     # persona without them falls back to a generic (weakly-triggering) description.
     if when:
-        return f"The {role} persona (EasyDMARC). Delegate to it for {when}.{tail}"
+        return f"The {role} persona. Delegate to it for {when}.{tail}"
     return f"The {role} persona. Delegate {role.lower()} tasks to it.{tail}"
 
 
@@ -355,7 +355,7 @@ def _render_agent(name: str, meta: dict, charter: str) -> str:
         joined = ", ".join(f"`{u}`" for u in uses)
         uses_note = (
             f"\n- **You may also use these personas: {joined}.** Read their vault "
-            f"(`edm persona secret --persona <name> …`), run their tools, or delegate a "
+            f"(`charter persona secret --persona <name> …`), run their tools, or delegate a "
             f"sub-task to their sub-agent (Agent tool, `subagent_type: <name>`)."
         )
 
@@ -370,8 +370,8 @@ def _render_agent(name: str, meta: dict, charter: str) -> str:
     handoff = (
         f"\n- **Outside your domain, hand off — don't guess with partial credentials.** "
         f"{infra}Delegate to the owner via the Agent tool (`subagent_type: <persona>`; it runs "
-        f"with *its own* vault — you never see its secrets); `edm persona list` shows who owns "
-        f"what. Never `edm persona use` to switch the active persona — that's user-request-only."
+        f"with *its own* vault — you never see its secrets); `charter persona list` shows who owns "
+        f"what. Never `charter persona use` to switch the active persona — that's user-request-only."
     )
 
     try:
@@ -381,28 +381,28 @@ def _render_agent(name: str, meta: dict, charter: str) -> str:
 
     mem = f"""
 ## Memory
-- **Search before acting** — never bulk-read the indexes: `edm recall "<keywords>"` searches
+- **Search before acting** — never bulk-read the indexes: `charter recall "<keywords>"` searches
   every base at once (your memory, shared, the active workspace) and labels hits by source.
-- **Record what's durable** as you learn: `edm persona remember {name} "<one fact>"` — one
+- **Record what's durable** as you learn: `charter persona remember {name} "<one fact>"` — one
   curated idea each; `--shared` if every persona benefits, `--ephemeral` for session scratch.
   Persistent memory commits + pushes itself immediately, so it reaches the team as you write it.
 - **Never** put secrets in memory/refs — credentials live only in the vault."""
 
     body = f"""<!-- {_AGENT_MARKER} from {rel} — edit the persona, not this file. -->
 
-This sub-agent acts as the **{name}** persona for EasyDMARC — {role} — in an
+This sub-agent acts as the **{name}** persona — {role} — in an
 isolated context. Adopt the charter below as your role.
 
 {charter}
 
 ## As a persona sub-agent
 - **🔑 git = the glab token over HTTPS. Never SSH, never signing.** Repos are pre-configured, so
-  a plain `git push` works. If git ever asks for a key or passphrase, run `edm git-policy
+  a plain `git push` works. If git ever asks for a key or passphrase, run `charter git-policy
   --apply` — don't reach for SSH (`glab auth status` checks the credential).
 - **Credentials** come only from this persona's vault, and are **never printed**:
-  `edm persona secret --persona {name} <list|exec|cp> …` — use `exec`/`cp`, never `--reveal`.
+  `charter persona secret --persona {name} <list|exec|cp> …` — use `exec`/`cp`, never `--reveal`.
   Run tools through it, e.g. `… exec --file KUBECONFIG=kubeconfig -- kubectl -n <ns> get pods`{uses_note}{handoff}
-- Follow the umbrella's conventions (see CLAUDE.md); report results concisely to the caller.
+- Follow the control plane's conventions (see CLAUDE.md); report results concisely to the caller.
 {mem}
 """
     return "---\n" + "\n".join(fm) + "\n---\n" + body
@@ -438,7 +438,7 @@ def _remove_agent(name: str) -> bool:
 # --------------------------------------------------------------------------- #
 def _require(name: str) -> bool:
     if not persona.load(name):
-        util.err(f"no persona '{name}' (create it: edm persona create {name})")
+        util.err(f"no persona '{name}' (create it: charter persona create {name})")
         return False
     return True
 
@@ -458,7 +458,7 @@ def cmd_persona_remember(args) -> int:
     if args.ephemeral:
         return 0  # session scratch, gitignored — nothing to commit
     if getattr(args, "no_sync", False):
-        util.info("  (--no-sync) recorded locally; share later with: edm persona memory-sync.")
+        util.info("  (--no-sync) recorded locally; share later with: charter persona memory-sync.")
         return 0
     # Reactive: the persistent memory reaches the shared repo the moment it's written.
     from .commands import commit_memory_reactive
@@ -530,7 +530,7 @@ def cmd_persona_recall(args) -> int:
             print(f"  {r.get('ts', '')}  {r['event']:10} {extra}")
     if not printed:
         util.info(f"persona '{name}' has no memories yet. "
-                  f"Add one: edm persona remember {name} \"<fact>\"")
+                  f"Add one: charter persona remember {name} \"<fact>\"")
     return 0
 
 
@@ -591,7 +591,7 @@ def cmd_persona_memory_sync(args) -> int:
         util.err("Refusing to commit — a secret-shaped value in persona memory/refs:")
         for p, kind in flagged:
             util.err(f"  {p}  ({kind})")
-        util.info("Secrets live only in the vault (`edm persona secret set`). Remove it, then retry.")
+        util.info("Secrets live only in the vault (`charter persona secret set`). Remove it, then retry.")
         return 1
 
     def git(*a):
@@ -602,7 +602,7 @@ def cmd_persona_memory_sync(args) -> int:
     touched = sorted({p.split("/")[1] for p in changed if p.startswith("personas/")})
     body = (f"personas: sync memory/refs ({', '.join(touched)})\n\n"
             f"{len(changed)} persona memory/ref file(s) committed so the team's personas share "
-            f"the knowledge. Synced via `edm persona memory-sync`.\n\n"
+            f"the knowledge. Synced via `charter persona memory-sync`.\n\n"
             f"Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>\n")
     cache = config.EDM_HOME / "cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -639,7 +639,7 @@ def cmd_persona_dedupe(args) -> int:
         ra = pa.relative_to(config.ROOT) if _under_root(pa) else pa
         rb = pb.relative_to(config.ROOT) if _under_root(pb) else pb
         print(f"  {jac:.0%}  {ta}\n        ↔ {tb}\n        {ra}\n        {rb}\n")
-    util.info("Review, then drop one: edm persona forget <name> <slug> [--shared]")
+    util.info("Review, then drop one: charter persona forget <name> <slug> [--shared]")
     return 0
 
 
@@ -653,12 +653,12 @@ def _agent_sync_issues(name: str) -> list[tuple[str, str]]:
         return []
     path = _agents_dir() / f"{name}.md"
     if not path.exists():
-        return [("warn", "no generated sub-agent — run `edm persona sync-agents`")]
+        return [("warn", "no generated sub-agent — run `charter persona sync-agents`")]
     cur = path.read_text()
     if _AGENT_MARKER not in cur:
         return []  # hand-written agent — never touched
     if cur.strip() != _render_agent(name, d["meta"], d["charter"]).strip():
-        return [("warn", "generated sub-agent is stale — run `edm persona sync-agents`")]
+        return [("warn", "generated sub-agent is stale — run `charter persona sync-agents`")]
     return []
 
 
@@ -733,7 +733,7 @@ def cmd_persona_stats(args) -> int:
                   f"a persona owns is being done without it.")
     else:
         util.info("No dispatches recorded yet — the tally starts filling as sub-agents are "
-                  "dispatched (`edm persona dispatch-backfill` seeds it from past sessions).")
+                  "dispatched (`charter persona dispatch-backfill` seeds it from past sessions).")
     if unused:
         util.warn(f"{unused} persona(s) NEVER dispatched — they exist, lint green, and are "
                   f"unused. Check whether their work is routing to a generic agent instead.")
@@ -825,13 +825,13 @@ def cmd_persona_optimize(args) -> int:
 
 def cmd_persona_log(args) -> int:
     """Record a manual `note` into the session trace, or show this persona's activity
-    from it. (One activity record: the trace — see `edm trace`.)"""
+    from it. (One activity record: the trace — see `charter trace`.)"""
     name = args.name or persona.resolve_active()
     if not name or not _require(name):
         return 1
     if args.message:
         trace.record("note", persona=name, msg=args.message)
-        util.ok(f"Noted to {name}'s session activity (see `edm trace` / `edm persona recall {name}`).")
+        util.ok(f"Noted to {name}'s session activity (see `charter trace` / `charter persona recall {name}`).")
         return 0
     entries = trace.for_persona(name, n=args.n)
     if not entries:
@@ -929,7 +929,7 @@ def cmd_persona_sync_agents(args) -> int:
         return 1
     names = [one] if one else persona.list_personas()
     if not names:
-        util.info("No personas to sync. Create one first: edm persona create <name>.")
+        util.info("No personas to sync. Create one first: charter persona create <name>.")
         return 0
 
     written = [n for n in names if _write_agent(n) == "written"]

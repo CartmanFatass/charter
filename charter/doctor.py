@@ -1,4 +1,4 @@
-"""Environment preflight checks for the umbrella (``edm doctor``).
+"""Environment preflight checks for a control plane (``charter doctor``).
 
 Read-only: verifies the tools and auth a developer needs *before* they try to
 discover or clone, and prints exact remediation steps for anything missing.
@@ -45,13 +45,17 @@ def _first_line(text: str) -> str:
     return text.splitlines()[0] if text else ""
 
 
+#: Kept in sync with `requires-python` in pyproject.toml — a test pins the two together.
+MIN_PYTHON = (3, 11)
+
+
 def check_python() -> Result:
-    ok = sys.version_info >= (3, 9)
+    ok = sys.version_info >= MIN_PYTHON
     return Result(
         "python3",
         OK if ok else FAIL,
         detail=platform.python_version(),
-        hint="" if ok else "Python 3.9+ is required.",
+        hint="" if ok else f"Python {'.'.join(map(str, MIN_PYTHON))}+ is required.",
     )
 
 
@@ -86,7 +90,7 @@ def check_glab_auth() -> Result:
         "glab auth",
         FAIL,
         detail=_first_line(blob),
-        hint="Run: glab auth login  (pick gitlab.com; choose TOKEN/HTTPS — the umbrella "
+        hint="Run: glab auth login  (pick gitlab.com; choose TOKEN/HTTPS — charter "
              "never uses SSH for git).",
     )
 
@@ -94,7 +98,7 @@ def check_glab_auth() -> Result:
 def check_ssh() -> Result:
     """Golden rule: **one credential** — the glab token over HTTPS. SSH is deliberately NOT
     used, so this no longer probes for a key (that was a contradictory hard requirement).
-    Instead it verifies the umbrella's own repo carries the token-only git policy."""
+    Instead it verifies the control plane's own repo carries the token-only git policy."""
     from . import config as _config, gitpolicy
     scope = gitpolicy.repos(_config.ROOT, _config.WORKSPACES_DIR)
     bad = [r for r in scope if gitpolicy.check(r)]
@@ -106,7 +110,7 @@ def check_ssh() -> Result:
         "git auth",
         WARN,
         detail=f"{len(bad)}/{len(scope)} repo(s) not token-only: {names}",
-        hint="Apply the single-credential policy to every clone: edm git-policy --apply",
+        hint="Apply the single-credential policy to every clone: charter git-policy --apply",
     )
 
 
@@ -132,7 +136,7 @@ def check_inventory() -> Result:
     n = inventory.load().get("count", 0)
     if n:
         return Result("inventory", OK, detail=f"{n} repos mapped")
-    return Result("inventory", WARN, hint="Run: edm discover  (builds inventory/repos.json).")
+    return Result("inventory", WARN, hint="Run: charter discover  (builds inventory/repos.json).")
 
 
 def check_vaults() -> Result:

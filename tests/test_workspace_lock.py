@@ -119,7 +119,7 @@ class TestConfirmNudge(WorkspaceLockBase):
     def test_nudge_fires_when_unconfirmed(self):
         msg = hooks._workspace_confirm_nudge(self.SID)
         self.assertIn("Confirm the workspace", msg)
-        self.assertIn("edm workspace use", msg)
+        self.assertIn("charter workspace use", msg)
 
     def test_no_nudge_once_locked(self):
         workspace.set_active("alpha")

@@ -2,9 +2,9 @@
 cached + refreshed in the background so a render never blocks on the network.
 
 The status line reads the cache (``read_for``) and, if it's stale, kicks off a
-**detached** ``edm gl-refresh`` (``maybe_spawn``) that queries GitLab via
+**detached** ``charter gl-refresh`` (``maybe_spawn``) that queries GitLab via
 ``glab`` and rewrites the cache. A SessionStart hook seeds it with a full
-``glab`` environment; ``edm gl-refresh`` runs it on demand.
+``glab`` environment; ``charter gl-refresh`` runs it on demand.
 """
 
 from __future__ import annotations
@@ -84,16 +84,25 @@ def maybe_spawn(dirs, workspace: str | None = None) -> None:
     )
     if not stale:
         return
-    cmd = [sys.executable, str(config.ROOT / "bin" / "edm"), "gl-refresh"]
+    # Target the installed package via `-m`, not a path inside the control plane —
+    # a control plane has no `bin/edm` (that script lived in the old monorepo the
+    # engine was extracted from); `-m charter` resolves through the same
+    # interpreter/venv that is already running this process.
+    cmd = [sys.executable, "-m", "charter", "gl-refresh"]
     if workspace:
         cmd += ["--workspace", workspace]
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.touch()
         subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True, env=os.environ.copy(),
         )
+    except Exception:
+        # Spawn never happened — don't start the cooldown, so a transient failure
+        # (rather than a real refresh) doesn't suppress the next render's retry.
+        return
+    try:
+        lock.touch()
     except Exception:
         pass
 

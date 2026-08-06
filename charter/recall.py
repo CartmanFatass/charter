@@ -6,7 +6,7 @@ journal, the active **persona**'s own role memory, the cross-role **shared** nam
 genuinely different axes — but *reading* is unified here: a caller asks once and gets ranked,
 **source-labeled** hits, without needing to know which base a fact lives in.
 
-This is the one place memory is fetched. It sits on the shared :mod:`edm.memstore` engine
+This is the one place memory is fetched. It sits on the shared :mod:`charter.memstore` engine
 (whose ``search`` already ranks across a list of dirs); this module adds the context-aware
 assembly of *which* dirs are in scope and tags each result with where it came from.
 """

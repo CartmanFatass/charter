@@ -1,8 +1,8 @@
-"""Tiny stdlib-only terminal-layout kit — "rich-lite" for edm's TUI output.
+"""Tiny stdlib-only terminal-layout kit — "rich-lite" for charter's TUI output.
 
 Why not rich/textual? The status line re-renders on *every* prompt, so it must
-import in milliseconds and run with zero install (`edm` is clone-and-run, no
-pip). This module is the small layout algebra that covers what edm draws —
+import in milliseconds and add no runtime dependency (`charter` ships stdlib-only).
+This module is the small layout algebra that covers what charter draws —
 ANSI-aware width math plus composable Text/Row/Stack/Columns nodes — so column
 arithmetic lives in one tested place instead of ad-hoc padding at call sites.
 

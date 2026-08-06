@@ -1,14 +1,14 @@
-"""**Golden rule: one credential.** Every git operation in the umbrella — and in every repo
-clone under it — authenticates with the **glab token over HTTPS**. No SSH keys, no 1Password
-agent, no commit signing. A single credential the whole org shares, so an agent never stalls
-on a key prompt, a signer hang, or a missing SSH config.
+"""**Golden rule: one credential.** Every git operation in the control plane — and in every
+repo clone under it — authenticates with the **glab token over HTTPS**. No SSH keys, no
+1Password agent, no commit signing. A single credential the whole org shares, so an agent
+never stalls on a key prompt, a signer hang, or a missing SSH config.
 
-**SCOPE — the umbrella and its clones, nothing outside.** Everything here is written with
-``git config --local``, so it applies to the umbrella repo and the clones under
+**SCOPE — the control plane and its clones, nothing outside.** Everything here is written
+with ``git config --local``, so it applies to the control-plane repo and the clones under
 ``workspaces/``, and **never** to a developer's global/system git config. A developer's own
 preferences (e.g. a global ``commit.gpgsign=true``) keep working everywhere else on their
-machine; inside the umbrella the local value simply wins, which is exactly what stops an
-agent stalling on a signer prompt. Do **not** widen this to ``--global`` / an ``includeIf``
+machine; inside the control plane the local value simply wins, which is exactly what stops
+an agent stalling on a signer prompt. Do **not** widen this to ``--global`` / an ``includeIf``
 stanza — tests assert the boundary (`test_git_policy.py`).
 
 This module makes that **mechanically true** rather than merely documented, by writing three
@@ -20,9 +20,9 @@ things into a repo's *local* git config (never global — we don't touch a devel
    an SSH URL* transparently transports over HTTPS+token. This is what makes a plain
    ``git push`` typed by any agent (or any persona sub-agent) work without SSH.
 
-With (3) in place the rule holds even for clones the umbrella didn't create; the PreToolUse
-guard in :mod:`edm.hooks` then blocks the deliberate bypasses (explicit SSH remotes,
-``GIT_SSH_COMMAND``, ``-S``/``--gpg-sign``).
+With (3) in place the rule holds even for clones the control plane didn't create; the
+PreToolUse guard in :mod:`charter.hooks` then blocks the deliberate bypasses (explicit SSH
+remotes, ``GIT_SSH_COMMAND``, ``-S``/``--gpg-sign``).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def check(repo: Path, cfg: dict[str, list[str]] | None = None) -> list[str]:
 
 
 def non_compliant(root: Path, workspaces_dir: Path) -> list[Path]:
-    """Every repo in scope (umbrella + clones) whose local config isn't token-only."""
+    """Every repo in scope (control plane + clones) whose local config isn't token-only."""
     return [r for r in repos(root, workspaces_dir) if check(r)]
 
 
@@ -113,7 +113,7 @@ def apply(repo: Path) -> list[str]:
 
 
 def repos(root: Path, workspaces_dir: Path) -> list[Path]:
-    """The umbrella itself plus every repo clone under ``workspaces/<ws>/<repo>``."""
+    """The control plane itself plus every repo clone under ``workspaces/<ws>/<repo>``."""
     out = [Path(root)] if is_git_repo(root) else []
     if Path(workspaces_dir).exists():
         for ws in sorted(Path(workspaces_dir).iterdir()):
