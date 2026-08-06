@@ -35,6 +35,13 @@ class ReactiveCommitCase(unittest.TestCase):
         self._orig_root = config.ROOT
         config.ROOT = self.tmp
         _git("init", "-q", cwd=self.tmp)
+        # Local identity, not just env vars reaching this test's own `_git` helper — the
+        # CODE UNDER TEST (charter.commands.commit_push) shells out via charter.util.run,
+        # which inherits the ambient environment, not `_ENV`. Local config is the only way
+        # to make a `git commit` succeed inside this repo regardless of who invokes it,
+        # so the test is hermetic on a machine (or CI runner) with no git identity configured.
+        _git("config", "user.email", "t@t", cwd=self.tmp)
+        _git("config", "user.name", "t", cwd=self.tmp)
         (self.tmp / "seed").write_text("x")
         _git("add", "-A", cwd=self.tmp)
         _git("commit", "-q", "-m", "seed", cwd=self.tmp)

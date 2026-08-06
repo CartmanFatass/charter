@@ -65,6 +65,28 @@ def check_git() -> Result:
     return Result("git", OK, detail=_first_line(util.run(["git", "--version"], check=False).stdout))
 
 
+def check_git_identity() -> Result:
+    """A commit needs a resolvable identity. ``commit_push`` (behind reactive memory,
+    workspace snapshots, and `charter save`) shells out to git with ``check=False`` and
+    swallows a failed commit — it's called from hooks/background paths that must never
+    break a turn — so a machine with no ``user.name``/``user.email`` configured would
+    silently lose memories/notes/dispatch tallies with nothing said about it. This check
+    is that missing visibility, not a new failure mode."""
+    name = _first_line(util.run(["git", "config", "--get", "user.name"], check=False).stdout)
+    email = _first_line(util.run(["git", "config", "--get", "user.email"], check=False).stdout)
+    if name and email:
+        return Result("git identity", OK, detail=f"{name} <{email}>")
+    missing = ", ".join(k for k, v in (("user.name", name), ("user.email", email)) if not v)
+    return Result(
+        "git identity",
+        FAIL,
+        detail=f"not set: {missing}",
+        hint='Run: git config --global user.email "you@example.com" && '
+             'git config --global user.name "Your Name"  — otherwise a commit (memory, '
+             "workspace notes, dispatch tallies) silently never happens.",
+    )
+
+
 def check_glab() -> Result:
     if not shutil.which("glab"):
         return Result(
@@ -168,6 +190,7 @@ def check_vaults() -> Result:
 CHECKS = (
     check_python,
     check_git,
+    check_git_identity,
     check_glab,
     check_glab_auth,
     check_ssh,
