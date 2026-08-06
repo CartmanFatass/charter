@@ -33,6 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
     doc_check.add_argument("--json", action="store_true", help="Emit machine-readable results.")
     doc_check.set_defaults(func=commands.cmd_doctor)
 
+    ri = sub.add_parser(
+        "reinit",
+        help="Heal control-plane drift: create any missing baseline directory "
+             "(personas/, inventory/, workspaces/) a newer charter expects. "
+             "Idempotent + additive — existing content is never touched.",
+    )
+    ri.set_defaults(func=commands.cmd_reinit)
+
     d = sub.add_parser(
         "discover",
         help="Refresh inventory/repos.json from GitLab, then regenerate docs.",

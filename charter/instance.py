@@ -111,3 +111,31 @@ def share_of(cfg: dict) -> str:
     """
     v = (cfg.get("memory") or {}).get("share")
     return clamp_share(v)
+
+
+# --------------------------------------------------------------------------- #
+# control-plane SCHEMA — the same stamp/detect/heal pattern `workspace.py`'s   #
+# STRUCTURE_VERSION already proves, one level up: a control plane (not just a  #
+# single workspace) can lack layout a newer charter expects (personas/,        #
+# inventory/, workspaces/, …). ``schema`` in charter.toml is the stamp (already #
+# read/enforced by ``load`` above); ``drift`` below is the *detect* half;      #
+# ``charter reinit`` (charter/commands.py) is the *heal* half. Idempotent +     #
+# additive: existing content is never touched.                                 #
+# --------------------------------------------------------------------------- #
+
+#: Directories a control plane is expected to have. Absence is drift, not an error —
+#: `charter reinit` creates them.
+BASELINE_DIRS = ("personas", "inventory", "workspaces")
+
+
+def drift(root: Path) -> list[str]:
+    """Human-readable descriptions of what this control plane is missing.
+
+    Empty means current. This is the *detect* half of the stamp/detect/heal pattern; the
+    stamp is ``schema`` in charter.toml and the heal is ``charter reinit``.
+    """
+    out = []
+    for d in BASELINE_DIRS:
+        if not (Path(root) / d).is_dir():
+            out.append(f"missing directory: {d}/")
+    return out

@@ -575,6 +575,45 @@ def cmd_gl_refresh(args) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# reinit — control-plane schema: the same stamp/detect/heal pattern            #
+# `workspace reinit` (charter/workspace.py, commands_workspace.cmd_workspace_  #
+# reinit) already proves for a single workspace's layout, lifted one level up  #
+# to the whole control plane. The stamp is `schema` in charter.toml            #
+# (charter.instance.load enforces it can't be newer than this engine          #
+# understands); `charter.instance.drift` is the detect half; this command is   #
+# the heal half; `doctor`'s "schema" check is where the drift is visible       #
+# without running this first.                                                  #
+# --------------------------------------------------------------------------- #
+def cmd_reinit(args) -> int:
+    """Bring the control plane's own baseline layout up to date — create any top-level
+    directory (personas/, inventory/, workspaces/) a newer charter expects but this
+    control plane predates. Idempotent + additive: existing content is never touched.
+    Fails clearly outside a control plane rather than scaffolding into whatever
+    directory happens to be the cwd."""
+    if not config.HAS_CONTROL_PLANE:
+        util.err("no control plane found (no charter.toml here or in any parent) — "
+                  "`charter reinit` only works inside one.")
+        return 1
+    from . import instance as _instance
+
+    created, present = [], []
+    for d in _instance.BASELINE_DIRS:
+        p = config.ROOT / d
+        if p.is_dir():
+            present.append(f"{d}/")
+        else:
+            p.mkdir(parents=True, exist_ok=True)
+            created.append(f"{d}/")
+    if not created:
+        util.ok(f"Up to date (schema {_instance.SCHEMA}) — nothing to do.")
+        return 0
+    util.ok(f"Reinitialized control plane → added {', '.join(created)}.")
+    if present:
+        util.info(f"  already present: {', '.join(present)}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # doctor                                                                       #
 # --------------------------------------------------------------------------- #
 def cmd_doctor(args) -> int:

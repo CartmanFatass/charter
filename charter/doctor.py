@@ -240,6 +240,28 @@ def check_control_plane_config() -> Result:
                   else "no control plane found")
 
 
+def check_control_plane_schema() -> Result:
+    """Structural drift, from ``charter.instance.drift``: baseline top-level directories
+    (personas/, inventory/, workspaces/) a control plane is expected to have. This is
+    the *detect* half of the same stamp/detect/heal pattern ``workspace reinit`` already
+    proves for a single workspace's layout — lifted one level up to the whole control
+    plane, healed by ``charter reinit`` — surfaced here so a stale control plane is
+    visible without running ``reinit`` first."""
+    from . import config as _config, instance as _instance
+
+    if not _config.HAS_CONTROL_PLANE:
+        return Result("schema", OK, detail="no control plane found")
+    found = _instance.drift(_config.ROOT)
+    if not found:
+        return Result("schema", OK, detail=f"up to date (schema {_instance.SCHEMA})")
+    return Result(
+        "schema",
+        WARN,
+        detail=f"{len(found)} missing: " + "; ".join(found),
+        hint="Run: charter reinit  (creates what's missing; never touches existing content).",
+    )
+
+
 def check_inventory() -> Result:
     n = inventory.load().get("count", 0)
     if n:
@@ -282,5 +304,6 @@ def run_all() -> list[Result]:
     for forge in declared_or_default_forges():
         results.append(check_forge_cli(forge))
         results.append(check_forge_auth(forge))
-    results += [check_ssh(), check_control_plane_config(), check_inventory(), check_vaults()]
+    results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
+                check_inventory(), check_vaults()]
     return results
