@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest import mock
 
 from tests._isolation import PersonaIso, run_hook
-from charter import dispatch, hooks
+from charter import commands, config, dispatch, hooks
 
 
 class TestDispatchStore(PersonaIso):
@@ -86,6 +87,60 @@ class TestDispatchHook(PersonaIso):
         with mock.patch.object(dispatch, "record", side_effect=OSError("boom")):
             self.assertIsNone(self._run({"tool_name": "Task",
                                          "tool_input": {"subagent_type": "devops"}}))
+
+
+class TestCommitDispatchPosture(unittest.TestCase):
+    """`_commit_dispatch` is the one gate whose failure publishes a memory line without
+    anyone typing a command — it must honour `config.MEMORY_SHARE` exactly like the other
+    two reactive paths (`commands.commit_memory_reactive`, `cmd_workspace_autosave`).
+    Same shape as `TestReactiveCommitHonoursPosture` (test_memory_share.py) and
+    `TestAutosaveGating` (test_workspace_enforcement.py): git is mocked, only the posture
+    wiring is under test."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="edm-dispatch-commit-"))
+        self._orig = {k: getattr(config, k) for k in ("ROOT", "EDM_HOME", "MEMORY_SHARE")}
+        config.ROOT = self.tmp
+        config.EDM_HOME = self.tmp / ".edm"
+        self.path = self.tmp / "personas" / "_dispatch" / "log.jsonl"
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"ts": "x", "agent": "devops"}\n')
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import shutil
+        for k, v in self._orig.items():
+            setattr(config, k, v)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, share):
+        config.MEMORY_SHARE = share
+        with mock.patch.object(commands, "commit_push") as cp:
+            hooks._commit_dispatch(self.path, "devops")
+        return cp
+
+    def test_local_never_acquires_the_lock(self):
+        """The earliest observable side effect, per the reviewer's trace: `_commit_dispatch`
+        returns before it creates `dispatch-commit.lock` at all. Asserting only that
+        `commit_push` wasn't called would still pass even if an earlier step (mkdir/open/
+        flock) had already leaked under `local` — this pins the return to before that."""
+        cp = self._run("local")
+        cp.assert_not_called()
+        self.assertFalse((config.EDM_HOME / "dispatch-commit.lock").exists())
+        self.assertFalse(config.EDM_HOME.exists(),
+                         "local must not even create EDM_HOME's dispatch-commit.lock parent")
+
+    def test_commit_records_but_does_not_push(self):
+        cp = self._run("commit")
+        cp.assert_called_once()
+        self.assertTrue(cp.call_args.kwargs.get("no_push"), "`commit` must not publish")
+
+    def test_push_publishes_immediately(self):
+        cp = self._run("push")
+        cp.assert_called_once()
+        self.assertFalse(cp.call_args.kwargs.get("no_push"),
+                         "`push` is today's umbrella behaviour: publish right away")
 
 
 if __name__ == "__main__":
