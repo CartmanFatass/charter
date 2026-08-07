@@ -129,6 +129,31 @@ stats` can show whether devops is actually being used, or whether that work is q
 routing to a generic agent instead. Full format, inheritance, and the memory model:
 `docs/personas.md`.
 
+### Feeding a tool that wants a dotenv secrets file
+
+Some tools take a *file* of secrets rather than env vars. `--dotenv` writes one
+0600 temp file containing every entry you name, points an env var at its path,
+and deletes it when the command exits — so no value is ever printed, stored, or
+placed in argv.
+
+```bash
+charter secret exec qa \
+  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=EASYDMARC_USER:platform-user \
+  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=EASYDMARC_PASS:platform-pass \
+  -- npx @playwright/cli@0.1.18 -s=login fill e3 EASYDMARC_PASS
+```
+
+Repeats sharing an env-var name merge into a single file, in flag order.
+Different names produce separate files. Defining the same NAME twice under one
+ENVVAR is an error (exit code 2).
+
+The value is never typed by the caller: the tool refers to the secret by the
+**name** you gave it (`EASYDMARC_PASS`), and resolves it from the file. Any
+value that does appear in captured output is redacted.
+
+`--dotenv` cannot be combined with `--exec` — exec replaces this process, so
+the temp file would never be cleaned up. Use `--env` for an exec'd command.
+
 ## The one-credential rule
 
 Every git operation charter performs — from any persona, any sub-agent, any repo clone —
