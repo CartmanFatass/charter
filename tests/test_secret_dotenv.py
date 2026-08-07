@@ -2,9 +2,11 @@
 
 The consuming parser is the `dotenv` package (Playwright's
 `dotenvFileLoader` calls `dotenv.parse`). Verified empirically at dotenv
-17.4.2: it does NOT unescape `\\"` or `\\\\` inside a double-quoted value — it
-expands only `\\n` and `\\r`. So backslash-escaping a quote or backslash
-corrupts the value. These tests pin the encoding that actually round-trips.
+17.4.2 over 50 cases: it processes no escapes at all inside a *single*-quoted
+value, and expands only `\\n`/`\\r` inside a double-quoted one. Single-quoting is
+therefore the safe default; a real newline forces the double-quoted form, whose
+`\\n` substitution is not injective and so cannot also carry a literal `\\n`.
+These tests pin the encoding that actually round-trips.
 """
 
 from __future__ import annotations
@@ -49,6 +51,44 @@ class DotenvLine(unittest.TestCase):
     def test_value_with_single_quote_round_trips(self):
         line = commands_secrets._dotenv_line("PASS", "it's")
         self.assertEqual(self._parse(line), "it's")
+
+    def test_apostrophe_plus_literal_backslash_n_round_trips(self):
+        """Regression: the case that silently corrupted.
+
+        An earlier rule double-quoted any value containing an apostrophe.
+        `it's\\nb` (7 chars, a LITERAL backslash-n and no real newline) then
+        encoded to `K="it's\\nb"` and decoded back to 6 chars with a REAL
+        newline — a silently wrong credential.
+        """
+        value = "it's" + "\\" + "n" + "b"
+        self.assertEqual(len(value), 7)
+        line = commands_secrets._dotenv_line("PASS", value)
+        self.assertEqual(self._parse(line), value)
+
+    def test_literal_backslash_sequences_survive_without_a_newline(self):
+        for value in ("a\\nb", "c:\\new\\report", "re\\r\\n", "\\\\n"):
+            with self.subTest(value=value):
+                line = commands_secrets._dotenv_line("K", value)
+                self.assertEqual(self._parse(line), value)
+
+    def test_real_newline_with_backslash_but_no_escape_sequence(self):
+        """A backslash not followed by n/r is unambiguous — must NOT raise."""
+        for value in ("a\\b\nc", "path\\to\nfile"):
+            with self.subTest(value=value):
+                line = commands_secrets._dotenv_line("K", value)
+                self.assertEqual(self._parse(line), value)
+
+    def test_pem_style_multiline_value_round_trips(self):
+        value = "-----BEGIN KEY-----\nMIIB\n-----END KEY-----\n"
+        line = commands_secrets._dotenv_line("KEY", value)
+        self.assertEqual(self._parse(line), value)
+
+    def test_raises_when_real_newline_meets_a_literal_escape_sequence(self):
+        """Genuinely unrepresentable in dotenv — must fail loudly, not corrupt."""
+        for value in ("x\\ny\nz", "a\\rb\nc", "it's\\nb\nreal"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    commands_secrets._dotenv_line("K", value)
 
     def test_value_with_newline_round_trips(self):
         line = commands_secrets._dotenv_line("KEY", "line1\nline2")

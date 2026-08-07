@@ -318,6 +318,7 @@ def _safe_unlink(path: str) -> None:
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ESCAPE_SEQ_RE = re.compile(r"\\[nr]")
 
 
 def _dotenv_line(name: str, value: str) -> str:
@@ -325,25 +326,31 @@ def _dotenv_line(name: str, value: str) -> str:
 
     The consuming parser is the ``dotenv`` package (Playwright's
     ``dotenvFileLoader`` calls ``dotenv.parse``). Verified empirically against
-    dotenv 17.4.2 over 34 cases: it does **not** unescape ``\\"`` or ``\\\\``
-    inside a double-quoted value — it expands only ``\\n`` and ``\\r``. So a
-    value holding a quote or backslash must not be double-quoted with
-    backslash escapes; it would parse back with the escapes intact and the
-    credential would be silently wrong.
+    dotenv 17.4.2 over 50 cases. Two of its properties drive this encoding:
 
-    The rule:
-      * value contains ``'``, LF or CR -> double-quote it, encoding real
-        CR as ``\\r`` and LF as ``\\n`` and nothing else;
-      * otherwise -> single-quote it verbatim, with no escape processing.
+    * It does **not** unescape ``\\"`` or ``\\\\`` anywhere, and processes no
+      escape at all inside a *single*-quoted value.
+    * It matches a quoted value greedily to the last quote on the line, so an
+      embedded quote of either kind survives.
 
-    dotenv matches a quoted value greedily to the last quote on the line, so
-    an embedded ``"`` inside a double-quoted value survives.
+    Single-quoting is therefore the safe default: it carries ``'``, ``"``,
+    ``\\`` and a literal ``\\n`` through untouched. Only a real newline forces
+    the double-quoted form, and there the ``\\n`` substitution is **not
+    injective** — a value already containing the two characters ``\\`` + ``n``
+    would come back as a real newline. That case is genuinely unrepresentable
+    in dotenv, so it raises rather than silently corrupting a credential.
     """
     if not _ENV_NAME_RE.match(name):
         raise ValueError(
             f"'{name}' is not a valid environment-variable name "
             "(expected [A-Za-z_][A-Za-z0-9_]*)")
-    if "'" in value or "\n" in value or "\r" in value:
-        body = value.replace("\r", "\\r").replace("\n", "\\n")
-        return f'{name}="{body}"'
-    return f"{name}='{value}'"
+    if "\n" not in value and "\r" not in value:
+        return f"{name}='{value}'"
+    if _ESCAPE_SEQ_RE.search(value):
+        raise ValueError(
+            f"the secret for '{name}' contains both a real newline and a "
+            "literal '\\\\n'/'\\\\r' sequence, which dotenv cannot represent "
+            "unambiguously (it has no backslash escape). Store the value "
+            "base64-encoded, or without the literal sequence.")
+    body = value.replace("\r", "\\r").replace("\n", "\\n")
+    return f'{name}="{body}"'
