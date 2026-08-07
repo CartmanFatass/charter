@@ -1,24 +1,34 @@
 """`charter secret exec --dotenv`: render several secrets into one dotenv file.
 
 The consuming parser is the `dotenv` package (Playwright's
-`dotenvFileLoader` calls `dotenv.parse`). Verified empirically at dotenv
-17.4.2 over 50 cases: it processes no escapes at all inside a *single*-quoted
-value, and expands only `\\n`/`\\r` inside a double-quoted one. Single-quoting is
-therefore the safe default; a real newline forces the double-quoted form, whose
-`\\n` substitution is not injective and so cannot also carry a literal `\\n`.
-These tests pin the encoding that actually round-trips.
+`dotenvFileLoader` calls `dotenv.parse`), verified at v17.4.2 by exhaustive
+fuzz (30,940 values, 0 corrupted — see `docs/superpowers/plans/
+2026-08-07-secret-exec-dotenv.md`, "Encoding rule"). Three tiers, in order:
+single quotes (fully literal; unsafe when '#' meets a quote, since a failed
+quote match falls back to unquoted parsing where '#' starts a comment — or
+when a quote meets a real newline), backticks (also fully literal, and
+unlike single quotes carry a real newline safely), double quotes (the only
+tier that can carry a literal CR, via escaping — ambiguous if the value
+already holds a literal '\\n'/'\\r' sequence). `DotenvGolden` below checks
+every entry against a fixture generated from the real `dotenv` package —
+the authoritative check; `DotenvLine` keeps hand-written cases for
+readability and named regressions.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from types import SimpleNamespace
 
 from charter import commands_secrets
+
+_GOLDEN_FIXTURE = Path(__file__).parent / "fixtures" / "dotenv_golden.json"
 
 
 class DotenvLine(unittest.TestCase):
@@ -28,12 +38,20 @@ class DotenvLine(unittest.TestCase):
     def _parse(line: str) -> str:
         """A faithful reimplementation of dotenv's single-line parse.
 
-        Mirrors dotenv 17.x: a value wrapped in matching quotes is unwrapped
-        greedily to the last quote; only inside double quotes are `\\n` and
-        `\\r` expanded; no other escape is processed.
+        Mirrors dotenv 17.x: a value wrapped in matching quotes (`'`, `"`, or
+        `` ` ``) is unwrapped greedily to the last quote; only inside double
+        quotes are `\\n` and `\\r` expanded; no other escape is processed —
+        backtick-quoted content, like single-quoted, is fully literal.
+
+        NOTE: this model does not reproduce dotenv's comment-stripping
+        fallback for a value whose quotes don't match — that was exactly the
+        gap that let Finding 1's silent-corruption bug pass here. The
+        `DotenvGolden` test class below, generated from the real `dotenv`
+        package, is the authoritative check; keep this one for readable
+        round-trip assertions on individual cases.
         """
         _, _, raw = line.partition("=")
-        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'`":
             body = raw[1:-1]
             if raw[0] == '"':
                 body = body.replace("\\n", "\n").replace("\\r", "\r")
@@ -88,9 +106,32 @@ class DotenvLine(unittest.TestCase):
         line = commands_secrets._dotenv_line("KEY", value)
         self.assertEqual(self._parse(line), value)
 
-    def test_raises_when_real_newline_meets_a_literal_escape_sequence(self):
-        """Genuinely unrepresentable in dotenv — must fail loudly, not corrupt."""
+    def test_backslash_n_plus_real_newline_prefers_a_literal_tier_not_a_raise(self):
+        """Superseded premise, kept as an explicit regression pin.
+
+        An earlier two-tier rule (single-quote unless '\\'' or a real
+        newline is present, else double-quote-with-escaping) had to reject
+        these: double-quoting would make the value's own literal '\\n'/'\\r'
+        indistinguishable from the escaped real newline. The three-tier rule
+        avoids the problem instead of rejecting it — none of these values
+        contain a '#'+quote or quote+newline collision, so tier 1 or 2
+        (fully literal, no escaping at all) applies and there is no
+        ambiguity to reject. Must NOT raise.
+        """
         for value in ("x\\ny\nz", "a\\rb\nc", "it's\\nb\nreal"):
+            with self.subTest(value=value):
+                line = commands_secrets._dotenv_line("K", value)
+                self.assertEqual(self._parse(line), value)
+
+    def test_raises_when_a_real_cr_collides_with_a_double_quote(self):
+        """Genuinely unrepresentable in dotenv — must fail loudly, not corrupt.
+
+        A real CR forces tier 3 (the only tier that can carry one — every
+        other quote style has it normalised away to LF by dotenv itself),
+        but tier 3 needs the value to be double-quote-free. A value with
+        both has no tier left.
+        """
+        for value in ('"\r', '#"\r', 'a"b\rc', '\r"', 'x"\r\ny'):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     commands_secrets._dotenv_line("K", value)
@@ -130,6 +171,54 @@ class DotenvLine(unittest.TestCase):
         for name in ("A", "_x", "PLAYWRIGHT_MCP_SECRETS_FILE", "K1_2"):
             with self.subTest(name=name):
                 commands_secrets._dotenv_line(name, "v")
+
+    def test_finding1_hash_plus_single_quote_does_not_corrupt(self):
+        """Regression for Finding 1 (CRITICAL) — confirmed live silent corruption.
+
+        The old (pre-fix) rule single-quoted any value without a real
+        newline, verbatim: `_dotenv_line("K", "a#b'")` produced `K='a#b''`.
+        dotenv treats '#' as a comment starter in an *unquoted* value, and
+        falls back to unquoted parsing whenever a quote match fails — so
+        that line decoded back to just `'a`, three characters, silently
+        discarding the rest of the credential. The fix moves a value
+        combining '#' and \"'\" to the backtick tier instead.
+        """
+        value = "a#b'"
+        line = commands_secrets._dotenv_line("K", value)
+        self.assertEqual(line, "K=`a#b'`")
+        self.assertEqual(self._parse(line), value)
+
+
+class DotenvGolden(unittest.TestCase):
+    """Authoritative check: a fixture generated from the REAL dotenv 17.4.2.
+
+    Unlike `DotenvLine._parse` (a hand-written reimplementation that can
+    itself be wrong — it missed the comment-stripping fallback that Finding
+    1 exploited), every entry here was verified to round-trip through the
+    actual `dotenv.parse`. See `tests/fixtures/dotenv_golden.json`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(_GOLDEN_FIXTURE, encoding="utf-8") as f:
+            cls.fixture = json.load(f)
+
+    def test_fixture_is_for_the_verified_dotenv_version(self):
+        self.assertEqual(self.fixture["dotenv_version"], "17.4.2")
+        self.assertTrue(self.fixture["entries"])
+        self.assertTrue(self.fixture["unencodable"])
+
+    def test_every_entry_matches_the_real_dotenv_encoding(self):
+        for entry in self.fixture["entries"]:
+            with self.subTest(value=entry["value"]):
+                line = commands_secrets._dotenv_line("K", entry["value"])
+                self.assertEqual(line, "K=" + entry["body"])
+
+    def test_every_unencodable_value_raises(self):
+        for value in self.fixture["unencodable"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    commands_secrets._dotenv_line("K", value)
 
 
 class _StubProvider:
@@ -315,6 +404,100 @@ class DotenvExec(unittest.TestCase):
                          "import os;print(open(os.environ['SECRETS']).read())"]))
         self.assertEqual(rc, 0)
         self.assertNotIn('p"ass\\word', buf.getvalue())
+
+    def test_finding2_multiline_secret_is_redacted_from_output(self):
+        """Regression for Finding 2 (CRITICAL) — confirmed live redaction gap.
+
+        A value with a real CR forces the tier-3 (escaping) path: the file
+        on disk holds `\\r\\n` text, not the raw CR/LF bytes. Only the raw
+        value was ever registered for redaction, so a child that echoes the
+        file printed the escaped PEM key in the clear. Assert the whole
+        multi-line secret — CRLF form and content alike — never reaches
+        captured stdout.
+        """
+        pem = "-----BEGIN KEY-----\r\nMIIB\r\n-----END KEY-----\r\n"
+        self.provider.values["pem"] = pem
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = commands_secrets.cmd_secret_exec(self._args(
+                dotenv=["SECRETS=KEY:pem"],
+                command=["python3", "-c",
+                         "import os;print(open(os.environ['SECRETS']).read())"]))
+        self.assertEqual(rc, 0)
+        output = buf.getvalue()
+        self.assertNotIn(pem, output)
+        self.assertNotIn(pem.replace("\r", "\\r").replace("\n", "\\n"), output)
+        self.assertNotIn("BEGIN KEY", output)
+        self.assertNotIn("MIIB", output)
+
+    def test_finding3_bad_file_spec_does_not_leak_the_first_tmpfile(self):
+        """Regression for Finding 3 (IMPORTANT) — confirmed live leak.
+
+        `--file A=k1 --file BADSPEC` used to exit 2 leaving the FIRST
+        file's 0600 temp file on disk forever: the `--file` loop's early
+        `return 2` for the second, malformed spec never unlinked what the
+        loop had already written.
+        """
+        written: list[str] = []
+        orig_mkstemp = commands_secrets.tempfile.mkstemp
+
+        def _tracking_mkstemp(*a, **kw):
+            fd, path = orig_mkstemp(*a, **kw)
+            written.append(path)
+            return fd, path
+
+        commands_secrets.tempfile.mkstemp = _tracking_mkstemp
+        self.addCleanup(lambda: setattr(commands_secrets.tempfile, "mkstemp", orig_mkstemp))
+
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = commands_secrets.cmd_secret_exec(self._args(
+                file=["A=pw-user", "BADSPEC"], command=["true"]))
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(written), 1, "expected exactly one tmpfile to have been created")
+        self.assertFalse(os.path.exists(written[0]),
+                         f"leaked the first --file's tmpfile: {written[0]}")
+
+    def test_finding4_non_vaulterror_exception_still_cleans_up_tmpfiles(self):
+        """Regression for Finding 4 (IMPORTANT) — confirmed live leak.
+
+        Only `base.VaultError` was ever caught around resolution, so any
+        other exception (`FileNotFoundError` from `mkstemp` when a vault key
+        contains '/', `UnicodeEncodeError`, `ENOSPC`, `KeyboardInterrupt`,
+        ...) propagated straight out and stranded every 0600 tmpfile already
+        written. Simulate that with a provider whose second `.get()` raises
+        a plain `RuntimeError` — deliberately NOT a `VaultError` — after the
+        first `--file` has already been written to disk.
+        """
+        class _BoomProvider(_StubProvider):
+            def get(self, key: str) -> str:
+                if key == "boom":
+                    raise RuntimeError("simulated ENOSPC")
+                return super().get(key)
+
+        boom = _BoomProvider({"pw-user": "svc_qa", "boom": "unused"})
+        commands_secrets._provider = lambda _name: boom
+
+        written: list[str] = []
+        orig_mkstemp = commands_secrets.tempfile.mkstemp
+
+        def _tracking_mkstemp(*a, **kw):
+            fd, path = orig_mkstemp(*a, **kw)
+            written.append(path)
+            return fd, path
+
+        commands_secrets.tempfile.mkstemp = _tracking_mkstemp
+        self.addCleanup(lambda: setattr(commands_secrets.tempfile, "mkstemp", orig_mkstemp))
+
+        with self.assertRaises(RuntimeError):
+            commands_secrets.cmd_secret_exec(self._args(
+                file=["A=pw-user", "B=boom"], command=["true"]))
+
+        self.assertEqual(len(written), 1,
+                         "expected exactly the first --file's tmpfile to have been created")
+        self.assertFalse(os.path.exists(written[0]),
+                         f"leaked a tmpfile after a non-VaultError exception: {written[0]}")
 
 
 if __name__ == "__main__":

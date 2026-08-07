@@ -18,23 +18,30 @@
 - Temp files are created with `tempfile.mkstemp` and `os.chmod(path, 0o600)`, and unlinked in a `finally` via `_safe_unlink`.
 - Public behaviour is shared by `charter secret exec` and `charter persona secret exec` — both use `_sa_exec` in `charter/cli.py`.
 
-## Encoding rule (verified, do not change without re-testing)
+## Encoding rule (verified by exhaustive fuzz — do not change without re-fuzzing)
 
-The parser on the consuming side is the `dotenv` package (Playwright bundles it; `dotenvFileLoader` calls `dotenv.parse`). It was tested empirically at v17.4.2 across 50 cases. **`dotenv` does NOT unescape `\"` or `\\` inside a double-quoted value** — it only expands `\n` and `\r`. Naive backslash-escaping therefore corrupts any secret containing a quote or backslash.
+The consuming parser is the `dotenv` package (Playwright's `dotenvFileLoader` calls `dotenv.parse`), verified at v17.4.2. Three of its behaviours drive the encoding, and each one has already caused a silent-corruption bug in this feature:
 
-Because there is **no backslash escape**, the `\n` substitution is not injective: a value that already contains the two characters `\` + `n` is indistinguishable from one holding a real newline. Encoding must therefore avoid the double-quote form wherever possible, and refuse the cases it cannot represent rather than corrupt them.
+1. **No backslash escape exists.** Inside double quotes it expands only `\n` and `\r`; it never unescapes `\"` or `\\`. So the `\n` substitution is *not injective* — a value already holding the two characters `\` + `n` is indistinguishable from one holding a real newline.
+2. **`#` starts a comment in an *unquoted* value, and a failed quote match falls back to unquoted parsing.** So a single-quoted value containing both `#` and `'` silently truncates: `a#b'` → `'a`.
+3. **A literal CR is normalised to LF.** A raw `\r` cannot survive unescaped in any quote style, so only the double-quoted (escaping) tier can carry it.
 
-The rule that round-trips exactly (verified over 50 cases at dotenv 17.4.2):
+Backticks are the useful discovery: dotenv treats a backtick-quoted value as **fully literal, including real newlines**, with no escape processing at all.
 
-| Value | Encoding |
-| --- | --- |
-| contains **no** real LF/CR | single-quote verbatim; **no escaping at all** — greedy matching means `'`, `"`, `\` and a literal `\n` all survive |
-| has real LF/CR **and** contains a `\n` or `\r` *sequence* (backslash followed by `n`/`r`) | **raise `ValueError`** — genuinely unrepresentable; failing loudly beats silent corruption |
-| has real LF/CR otherwise | double-quote; replace real CR→`\r`, LF→`\n`; **no other escaping** |
+The rule, in order — take the first tier that applies:
 
-`dotenv`'s quoted-value match is greedy to the last quote on the line, so an embedded `"` inside a double-quoted value — and an embedded `'` inside a single-quoted one — survive intact.
+| Tier | Quote | Applies when | Escaping |
+| --- | --- | --- | --- |
+| 1 | `'` | no CR, and not (`#` **and** `'`), and not (`'` **and** LF) | none — fully literal |
+| 2 | `` ` `` | no CR, and no backtick in the value | none — fully literal, carries real newlines |
+| 3 | `"` | no `"` in the value, and no literal `\n`/`\r` sequence | real CR→`\r`, LF→`\n` |
+| — | — | otherwise | **raise `ValueError`** — unrepresentable; fail loudly, never corrupt |
 
-**Do not simplify this to "double-quote when the value contains `'`".** That was the first attempt and it silently corrupts: `it's\nb` (apostrophe plus a *literal* backslash-n, 7 chars) encodes to `K="it's\nb"` and decodes to 6 chars with a real newline. The single-quote branch handles apostrophes correctly on its own.
+Preferring the literal tiers matters for more than correctness: when nothing is escaped, the file holds the **raw** secret, so `base.redact()` still matches it. Only tier 3 changes the bytes, and the caller must therefore also register the escaped form for redaction (see Task 2).
+
+**Verified:** exhaustive fuzz over all strings of length 1–4 from the alphabet `# ' " ` \ n r <space> a = $ LF CR` — **30,940 values, 0 corrupted**, 1,994 rejected loudly (all of them CR combined with `"`, which no tier can represent). Plus 12 realistic secret shapes (PEM LF and CRLF, kubeconfig YAML, JWT, JSON blob, connection string, unicode, Windows path, a password containing all three quote characters) — all round-trip exactly.
+
+**Do not "simplify" any tier.** Every condition in that table was added because a fuzz case corrupted a credential without it.
 
 ## File Structure
 

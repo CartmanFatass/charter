@@ -365,7 +365,7 @@ def _sa_exec(p):
                    help="Replace this process with the command (os.exec) instead of capturing "
                         "it, so stdio streams through — required for a long-running child such "
                         "as an MCP stdio server. Output is NOT redacted (nothing is captured); "
-                        "incompatible with --file.")
+                        "incompatible with --file and --dotenv.")
     p.add_argument("command", nargs="*",
                    help="Command to run; put it after `--`, e.g. -- kubectl get pods.")
 

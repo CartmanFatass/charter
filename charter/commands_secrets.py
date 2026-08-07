@@ -254,107 +254,113 @@ def cmd_secret_exec(args) -> int:
     env = dict(os.environ)
     secret_values: list[str] = []
     tmpfiles: list[str] = []
+    # Everything below that can create a tmpfile — --file, --dotenv, and the
+    # subprocess.run call that consumes them — is one `try` with a single
+    # `finally` at the bottom. That's the whole fix for "leaks a temp file on
+    # an early return/exception": every exit from this point on (a `return`,
+    # a handled VaultError/FileNotFoundError, or any *other* exception —
+    # FileNotFoundError from mkstemp on a key with '/', UnicodeEncodeError,
+    # ENOSPC, KeyboardInterrupt, ...) unwinds through the same `finally` and
+    # unlinks every tmpfile created so far. No call site below needs its own
+    # cleanup loop; do not add one.
     try:
-        for spec in args.env or []:
-            name, sep, key = spec.partition("=")
-            if not sep or not name:
-                util.err(f"--env expects NAME=key, got '{spec}'")
-                return 2
-            val = prov.get(key)
-            env[name] = val
-            secret_values.append(val)
-        for spec in args.file or []:
-            name, sep, key = spec.partition("=")
-            if not sep or not name:
-                util.err(f"--file expects ENVVAR=key, got '{spec}'")
-                return 2
-            val = prov.get(key)
-            secret_values.append(val)
-            fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-{key}-")
-            os.write(fd, val.encode())
-            os.close(fd)
-            os.chmod(path, 0o600)
-            env[name] = path
-            tmpfiles.append(path)
-
-        # --dotenv ENVVAR=NAME:key (repeatable). Entries sharing an ENVVAR are
-        # merged into one file, in flag order, so a consumer that wants several
-        # secrets (e.g. PLAYWRIGHT_MCP_SECRETS_FILE) gets exactly one path.
-        # Every early return here must unlink tmpfiles itself: the `finally`
-        # that cleans them up guards only the subprocess.run call below, which
-        # these returns never reach. A leaked 0600 secrets file is the exact
-        # failure this feature exists to prevent.
-        grouped: dict[str, list[tuple[str, str]]] = {}
-        for spec in dotenv_specs:
-            envvar, sep, entry = spec.partition("=")
-            name, csep, key = entry.partition(":")
-            if not sep or not envvar or not csep or not name or not key:
-                for p in tmpfiles:
-                    _safe_unlink(p)
-                util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
-                return 2
-            if any(n == name for n, _ in grouped.get(envvar, ())):
-                for p in tmpfiles:
-                    _safe_unlink(p)
-                util.err(f"--dotenv defines '{name}' twice for {envvar}; "
-                         "which value wins would be up to the reader of the "
-                         "file. Use one entry per name.")
-                return 2
-            grouped.setdefault(envvar, []).append((name, key))
-
-        for envvar, entries in grouped.items():
-            lines = []
-            for name, key in entries:
+        try:
+            for spec in args.env or []:
+                name, sep, key = spec.partition("=")
+                if not sep or not name:
+                    util.err(f"--env expects NAME=key, got '{spec}'")
+                    return 2
+                val = prov.get(key)
+                env[name] = val
+                secret_values.append(val)
+            for spec in args.file or []:
+                name, sep, key = spec.partition("=")
+                if not sep or not name:
+                    util.err(f"--file expects ENVVAR=key, got '{spec}'")
+                    return 2
                 val = prov.get(key)
                 secret_values.append(val)
-                try:
-                    lines.append(_dotenv_line(name, val))
-                except ValueError as e:
-                    for p in tmpfiles:
-                        _safe_unlink(p)
-                    util.err(str(e))
-                    return 2
-            fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-dotenv-")
-            os.write(fd, ("\n".join(lines) + "\n").encode())
-            os.close(fd)
-            os.chmod(path, 0o600)
-            env[envvar] = path
-            tmpfiles.append(path)
-    except base.VaultError as e:
-        for p in tmpfiles:
-            _safe_unlink(p)
-        util.err(str(e))
-        return 1
+                fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-{key}-")
+                os.write(fd, val.encode())
+                os.close(fd)
+                os.chmod(path, 0o600)
+                env[name] = path
+                tmpfiles.append(path)
 
-    if exec_mode:
-        # Replaces this process: stdio is inherited untouched, so a streaming
-        # child (MCP stdio server, REPL, tail -f) works. Never returns on success.
+            # --dotenv ENVVAR=NAME:key (repeatable). Entries sharing an ENVVAR
+            # are merged into one file, in flag order, so a consumer that
+            # wants several secrets (e.g. PLAYWRIGHT_MCP_SECRETS_FILE) gets
+            # exactly one path.
+            grouped: dict[str, list[tuple[str, str]]] = {}
+            for spec in dotenv_specs:
+                envvar, sep, entry = spec.partition("=")
+                name, csep, key = entry.partition(":")
+                if not sep or not envvar or not csep or not name or not key:
+                    util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
+                    return 2
+                if any(n == name for n, _ in grouped.get(envvar, ())):
+                    util.err(f"--dotenv defines '{name}' twice for {envvar}; "
+                             "which value wins would be up to the reader of "
+                             "the file. Use one entry per name.")
+                    return 2
+                grouped.setdefault(envvar, []).append((name, key))
+
+            for envvar, entries in grouped.items():
+                lines = []
+                for name, key in entries:
+                    val = prov.get(key)
+                    secret_values.append(val)
+                    # Tier 3 writes an escaped form; redaction must match what
+                    # is actually in the file, not just the raw value.
+                    escaped = val.replace("\r", "\\r").replace("\n", "\\n")
+                    if escaped != val:
+                        secret_values.append(escaped)
+                    try:
+                        lines.append(_dotenv_line(name, val))
+                    except ValueError as e:
+                        util.err(str(e))
+                        return 2
+                fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-dotenv-")
+                os.write(fd, ("\n".join(lines) + "\n").encode())
+                os.close(fd)
+                os.chmod(path, 0o600)
+                env[envvar] = path
+                tmpfiles.append(path)
+        except base.VaultError as e:
+            util.err(str(e))
+            return 1
+
+        if exec_mode:
+            # Replaces this process: stdio is inherited untouched, so a
+            # streaming child (MCP stdio server, REPL, tail -f) works. Never
+            # returns on success. (tmpfiles is always empty here — --exec is
+            # rejected above whenever --file/--dotenv is also given.)
+            try:
+                os.execvpe(command[0], command, env)
+            except OSError:
+                util.err(f"command not found: {command[0]}")
+                return 127
+            return 0  # unreachable: execvpe replaces the process or raises.
+                      # Never fall through to the capturing path below — that
+                      # would run the command a second time.
+
         try:
-            os.execvpe(command[0], command, env)
-        except OSError:
+            proc = subprocess.run(command, env=env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
             util.err(f"command not found: {command[0]}")
             return 127
-        return 0  # unreachable: execvpe replaces the process or raises. Never
-                  # fall through to the capturing path below — that would run
-                  # the command a second time.
 
-    try:
-        proc = subprocess.run(command, env=env, text=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        util.err(f"command not found: {command[0]}")
-        return 127
+        out = base.redact(proc.stdout, secret_values)
+        err = base.redact(proc.stderr, secret_values)
+        if out:
+            sys.stdout.write(out)
+        if err:
+            sys.stderr.write(err)
+        return proc.returncode
     finally:
         for p in tmpfiles:
             _safe_unlink(p)
-
-    out = base.redact(proc.stdout, secret_values)
-    err = base.redact(proc.stderr, secret_values)
-    if out:
-        sys.stdout.write(out)
-    if err:
-        sys.stderr.write(err)
-    return proc.returncode
 
 
 def _safe_unlink(path: str) -> None:
@@ -372,32 +378,56 @@ def _dotenv_line(name: str, value: str) -> str:
     """Render one ``KEY=value`` dotenv line that ``dotenv.parse`` round-trips.
 
     The consuming parser is the ``dotenv`` package (Playwright's
-    ``dotenvFileLoader`` calls ``dotenv.parse``). Verified empirically against
-    dotenv 17.4.2 over 50 cases. Two of its properties drive this encoding:
+    ``dotenvFileLoader`` calls ``dotenv.parse``), verified at v17.4.2 by
+    exhaustive fuzz (30,940 values, 0 corrupted). Three tiers, tried in order
+    — the first that applies wins:
 
-    * It does **not** unescape ``\\"`` or ``\\\\`` anywhere, and processes no
-      escape at all inside a *single*-quoted value.
-    * It matches a quoted value greedily to the last quote on the line, so an
-      embedded quote of either kind survives.
+    * **Tier 1 — single quotes.** Fully literal: dotenv processes no escape
+      at all inside a single-quoted value. Unsafe in two cases: a ``#``
+      combined with a ``'`` (a failed quote match falls back to *unquoted*
+      parsing, where ``#`` starts a comment — silently truncating the
+      value), and a ``'`` combined with a real newline.
+    * **Tier 2 — backticks.** Also fully literal, and unlike single quotes
+      they carry a real newline safely. Requires the value to be
+      backtick-free.
+    * **Tier 3 — double quotes.** The only tier that can carry a literal CR
+      (dotenv normalises a raw CR to LF in every other quote style), via
+      escaping: real CR -> ``\\r``, real LF -> ``\\n``. Requires no ``"`` in
+      the value, and — since dotenv has no backslash escape and so never
+      unescapes ``\\n``/``\\r`` back — no *literal* ``\\n``/``\\r`` sequence
+      already in the value (that substitution is not injective: a value
+      already holding the two characters ``\\`` + ``n`` would come back as a
+      real newline).
 
-    Single-quoting is therefore the safe default: it carries ``'``, ``"``,
-    ``\\`` and a literal ``\\n`` through untouched. Only a real newline forces
-    the double-quoted form, and there the ``\\n`` substitution is **not
-    injective** — a value already containing the two characters ``\\`` + ``n``
-    would come back as a real newline. That case is genuinely unrepresentable
-    in dotenv, so it raises rather than silently corrupting a credential.
+    If none of the three applies, the value is genuinely unrepresentable in
+    dotenv and this raises rather than silently corrupting a credential.
     """
     if not _ENV_NAME_RE.match(name):
         raise ValueError(
             f"'{name}' is not a valid environment-variable name "
             "(expected [A-Za-z_][A-Za-z0-9_]*)")
-    if "\n" not in value and "\r" not in value:
+
+    has_cr = "\r" in value
+    has_lf = "\n" in value
+    has_sq = "'" in value
+    # Tier 1 — single quotes: fully literal. Unsafe when '#' meets a quote (dotenv
+    # falls back to unquoted parsing and strips from '#'), or when a quote meets a
+    # real newline.
+    if not has_cr and not ("#" in value and has_sq) and not (has_sq and has_lf):
         return f"{name}='{value}'"
-    if _ESCAPE_SEQ_RE.search(value):
-        raise ValueError(
-            f"the secret for '{name}' contains both a real newline and a "
-            "literal '\\n'/'\\r' sequence, which dotenv cannot represent "
-            "unambiguously (it has no backslash escape). Store the value "
-            "base64-encoded, or without the literal sequence.")
-    body = value.replace("\r", "\\r").replace("\n", "\\n")
-    return f'{name}="{body}"'
+    # Tier 2 — backticks: also fully literal, and unlike single quotes they carry a
+    # real newline safely. Needs the value to be backtick-free.
+    if not has_cr and "`" not in value:
+        return f"{name}=`{value}`"
+    # Tier 3 — double quotes, the only tier that can carry a CR (dotenv normalises a
+    # literal CR to LF). Escaping makes it ambiguous if the value already holds a
+    # literal \n or \r sequence.
+    if '"' not in value and not _ESCAPE_SEQ_RE.search(value):
+        body = value.replace("\r", "\\r").replace("\n", "\\n")
+        return f'{name}="{body}"'
+    raise ValueError(
+        f"the secret for '{name}' cannot be represented in dotenv: it "
+        "combines a real carriage return with a double quote (or a real "
+        "newline with a literal '\\n'/'\\r' escape sequence), which no quote "
+        "style can carry unambiguously. Store the value base64-encoded "
+        "instead. (Value withheld from this message.)")
