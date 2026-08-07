@@ -117,23 +117,15 @@ def declared_or_default_forges() -> list:
 
     Never raises: a malformed `[[forge]]` block is a config mistake `doctor`'s own
     `check_control_plane_config` already surfaces separately — this just skips it
-    rather than taking preflight down."""
-    from . import config as _config, instance as _instance
+    rather than taking preflight down.
+
+    Thin wrapper over `forge.registry.declared_or_default` — the same resolution a
+    generated persona sub-agent's wording now uses (`commands_persona._render_agent`),
+    so `doctor`'s forge checks and a sub-agent's prose can never drift apart on what
+    this control plane's forge set actually is."""
+    from . import config as _config
     from .forge import registry
-    try:
-        cfg = _instance.load(_config.ROOT)
-    except Exception:
-        cfg = {}
-    try:
-        pairs = registry.forges_for(cfg)
-    except Exception:
-        pairs = []
-    if not pairs:
-        return [GitLabForge()]
-    seen: dict[tuple, object] = {}
-    for forge, _owner in pairs:
-        seen.setdefault((forge.kind, forge.host), forge)
-    return list(seen.values())
+    return registry.declared_or_default(_config.ROOT)
 
 
 def check_forge_cli(forge=None) -> Result:

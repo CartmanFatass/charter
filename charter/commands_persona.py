@@ -339,6 +339,39 @@ def _agent_description(name: str, meta: dict) -> str:
     return f"The {role} persona. Delegate {role.lower()} tasks to it.{tail}"
 
 
+def _credential_rule() -> str:
+    """The golden one-credential rule, worded for THIS control plane's own declared
+    forge(s) — never hardcoded to `glab`/GitLab. Generated `.claude/agents/<name>.md`
+    files land in the user's own repo, so a GitHub-only control plane's sub-agent must
+    never mention `glab` (a tool it never uses), and a GitLab-only one must never
+    mention `gh`. Routed through `forge.registry.declared_or_default`, the same
+    resolution `doctor` uses to decide which forge CLI/auth to preflight — so the two
+    surfaces can never drift apart on what this control plane's forge set is.
+
+    A persona's OWN `tools:` declaration (e.g. `tools: kubectl, glab`) is untouched by
+    this — it's the persona's explicit choice, rendered verbatim elsewhere; this is only
+    charter's own generated prose."""
+    from .forge import registry
+    forges = registry.declared_or_default(config.ROOT)
+    clis = sorted({f.cli for f in forges})
+    if len(clis) == 1:
+        cli = clis[0]
+        return (
+            f"**🔑 git = the {cli} token over HTTPS. Never SSH, never signing.** Repos are "
+            f"pre-configured, so a plain `git push` works. If git ever asks for a key or "
+            f"passphrase, run `charter git-policy --apply` — don't reach for SSH "
+            f"(`{cli} auth status` checks the credential)."
+        )
+    clis_joined = " / ".join(f"`{c}`" for c in clis)
+    checks_joined = " / ".join(f"`{c} auth status`" for c in clis)
+    return (
+        f"**🔑 git = each repo's own forge's CLI token over HTTPS ({clis_joined}). Never "
+        f"SSH, never signing.** Repos are pre-configured, so a plain `git push` works. If "
+        f"git ever asks for a key or passphrase, run `charter git-policy --apply` — don't "
+        f"reach for SSH (check the credential with {checks_joined})."
+    )
+
+
 def _render_agent(name: str, meta: dict, charter: str) -> str:
     role = meta.get("role") or name.title()
     desc = meta.get("agent-description") or meta.get("description") or _agent_description(name, meta)
@@ -396,9 +429,7 @@ isolated context. Adopt the charter below as your role.
 {charter}
 
 ## As a persona sub-agent
-- **🔑 git = the glab token over HTTPS. Never SSH, never signing.** Repos are pre-configured, so
-  a plain `git push` works. If git ever asks for a key or passphrase, run `charter git-policy
-  --apply` — don't reach for SSH (`glab auth status` checks the credential).
+- {_credential_rule()}
 - **Credentials** come only from this persona's vault, and are **never printed**:
   `charter persona secret --persona {name} <list|exec|cp> …` — use `exec`/`cp`, never `--reveal`.
   Run tools through it, e.g. `… exec --file KUBECONFIG=kubeconfig -- kubectl -n <ns> get pods`{uses_note}{handoff}

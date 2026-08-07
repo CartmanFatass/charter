@@ -43,6 +43,39 @@ def for_repo(repo: dict) -> Forge:
     return _build(repo.get("forge") or _DEFAULT_KIND, None)
 
 
+def declared_or_default(root) -> list[Forge]:
+    """The forges THIS control plane actually declares (``[[forge]]`` blocks in its own
+    ``charter.toml`` at *root*), de-duplicated by ``(kind, host)`` — falling back to a
+    single default :class:`GitLabForge` when none are declared, the shape every control
+    plane had before multi-forge support existed (and still what a fresh ``charter
+    init``, or a legacy single-forge control plane, produces).
+
+    The one place both ``doctor`` (which forge CLI/auth to preflight) and a generated
+    persona sub-agent (which forge's wording to speak) ask "what forge(s) does this
+    control plane use" — sharing this avoids the two ever drifting apart (a GitHub-only
+    control plane getting a `glab` doctor check is the same class of bug as its
+    generated `.claude/agents/<name>.md` telling the reader about `glab`).
+
+    Never raises: a malformed ``[[forge]]`` block is a config mistake surfaced
+    separately (``doctor.check_control_plane_config``) — this just skips it rather than
+    taking the caller down."""
+    from .. import instance
+    try:
+        cfg = instance.load(root)
+    except Exception:
+        cfg = {}
+    try:
+        pairs = forges_for(cfg)
+    except Exception:
+        pairs = []
+    if not pairs:
+        return [GitLabForge()]
+    seen: dict[tuple, Forge] = {}
+    for forge, _owner in pairs:
+        seen.setdefault((forge.kind, forge.host), forge)
+    return list(seen.values())
+
+
 def _default_forges() -> dict[str, Forge]:
     """``host -> Forge`` for every registered kind's DEFAULT host (from :data:`KINDS`,
     so a new forge kind is covered automatically the day it's registered — never a

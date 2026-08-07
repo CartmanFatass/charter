@@ -131,6 +131,46 @@ class TestPluginManifest(unittest.TestCase):
         self.assertTrue(doctor[0].get("statusMessage"))
 
 
+class TestMarketplaceManifest(unittest.TestCase):
+    """F1 — `claude plugin marketplace add <owner>/<repo>` requires
+    `.claude-plugin/marketplace.json`; without it `claude plugin install charter@charter`
+    cannot work at all, no matter how correct `plugin.json` is. charter is its own
+    single-plugin marketplace (`"source": "./"`, mirroring the shape of e.g.
+    `mattpocock/skills`'s own marketplace.json), so these two manifests must never drift
+    apart: the marketplace's plugin entry has to name the SAME plugin `plugin.json`
+    declares, and has to source it from the repo root."""
+
+    def _manifest(self) -> dict:
+        return json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
+
+    def _marketplace(self) -> dict:
+        return json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())
+
+    def test_marketplace_manifest_exists_and_is_valid_json(self):
+        self._marketplace()  # must not raise
+
+    def test_marketplace_declares_exactly_one_plugin(self):
+        m = self._marketplace()
+        self.assertEqual(len(m.get("plugins") or []), 1, m.get("plugins"))
+
+    def test_marketplace_plugins_name_matches_plugin_json_name(self):
+        """The anti-drift assertion: if `plugin.json`'s `name` ever changes without a
+        matching edit here, `charter@charter` stops resolving — catch it in CI, not in
+        a user's failed `claude plugin install`."""
+        plugin = self._manifest()
+        entry = self._marketplace()["plugins"][0]
+        self.assertEqual(entry["name"], plugin["name"])
+
+    def test_marketplace_plugin_source_points_at_the_repo_root(self):
+        entry = self._marketplace()["plugins"][0]
+        self.assertEqual(entry["source"], "./")
+
+    def test_marketplace_and_plugin_entries_carry_a_description(self):
+        m = self._marketplace()
+        self.assertTrue(m.get("description"))
+        self.assertTrue(m["plugins"][0].get("description"))
+
+
 class TestVersionSkew(unittest.TestCase):
     def test_a_matching_version_is_silent(self):
         self.assertIsNone(hooks.skew_message(__version__))
