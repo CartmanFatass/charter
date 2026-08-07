@@ -164,12 +164,19 @@ class DotenvExec(unittest.TestCase):
 
     def test_writes_one_file_with_all_entries(self):
         """Two --dotenv flags sharing an ENVVAR produce a single merged file."""
-        rc = commands_secrets.cmd_secret_exec(self._args(
-            dotenv=["SECRETS=USER:pw-user", "SECRETS=PASS:pw-pass"],
-            command=["python3", "-c",
-                     "import os;print(open(os.environ['SECRETS']).read(), end='')"]))
+        import contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = commands_secrets.cmd_secret_exec(self._args(
+                dotenv=["SECRETS=USER:pw-user", "SECRETS=PASS:pw-pass"],
+                command=["python3", "-c",
+                         "import os;print(open(os.environ['SECRETS']).read(), end='')"]))
         self.assertEqual(rc, 0)
         self.assertEqual(self.provider.asked, ["pw-user", "pw-pass"])
+        # One file, both entries, and neither value survived redaction.
+        self.assertEqual(len(buf.getvalue().strip().splitlines()), 2)
+        self.assertNotIn("svc_qa", buf.getvalue())
 
     def test_file_contents_round_trip_and_are_0600(self):
         """The file parses back to the real values and is mode 0600.
@@ -182,7 +189,6 @@ class DotenvExec(unittest.TestCase):
         """
         import hashlib
         import json
-        import tempfile as _tf
 
         out = os.path.join(self.tmpdir, "probe.json")
         child = (
@@ -239,6 +245,38 @@ class DotenvExec(unittest.TestCase):
                 dotenv=["SECRETS=nocolon"], command=["true"]))
         self.assertEqual(rc, 2)
         self.assertIn("ENVVAR=NAME:key", buf.getvalue())
+
+    def test_rejects_duplicate_name_within_one_envvar(self):
+        """Two entries with the same NAME would leave precedence to the reader.
+
+        dotenv's behaviour on a repeated key is not something this file should
+        depend on, and a duplicate is almost always a typo — so refuse it
+        rather than write two lines and hope.
+        """
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = commands_secrets.cmd_secret_exec(self._args(
+                dotenv=["S=USER:pw-user", "S=USER:pw-pass"], command=["true"]))
+        self.assertEqual(rc, 2)
+        self.assertIn("twice", buf.getvalue())
+        self.assertNotIn("svc_qa", buf.getvalue())
+
+    def test_same_name_under_different_envvars_is_allowed(self):
+        """Distinct files are independent — only a collision *within* one is bad."""
+        rc = commands_secrets.cmd_secret_exec(self._args(
+            dotenv=["A=USER:pw-user", "B=USER:pw-user"],
+            command=["python3", "-c",
+                     "import os;assert os.environ['A']!=os.environ['B']"]))
+        self.assertEqual(rc, 0)
+
+    def test_exec_conflict_names_both_flags(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = commands_secrets.cmd_secret_exec(self._args(
+                file=["F=pw-user"], dotenv=["S=USER:pw-user"],
+                exec_mode=True, command=["true"]))
+        self.assertEqual(rc, 2)
+        self.assertIn("--file and --dotenv", buf.getvalue())
 
     def test_rejects_spec_without_equals(self):
         buf = io.StringIO()

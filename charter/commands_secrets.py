@@ -244,8 +244,9 @@ def cmd_secret_exec(args) -> int:
     exec_mode = bool(getattr(args, "exec_mode", False))
     dotenv_specs = list(getattr(args, "dotenv", None) or [])
     if exec_mode and ((args.file or []) or dotenv_specs):
-        flag = "--file" if (args.file or []) else "--dotenv"
-        util.err(f"{flag} cannot be combined with --exec: exec replaces this "
+        flags = " and ".join(f for f, on in (("--file", args.file or []),
+                                             ("--dotenv", dotenv_specs)) if on)
+        util.err(f"{flags} cannot be combined with --exec: exec replaces this "
                  "process, so the temp file would never be cleaned up. "
                  "Use --env for an exec'd command.")
         return 2
@@ -291,6 +292,13 @@ def cmd_secret_exec(args) -> int:
                 for p in tmpfiles:
                     _safe_unlink(p)
                 util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
+                return 2
+            if any(n == name for n, _ in grouped.get(envvar, ())):
+                for p in tmpfiles:
+                    _safe_unlink(p)
+                util.err(f"--dotenv defines '{name}' twice for {envvar}; "
+                         "which value wins would be up to the reader of the "
+                         "file. Use one entry per name.")
                 return 2
             grouped.setdefault(envvar, []).append((name, key))
 

@@ -270,7 +270,7 @@ git -c commit.gpgsign=false commit -m "feat(secrets): add dotenv line encoder th
 
 **Interfaces:**
 - Consumes: `_dotenv_line(name, value) -> str` from Task 1.
-- Produces: the `--dotenv ENVVAR=NAME:key` flag. Repeating it with the **same** `ENVVAR` merges all entries into one file, in flag order. Different `ENVVAR`s produce separate files. Task 3 documents it.
+- Produces: the `--dotenv ENVVAR=NAME:key` flag. Repeating it with the **same** `ENVVAR` merges all entries into one file, in flag order. Different `ENVVAR`s produce separate files. Defining the **same NAME twice under one ENVVAR is an error** (exit 2) — two identical keys in one file would leave precedence to whatever reads it, and a duplicate is almost always a typo. The same NAME under *different* ENVVARs is fine, since those are separate files. Task 3 documents it.
 
 - [ ] **Step 1: Write the failing test**
 
