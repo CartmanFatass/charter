@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from . import config, doctor, inventory, render, util, workspace
+from . import root as _root
 from .forge import ForgeError
 from .forge.gitlab import GitLabForge
 
@@ -575,6 +576,215 @@ def cmd_gl_refresh(args) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# init — a control plane from nothing. Without this, `charter` is unusable by  #
+# a stranger AND actively misleading: `root.py`'s own error already says "run  #
+# `charter init`" (see `root._explain`), and outside a control plane every     #
+# other command silently adopts the cwd (`config.ROOT` falls back there — see  #
+# `root.find_root_or_cwd`) and would scatter `workspaces/`/`.edm/` into it.    #
+# Same additive discipline as `cmd_reinit` below (create only what's absent,   #
+# never touch what exists, name — never delete/rename — anything blocking a   #
+# path), widened to also cover charter.toml itself, `.gitignore`, and the     #
+# Claude Code status line. Deliberately does NOT gate on                      #
+# `config.HAS_CONTROL_PLANE` — flipping that flag from false to true is the   #
+# whole point.                                                                 #
+# --------------------------------------------------------------------------- #
+def _toml_str(s: str) -> str:
+    """A TOML basic-string literal for ``s``. ``tomllib`` (stdlib) is read-only, and
+    charter is stdlib-only at runtime — no TOML writer to reach for — so this leans on
+    ``json.dumps``: JSON's string escaping (quotes, backslashes, control chars) is a
+    faithful subset of TOML's for the plain owner/host names this ever has to render."""
+    return json.dumps(s)
+
+
+def _render_charter_toml(forge_kind: str, owner: str, host: str | None) -> str:
+    from . import instance as _instance
+
+    lines = [f"schema = {_instance.SCHEMA}", "", "[[forge]]", f"kind = {_toml_str(forge_kind)}"]
+    if owner:
+        lines.append(f"owner = {_toml_str(owner)}")
+    if host:
+        lines.append(f"host = {_toml_str(host)}")
+    # Explicit default, not just an absent key: a fresh control plane must never
+    # publish agent-written notes by accident (see `instance.share_of`'s "local" default —
+    # this just makes that default visible in the file a stranger will actually open).
+    lines += ["", "[memory]", 'share = "local"', ""]
+    return "\n".join(lines)
+
+
+#: Baseline `.gitignore` a fresh control plane needs: private per-task workspaces (the
+#: `!/workspaces/.gitkeep` line is the exact anchor `workspace.set_live` looks for to
+#: insert its managed live-workspace block later — see charter/workspace.py) and the
+#: per-developer secrets home. Mirrors what `charter reinit`'s sibling, a real control
+#: plane's own `.gitignore`, already looks like.
+_GITIGNORE_BASELINE = """\
+# Per-task workspaces (workspaces/<name>/). LOCAL by default = fully private (clones,
+# memory, manifest all ignored). Made LIVE via `charter workspace live <name>` un-ignores
+# its workspace.json + memory/ in a managed block here (see charter/workspace.py).
+/workspaces/*/*
+!/workspaces/.gitkeep
+
+# Per-developer secret vaults + registry (plaintext secrets, tokens, file paths).
+# NEVER commit this — it holds credentials.
+/.edm/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS / editor cruft
+.DS_Store
+"""
+
+
+def _ensure_gitignore(root: Path) -> bool:
+    """Add charter's baseline ignore rules to ``.gitignore`` — creating it fresh if
+    absent, or appending only the lines an existing file is missing (existing content is
+    never removed, reordered, or rewritten). Returns ``True`` iff the file was created or
+    changed."""
+    p = root / ".gitignore"
+    if not p.exists():
+        p.write_text(_GITIGNORE_BASELINE)
+        return True
+    body = p.read_text()
+    missing = []
+    if "workspaces/" not in body:
+        missing.append("/workspaces/*/*\n!/workspaces/.gitkeep\n")
+    if ".edm/" not in body:
+        missing.append("/.edm/\n")
+    if not missing:
+        return False
+    p.write_text(body.rstrip("\n") + "\n\n# added by `charter init`\n" + "\n".join(missing))
+    return True
+
+
+#: What `init` writes into `.claude/settings.json`'s `statusLine` key.
+_STATUSLINE = {"type": "command", "command": "charter statusline", "padding": 0}
+
+
+def _statusline_snippet() -> str:
+    """The exact JSON to hand a user whose `.claude/settings.json` we could not safely
+    touch — so they can paste the `statusLine` key in themselves."""
+    return json.dumps({"statusLine": _STATUSLINE}, indent=2)
+
+
+def _ensure_statusline(root: Path) -> tuple[str, Path | None]:
+    """Write ``.claude/settings.json``'s ``statusLine`` key IF ABSENT. That file is
+    user-owned, git-tracked, has no comment syntax, and holds keys charter has no
+    business touching (``permissions``, ``enabledPlugins``, ``extraKnownMarketplaces``,
+    …) — so this touches *only* the one key it owns, and only when the key isn't already
+    there. A malformed existing file is left completely alone: never rewritten, never
+    "repaired".
+
+    Returns ``(status, detail)``:
+    - ``"created"``, ``None`` — file (or just the key) was written.
+    - ``"present"``, ``None`` — a ``statusLine`` already exists; untouched.
+    - ``"malformed"``, the settings path — exists but isn't valid JSON; untouched.
+    - ``"blocked"``, the ``.claude`` path — that path exists and isn't a directory.
+    """
+    d = root / ".claude"
+    p = d / "settings.json"
+    if not p.exists():
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return "blocked", d
+        p.write_text(json.dumps({"statusLine": dict(_STATUSLINE)}, indent=2) + "\n")
+        return "created", None
+    try:
+        settings = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "malformed", p
+    if not isinstance(settings, dict):
+        return "malformed", p
+    if "statusLine" in settings:
+        return "present", None
+    settings["statusLine"] = dict(_STATUSLINE)
+    p.write_text(json.dumps(settings, indent=2) + "\n")
+    return "created", None
+
+
+def cmd_init(args) -> int:
+    """Scaffold a control plane from nothing — the first-run command a stranger needs
+    and the one `root.py`'s own "no control plane found" error already points to.
+    Additive-only, same discipline as `cmd_reinit`: create only what's absent, never
+    modify an existing value, and when a path charter wants is occupied by something it
+    can't safely touch, name the blocker, refuse to delete/rename it, and still create
+    everything else that's unblocked. Writes relative to `config.ROOT`, which falls back
+    to the cwd when no charter.toml is found yet (`root.find_root_or_cwd`) — that
+    fallback is exactly what lets `init` land in the directory the user actually ran it
+    from, instead of needing a control plane to already exist to find one."""
+    from . import instance as _instance
+    from .forge import registry as _registry
+
+    root = config.ROOT
+    forge_kind = getattr(args, "forge", None) or "gitlab"
+    if forge_kind not in _registry.KINDS:
+        util.err(f"unknown --forge {forge_kind!r} — known kinds: "
+                 f"{', '.join(sorted(_registry.KINDS))}")
+        return 1
+    owner = getattr(args, "owner", None) or ""
+    host = getattr(args, "host", None)
+
+    created, present, blocked = [], [], []
+
+    toml_path = root / _root.MARKER
+    if toml_path.exists():
+        present.append(_root.MARKER)
+    else:
+        toml_path.write_text(_render_charter_toml(forge_kind, owner, host))
+        created.append(_root.MARKER)
+        if not owner:
+            util.warn(f"No --owner given — {_root.MARKER}'s [[forge]] block has no "
+                      f"owner/group set. Add one before `charter discover`.")
+
+    d_created, d_present, d_blocked = _create_baseline_dirs(root)
+    created += d_created
+    present += d_present
+    blocked += d_blocked
+
+    if _ensure_gitignore(root):
+        created.append(".gitignore")
+    else:
+        present.append(".gitignore")
+
+    sl_status, sl_detail = _ensure_statusline(root)
+    if sl_status == "created":
+        created.append(".claude/settings.json (statusLine)")
+    elif sl_status == "present":
+        present.append(".claude/settings.json (statusLine already set)")
+    elif sl_status == "malformed":
+        util.warn(f"{sl_detail} is not valid JSON — left it completely untouched (charter "
+                  f"never rewrites or 'repairs' it). Add the status line yourself:\n"
+                  f"{_statusline_snippet()}")
+    elif sl_status == "blocked":
+        blocked.append((".claude", sl_detail))
+
+    if blocked:
+        for name, p in blocked:
+            util.err(f"{name}/ can't be created — {p} already exists and is not a "
+                     f"directory. charter never deletes or renames existing content; "
+                     f"move or remove it yourself, then re-run `charter init`.")
+        if created:
+            util.info(f"  created: {', '.join(created)}")
+        if present:
+            util.info(f"  already present: {', '.join(present)}")
+        return 1
+
+    if created:
+        util.ok(f"Initialized control plane (schema {_instance.SCHEMA}) → "
+                f"{', '.join(created)}.")
+    else:
+        util.ok(f"Control plane already fully set up (schema {_instance.SCHEMA}) — "
+                f"nothing to do.")
+    if present:
+        util.info(f"  already present: {', '.join(present)}")
+    util.info("Next: `charter doctor` to preflight, then `charter discover` to build the "
+              "inventory.")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # reinit — control-plane schema: the same stamp/detect/heal pattern            #
 # `workspace reinit` (charter/workspace.py, commands_workspace.cmd_workspace_  #
 # reinit) already proves for a single workspace's layout, lifted one level up  #
@@ -584,6 +794,33 @@ def cmd_gl_refresh(args) -> int:
 # the heal half; `doctor`'s "schema" check is where the drift is visible       #
 # without running this first.                                                  #
 # --------------------------------------------------------------------------- #
+def _create_baseline_dirs(root: Path) -> tuple[list[str], list[str], list[tuple[str, Path]]]:
+    """Create any ``instance.BASELINE_DIRS`` absent under ``root``; never touch a
+    directory that's already there. Shared by ``cmd_init`` (a fresh control plane) and
+    ``cmd_reinit`` (healing an existing one) so both follow the exact same additive
+    discipline instead of two dialects of the same rule.
+
+    Returns ``(created, present, blocked)`` — ``created``/``present`` are ``"name/"``
+    labels; ``blocked`` is ``(name, path)`` for a baseline path occupied by a FILE (or
+    anything else that isn't a directory). FINDING C1: that case used to fall through
+    straight into ``mkdir()``, raising an uncaught ``FileExistsError``. The additive rule
+    means we never delete or rename the user's file to make room — surface it and let
+    them decide."""
+    from . import instance as _instance
+
+    created, present, blocked = [], [], []
+    for d in _instance.BASELINE_DIRS:
+        p = root / d
+        if p.is_dir():
+            present.append(f"{d}/")
+        elif p.exists():
+            blocked.append((d, p))
+        else:
+            p.mkdir(parents=True, exist_ok=True)
+            created.append(f"{d}/")
+    return created, present, blocked
+
+
 def cmd_reinit(args) -> int:
     """Bring the control plane's own baseline layout up to date — create any top-level
     directory (personas/, inventory/, workspaces/) a newer charter expects but this
@@ -596,20 +833,7 @@ def cmd_reinit(args) -> int:
         return 1
     from . import instance as _instance
 
-    created, present, blocked = [], [], []
-    for d in _instance.BASELINE_DIRS:
-        p = config.ROOT / d
-        if p.is_dir():
-            present.append(f"{d}/")
-        elif p.exists():
-            # FINDING C1: a baseline path occupied by a FILE (or anything else that
-            # isn't a directory) used to fall through straight into `mkdir()`, raising
-            # an uncaught FileExistsError. The additive rule means we never delete or
-            # rename the user's file to make room — surface it and let them decide.
-            blocked.append((d, p))
-        else:
-            p.mkdir(parents=True, exist_ok=True)
-            created.append(f"{d}/")
+    created, present, blocked = _create_baseline_dirs(config.ROOT)
 
     if blocked:
         for d, p in blocked:

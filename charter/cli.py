@@ -15,6 +15,7 @@ from . import (
     statusline,
     toolgate,
 )
+from .forge.registry import KINDS as _FORGE_KINDS
 from .secrets.registry import PROVIDERS
 
 
@@ -25,6 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"charter {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
+
+    ini = sub.add_parser(
+        "init",
+        help="Scaffold a fresh control plane here: charter.toml, baseline dirs, "
+             ".gitignore, and a status line. Additive + idempotent — never touches "
+             "existing content. The first command a stranger runs.",
+    )
+    ini.add_argument("--forge", choices=sorted(_FORGE_KINDS), default="gitlab",
+                     help="Forge this control plane tracks (default: gitlab).")
+    ini.add_argument("--owner", help="Group/org/user that owns the repos "
+                                     "(GitLab group or GitHub org/user).")
+    ini.add_argument("--host", help="Self-hosted forge host (default: the forge's own public host).")
+    ini.set_defaults(func=commands.cmd_init)
 
     doc_check = sub.add_parser(
         "doctor",
