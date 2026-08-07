@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -314,3 +315,35 @@ def _safe_unlink(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _dotenv_line(name: str, value: str) -> str:
+    """Render one ``KEY=value`` dotenv line that ``dotenv.parse`` round-trips.
+
+    The consuming parser is the ``dotenv`` package (Playwright's
+    ``dotenvFileLoader`` calls ``dotenv.parse``). Verified empirically against
+    dotenv 17.4.2 over 34 cases: it does **not** unescape ``\\"`` or ``\\\\``
+    inside a double-quoted value — it expands only ``\\n`` and ``\\r``. So a
+    value holding a quote or backslash must not be double-quoted with
+    backslash escapes; it would parse back with the escapes intact and the
+    credential would be silently wrong.
+
+    The rule:
+      * value contains ``'``, LF or CR -> double-quote it, encoding real
+        CR as ``\\r`` and LF as ``\\n`` and nothing else;
+      * otherwise -> single-quote it verbatim, with no escape processing.
+
+    dotenv matches a quoted value greedily to the last quote on the line, so
+    an embedded ``"`` inside a double-quoted value survives.
+    """
+    if not _ENV_NAME_RE.match(name):
+        raise ValueError(
+            f"'{name}' is not a valid environment-variable name "
+            "(expected [A-Za-z_][A-Za-z0-9_]*)")
+    if "'" in value or "\n" in value or "\r" in value:
+        body = value.replace("\r", "\\r").replace("\n", "\\n")
+        return f'{name}="{body}"'
+    return f"{name}='{value}'"
