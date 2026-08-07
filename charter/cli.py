@@ -356,6 +356,11 @@ def _sa_exec(p):
                    help="Inject secret <key> as env var NAME (repeatable).")
     p.add_argument("--file", action="append", metavar="ENVVAR=key",
                    help="Write secret <key> to a temp 0600 file; set ENVVAR to its path (repeatable).")
+    p.add_argument("--dotenv", action="append", metavar="ENVVAR=NAME:key",
+                   help="Add secret <key> as NAME to a temp 0600 dotenv file; set "
+                        "ENVVAR to its path (repeatable — repeats sharing an "
+                        "ENVVAR merge into one file). For tools that read a "
+                        "dotenv secrets file, e.g. PLAYWRIGHT_MCP_SECRETS_FILE.")
     p.add_argument("--exec", dest="exec_mode", action="store_true",
                    help="Replace this process with the command (os.exec) instead of capturing "
                         "it, so stdio streams through — required for a long-running child such "

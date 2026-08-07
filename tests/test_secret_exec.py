@@ -51,7 +51,7 @@ class SecretExecMode(unittest.TestCase):
     @staticmethod
     def _args(**kw):
         base = {"vault": "elastic-logs-master", "env": None, "file": None,
-                "command": [], "exec_mode": False}
+                "dotenv": None, "command": [], "exec_mode": False}
         base.update(kw)
         return SimpleNamespace(**base)
 

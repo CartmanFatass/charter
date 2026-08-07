@@ -242,8 +242,10 @@ def cmd_secret_exec(args) -> int:
         return 2
 
     exec_mode = bool(getattr(args, "exec_mode", False))
-    if exec_mode and (args.file or []):
-        util.err("--file cannot be combined with --exec: exec replaces this "
+    dotenv_specs = list(getattr(args, "dotenv", None) or [])
+    if exec_mode and ((args.file or []) or dotenv_specs):
+        flag = "--file" if (args.file or []) else "--dotenv"
+        util.err(f"{flag} cannot be combined with --exec: exec replaces this "
                  "process, so the temp file would never be cleaned up. "
                  "Use --env for an exec'd command.")
         return 2
@@ -272,6 +274,43 @@ def cmd_secret_exec(args) -> int:
             os.close(fd)
             os.chmod(path, 0o600)
             env[name] = path
+            tmpfiles.append(path)
+
+        # --dotenv ENVVAR=NAME:key (repeatable). Entries sharing an ENVVAR are
+        # merged into one file, in flag order, so a consumer that wants several
+        # secrets (e.g. PLAYWRIGHT_MCP_SECRETS_FILE) gets exactly one path.
+        # Every early return here must unlink tmpfiles itself: the `finally`
+        # that cleans them up guards only the subprocess.run call below, which
+        # these returns never reach. A leaked 0600 secrets file is the exact
+        # failure this feature exists to prevent.
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for spec in dotenv_specs:
+            envvar, sep, entry = spec.partition("=")
+            name, csep, key = entry.partition(":")
+            if not sep or not envvar or not csep or not name or not key:
+                for p in tmpfiles:
+                    _safe_unlink(p)
+                util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
+                return 2
+            grouped.setdefault(envvar, []).append((name, key))
+
+        for envvar, entries in grouped.items():
+            lines = []
+            for name, key in entries:
+                val = prov.get(key)
+                secret_values.append(val)
+                try:
+                    lines.append(_dotenv_line(name, val))
+                except ValueError as e:
+                    for p in tmpfiles:
+                        _safe_unlink(p)
+                    util.err(str(e))
+                    return 2
+            fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-dotenv-")
+            os.write(fd, ("\n".join(lines) + "\n").encode())
+            os.close(fd)
+            os.chmod(path, 0o600)
+            env[envvar] = path
             tmpfiles.append(path)
     except base.VaultError as e:
         for p in tmpfiles:
