@@ -39,7 +39,9 @@ The rule, in order — take the first tier that applies:
 
 Preferring the literal tiers matters for more than correctness: when nothing is escaped, the file holds the **raw** secret, so `base.redact()` still matches it. Only tier 3 changes the bytes, and the caller must therefore also register the escaped form for redaction (see Task 2).
 
-**Verified:** exhaustive fuzz over all strings of length 1–4 from the alphabet `# ' " ` \ n r <space> a = $ LF CR` — **30,940 values, 0 corrupted**, 1,994 rejected loudly (all of them CR combined with `"`, which no tier can represent). Plus 12 realistic secret shapes (PEM LF and CRLF, kubeconfig YAML, JWT, JSON blob, connection string, unicode, Windows path, a password containing all three quote characters) — all round-trip exactly.
+**Verified:** exhaustive fuzz over all strings of length 1–4 from the alphabet `# ' " ` \ n r <space> a = $ LF CR` — **30,940 values, 0 corrupted**, 1,994 rejected loudly. The rejections split two ways: **1,946** carry a CR alongside a `"` (a CR forces tier 3, which needs the value to be quote-free), and **48** carry `#`, `'`, `"` *and* a backtick at once, which exhausts every tier. Plus 12 realistic secret shapes (PEM LF and CRLF, kubeconfig YAML, JWT, JSON blob, connection string, unicode, Windows path, a password containing all three quote characters) — all round-trip exactly.
+
+The shipped Python encoder was then fuzzed *directly* against the real `dotenv` package (not a model of it): 2,301 encoded values, **0 corrupted**.
 
 **Do not "simplify" any tier.** Every condition in that table was added because a fuzz case corrupted a credential without it.
 
