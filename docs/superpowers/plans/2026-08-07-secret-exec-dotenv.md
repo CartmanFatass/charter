@@ -20,16 +20,21 @@
 
 ## Encoding rule (verified, do not change without re-testing)
 
-The parser on the consuming side is the `dotenv` package (Playwright bundles it; `dotenvFileLoader` calls `dotenv.parse`). It was tested empirically at v17.4.2 across 34 cases. **`dotenv` does NOT unescape `\"` or `\\` inside a double-quoted value** — it only expands `\n` and `\r`. Naive backslash-escaping therefore corrupts any secret containing a quote or backslash.
+The parser on the consuming side is the `dotenv` package (Playwright bundles it; `dotenvFileLoader` calls `dotenv.parse`). It was tested empirically at v17.4.2 across 50 cases. **`dotenv` does NOT unescape `\"` or `\\` inside a double-quoted value** — it only expands `\n` and `\r`. Naive backslash-escaping therefore corrupts any secret containing a quote or backslash.
 
-The rule that round-trips exactly:
+Because there is **no backslash escape**, the `\n` substitution is not injective: a value that already contains the two characters `\` + `n` is indistinguishable from one holding a real newline. Encoding must therefore avoid the double-quote form wherever possible, and refuse the cases it cannot represent rather than corrupt them.
 
-| Value contains | Encoding |
+The rule that round-trips exactly (verified over 50 cases at dotenv 17.4.2):
+
+| Value | Encoding |
 | --- | --- |
-| `'`, LF, or CR | double-quote; replace real CR→`\r`, LF→`\n`; **no other escaping** |
-| anything else | single-quote verbatim; **no escaping at all** |
+| contains **no** real LF/CR | single-quote verbatim; **no escaping at all** — greedy matching means `'`, `"`, `\` and a literal `\n` all survive |
+| has real LF/CR **and** contains a `\n` or `\r` *sequence* (backslash followed by `n`/`r`) | **raise `ValueError`** — genuinely unrepresentable; failing loudly beats silent corruption |
+| has real LF/CR otherwise | double-quote; replace real CR→`\r`, LF→`\n`; **no other escaping** |
 
-`dotenv`'s quoted-value match is greedy to the last quote on the line, so an embedded `"` inside a double-quoted value survives intact.
+`dotenv`'s quoted-value match is greedy to the last quote on the line, so an embedded `"` inside a double-quoted value — and an embedded `'` inside a single-quoted one — survive intact.
+
+**Do not simplify this to "double-quote when the value contains `'`".** That was the first attempt and it silently corrupts: `it's\nb` (apostrophe plus a *literal* backslash-n, 7 chars) encodes to `K="it's\nb"` and decodes to 6 chars with a real newline. The single-quote branch handles apostrophes correctly on its own.
 
 ## File Structure
 
@@ -49,7 +54,7 @@ The rule that round-trips exactly:
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `_dotenv_line(name: str, value: str) -> str` — renders one dotenv line, without a trailing newline. Raises `ValueError` if `name` is not a valid env-var identifier. Task 2 calls this.
+- Produces: `_dotenv_line(name: str, value: str) -> str` — renders one dotenv line, without a trailing newline. Raises `ValueError` if `name` is not a valid env-var identifier, or if the value holds both a real newline and a literal `\n`/`\r` sequence (unrepresentable in dotenv). Task 2 calls this.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -60,9 +65,11 @@ Create `tests/test_secret_dotenv.py`:
 
 The consuming parser is the `dotenv` package (Playwright's
 `dotenvFileLoader` calls `dotenv.parse`). Verified empirically at dotenv
-17.4.2: it does NOT unescape `\\"` or `\\\\` inside a double-quoted value — it
-expands only `\\n` and `\\r`. So backslash-escaping a quote or backslash
-corrupts the value. These tests pin the encoding that actually round-trips.
+17.4.2 over 50 cases: it processes no escapes at all inside a *single*-quoted
+value, and expands only `\\n`/`\\r` inside a double-quoted one. Single-quoting is
+therefore the safe default; a real newline forces the double-quoted form, whose
+`\\n` substitution is not injective and so cannot also carry a literal `\\n`.
+These tests pin the encoding that actually round-trips.
 """
 
 from __future__ import annotations
@@ -107,6 +114,44 @@ class DotenvLine(unittest.TestCase):
     def test_value_with_single_quote_round_trips(self):
         line = commands_secrets._dotenv_line("PASS", "it's")
         self.assertEqual(self._parse(line), "it's")
+
+    def test_apostrophe_plus_literal_backslash_n_round_trips(self):
+        """Regression: the case that silently corrupted.
+
+        An earlier rule double-quoted any value containing an apostrophe.
+        `it's\\nb` (7 chars, a LITERAL backslash-n and no real newline) then
+        encoded to `K="it's\\nb"` and decoded back to 6 chars with a REAL
+        newline — a silently wrong credential.
+        """
+        value = "it's" + "\\" + "n" + "b"
+        self.assertEqual(len(value), 7)
+        line = commands_secrets._dotenv_line("PASS", value)
+        self.assertEqual(self._parse(line), value)
+
+    def test_literal_backslash_sequences_survive_without_a_newline(self):
+        for value in ("a\\nb", "c:\\new\\report", "re\\r\\n", "\\\\n"):
+            with self.subTest(value=value):
+                line = commands_secrets._dotenv_line("K", value)
+                self.assertEqual(self._parse(line), value)
+
+    def test_real_newline_with_backslash_but_no_escape_sequence(self):
+        """A backslash not followed by n/r is unambiguous — must NOT raise."""
+        for value in ("a\\b\nc", "path\\to\nfile"):
+            with self.subTest(value=value):
+                line = commands_secrets._dotenv_line("K", value)
+                self.assertEqual(self._parse(line), value)
+
+    def test_pem_style_multiline_value_round_trips(self):
+        value = "-----BEGIN KEY-----\nMIIB\n-----END KEY-----\n"
+        line = commands_secrets._dotenv_line("KEY", value)
+        self.assertEqual(self._parse(line), value)
+
+    def test_raises_when_real_newline_meets_a_literal_escape_sequence(self):
+        """Genuinely unrepresentable in dotenv — must fail loudly, not corrupt."""
+        for value in ("x\\ny\nz", "a\\rb\nc", "it's\\nb\nreal"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    commands_secrets._dotenv_line("K", value)
 
     def test_value_with_newline_round_trips(self):
         line = commands_secrets._dotenv_line("KEY", "line1\nline2")
@@ -161,6 +206,7 @@ In `charter/commands_secrets.py`, add near `_safe_unlink` (keep `import re` with
 
 ```python
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ESCAPE_SEQ_RE = re.compile(r"\\[nr]")
 
 
 def _dotenv_line(name: str, value: str) -> str:
@@ -168,28 +214,34 @@ def _dotenv_line(name: str, value: str) -> str:
 
     The consuming parser is the ``dotenv`` package (Playwright's
     ``dotenvFileLoader`` calls ``dotenv.parse``). Verified empirically against
-    dotenv 17.4.2 over 34 cases: it does **not** unescape ``\\"`` or ``\\\\``
-    inside a double-quoted value — it expands only ``\\n`` and ``\\r``. So a
-    value holding a quote or backslash must not be double-quoted with
-    backslash escapes; it would parse back with the escapes intact and the
-    credential would be silently wrong.
+    dotenv 17.4.2 over 50 cases. Two of its properties drive this encoding:
 
-    The rule:
-      * value contains ``'``, LF or CR -> double-quote it, encoding real
-        CR as ``\\r`` and LF as ``\\n`` and nothing else;
-      * otherwise -> single-quote it verbatim, with no escape processing.
+    * It does **not** unescape ``\\"`` or ``\\\\`` anywhere, and processes no
+      escape at all inside a *single*-quoted value.
+    * It matches a quoted value greedily to the last quote on the line, so an
+      embedded quote of either kind survives.
 
-    dotenv matches a quoted value greedily to the last quote on the line, so
-    an embedded ``"`` inside a double-quoted value survives.
+    Single-quoting is therefore the safe default: it carries ``'``, ``"``,
+    ``\\`` and a literal ``\\n`` through untouched. Only a real newline forces
+    the double-quoted form, and there the ``\\n`` substitution is **not
+    injective** — a value already containing the two characters ``\\`` + ``n``
+    would come back as a real newline. That case is genuinely unrepresentable
+    in dotenv, so it raises rather than silently corrupting a credential.
     """
     if not _ENV_NAME_RE.match(name):
         raise ValueError(
             f"'{name}' is not a valid environment-variable name "
             "(expected [A-Za-z_][A-Za-z0-9_]*)")
-    if "'" in value or "\n" in value or "\r" in value:
-        body = value.replace("\r", "\\r").replace("\n", "\\n")
-        return f'{name}="{body}"'
-    return f"{name}='{value}'"
+    if "\n" not in value and "\r" not in value:
+        return f"{name}='{value}'"
+    if _ESCAPE_SEQ_RE.search(value):
+        raise ValueError(
+            f"the secret for '{name}' contains both a real newline and a "
+            "literal '\\\\n'/'\\\\r' sequence, which dotenv cannot represent "
+            "unambiguously (it has no backslash escape). Store the value "
+            "base64-encoded, or without the literal sequence.")
+    body = value.replace("\r", "\\r").replace("\n", "\\n")
+    return f'{name}="{body}"'
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
