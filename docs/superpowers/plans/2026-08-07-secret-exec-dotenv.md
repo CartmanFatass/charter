@@ -418,14 +418,17 @@ Then, immediately after the existing `for spec in args.file or []:` loop and sti
         # --dotenv ENVVAR=NAME:key (repeatable). Entries sharing an ENVVAR are
         # merged into one file, in flag order, so a consumer that wants several
         # secrets (e.g. PLAYWRIGHT_MCP_SECRETS_FILE) gets exactly one path.
+        # Every early return here must unlink tmpfiles itself: the `finally`
+        # that cleans them up guards only the subprocess.run call below, which
+        # these returns never reach. A leaked 0600 secrets file is the exact
+        # failure this feature exists to prevent.
         grouped: dict[str, list[tuple[str, str]]] = {}
         for spec in dotenv_specs:
             envvar, sep, entry = spec.partition("=")
-            if not sep or not envvar:
-                util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
-                return 2
             name, csep, key = entry.partition(":")
-            if not csep or not name or not key:
+            if not sep or not envvar or not csep or not name or not key:
+                for p in tmpfiles:
+                    _safe_unlink(p)
                 util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
                 return 2
             grouped.setdefault(envvar, []).append((name, key))
@@ -438,6 +441,8 @@ Then, immediately after the existing `for spec in args.file or []:` loop and sti
                 try:
                     lines.append(_dotenv_line(name, val))
                 except ValueError as e:
+                    for p in tmpfiles:
+                        _safe_unlink(p)
                     util.err(str(e))
                     return 2
             fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-dotenv-")
@@ -448,23 +453,7 @@ Then, immediately after the existing `for spec in args.file or []:` loop and sti
             tmpfiles.append(path)
 ```
 
-Note: the `return 2` paths inside the `try:` leave `tmpfiles` to be cleaned by the caller's existing `finally` only on the `subprocess.run` path, so add explicit cleanup. Change those two `return 2` statements to:
-
-```python
-                    for p in tmpfiles:
-                        _safe_unlink(p)
-                    util.err(str(e))
-                    return 2
-```
-
-and likewise for the two spec-parsing errors:
-
-```python
-                for p in tmpfiles:
-                    _safe_unlink(p)
-                util.err(f"--dotenv expects ENVVAR=NAME:key, got '{spec}'")
-                return 2
-```
+Write this block exactly as shown — the `_safe_unlink` loops in the early returns are required, not optional.
 
 - [ ] **Step 4: Add the CLI flag**
 
