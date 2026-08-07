@@ -349,7 +349,7 @@ def _dotenv_line(name: str, value: str) -> str:
     if _ESCAPE_SEQ_RE.search(value):
         raise ValueError(
             f"the secret for '{name}' contains both a real newline and a "
-            "literal '\\\\n'/'\\\\r' sequence, which dotenv cannot represent "
+            "literal '\\n'/'\\r' sequence, which dotenv cannot represent "
             "unambiguously (it has no backslash escape). Store the value "
             "base64-encoded, or without the literal sequence.")
     body = value.replace("\r", "\\r").replace("\n", "\\n")
