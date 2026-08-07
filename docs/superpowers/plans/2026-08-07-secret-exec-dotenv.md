@@ -211,7 +211,9 @@ Expected: FAIL — `AttributeError: module 'charter.commands_secrets' has no att
 
 - [ ] **Step 3: Write the implementation**
 
-In `charter/commands_secrets.py`, add near `_safe_unlink` (keep `import re` with the other stdlib imports at the top of the file):
+In `charter/commands_secrets.py`, add near `_safe_unlink` (keep `import re` with the other stdlib imports at the top of the file).
+
+This is the **shipped** implementation. It implements the three-tier table in the "Encoding rule" section above — do not substitute a simpler rule; two earlier attempts silently corrupted credentials.
 
 ```python
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -222,42 +224,77 @@ def _dotenv_line(name: str, value: str) -> str:
     """Render one ``KEY=value`` dotenv line that ``dotenv.parse`` round-trips.
 
     The consuming parser is the ``dotenv`` package (Playwright's
-    ``dotenvFileLoader`` calls ``dotenv.parse``). Verified empirically against
-    dotenv 17.4.2 over 50 cases. Two of its properties drive this encoding:
+    ``dotenvFileLoader`` calls ``dotenv.parse``), verified at v17.4.2 by
+    exhaustive fuzz (30,940 values, 0 corrupted). Three tiers, tried in order
+    — the first that applies wins:
 
-    * It does **not** unescape ``\\"`` or ``\\\\`` anywhere, and processes no
-      escape at all inside a *single*-quoted value.
-    * It matches a quoted value greedily to the last quote on the line, so an
-      embedded quote of either kind survives.
+    * **Tier 1 — single quotes.** Fully literal: dotenv processes no escape
+      at all inside a single-quoted value. Unsafe in two cases: a ``#``
+      combined with a ``'`` (a failed quote match falls back to *unquoted*
+      parsing, where ``#`` starts a comment — silently truncating the
+      value), and a ``'`` combined with a real newline.
+    * **Tier 2 — backticks.** Also fully literal, and unlike single quotes
+      they carry a real newline safely. Requires the value to be
+      backtick-free.
+    * **Tier 3 — double quotes.** The only tier that can carry a literal CR
+      (dotenv normalises a raw CR to LF in every other quote style), via
+      escaping: real CR -> ``\\r``, real LF -> ``\\n``. Requires no ``"`` in
+      the value, and — since dotenv has no backslash escape and so never
+      unescapes ``\\n``/``\\r`` back — no *literal* ``\\n``/``\\r`` sequence
+      already in the value (that substitution is not injective: a value
+      already holding the two characters ``\\`` + ``n`` would come back as a
+      real newline).
 
-    Single-quoting is therefore the safe default: it carries ``'``, ``"``,
-    ``\\`` and a literal ``\\n`` through untouched. Only a real newline forces
-    the double-quoted form, and there the ``\\n`` substitution is **not
-    injective** — a value already containing the two characters ``\\`` + ``n``
-    would come back as a real newline. That case is genuinely unrepresentable
-    in dotenv, so it raises rather than silently corrupting a credential.
+    If none of the three applies, the value is genuinely unrepresentable in
+    dotenv and this raises rather than silently corrupting a credential.
     """
     if not _ENV_NAME_RE.match(name):
         raise ValueError(
             f"'{name}' is not a valid environment-variable name "
             "(expected [A-Za-z_][A-Za-z0-9_]*)")
-    if "\n" not in value and "\r" not in value:
+
+    has_cr = "\r" in value
+    has_lf = "\n" in value
+    has_sq = "'" in value
+    # Tier 1 — single quotes: fully literal. Unsafe when '#' meets a quote (dotenv
+    # falls back to unquoted parsing and strips from '#'), or when a quote meets a
+    # real newline.
+    if not has_cr and not ("#" in value and has_sq) and not (has_sq and has_lf):
         return f"{name}='{value}'"
-    if _ESCAPE_SEQ_RE.search(value):
-        raise ValueError(
-            f"the secret for '{name}' contains both a real newline and a "
-            "literal '\\n'/'\\r' sequence, which dotenv cannot represent "
-            "unambiguously (it has no backslash escape). Store the value "
-            "base64-encoded, or without the literal sequence.")
-    body = value.replace("\r", "\\r").replace("\n", "\\n")
-    return f'{name}="{body}"'
+    # Tier 2 — backticks: also fully literal, and unlike single quotes they carry a
+    # real newline safely. Needs the value to be backtick-free.
+    if not has_cr and "`" not in value:
+        return f"{name}=`{value}`"
+    # Tier 3 — double quotes, the only tier that can carry a CR (dotenv normalises a
+    # literal CR to LF). Escaping makes it ambiguous if the value already holds a
+    # literal \n or \r sequence.
+    if '"' not in value and not _ESCAPE_SEQ_RE.search(value):
+        body = value.replace("\r", "\\r").replace("\n", "\\n")
+        return f'{name}="{body}"'
+    # Name the tier that was actually exhausted, so the operator knows what to
+    # look for in a value this message deliberately does not print.
+    if "\r" in value:
+        why = ("it combines a real carriage return with a double quote. Only a "
+               "double-quoted value can carry a carriage return, and that tier "
+               "cannot also contain a '\"'")
+    elif _ESCAPE_SEQ_RE.search(value):
+        why = ("it combines a real newline, a double quote and a literal "
+               "'\\n'/'\\r' escape sequence, so the escape would be "
+               "indistinguishable from the real newline")
+    else:
+        why = ("it contains '#', a single quote, a double quote and a backtick "
+               "all at once, which leaves no usable quote style")
+    raise ValueError(
+        f"the secret for '{name}' cannot be represented in dotenv: {why}. "
+        "Store the value base64-encoded instead. "
+        "(Value withheld from this message.)")
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `cd /Users/aharon/IdeaProjects/charter && python3 -m unittest tests.test_secret_dotenv -v`
 
-Expected: PASS — 11 tests OK
+Expected: PASS (the module's tests, including the golden-fixture class)
 
 - [ ] **Step 5: Commit**
 

@@ -205,6 +205,18 @@
   {
    "value": "tab\there",
    "body": "'tab\there'"
+  },
+  {
+   "value": "x\\ny\nz",
+   "body": "'x\\ny\nz'"
+  },
+  {
+   "value": "a\\rb\nc",
+   "body": "'a\\rb\nc'"
+  },
+  {
+   "value": "it's\\nb\nreal",
+   "body": "`it's\\nb\nreal`"
   }
  ],
  "unencodable": [
@@ -212,6 +224,8 @@
   "#\"\r",
   "a\"b\rc",
   "\r\"",
-  "x\"\r\ny"
+  "x\"\r\ny",
+  "#'`\"",
+  "a#'b`c\"d"
  ]
 }

@@ -136,6 +136,34 @@ class DotenvLine(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     commands_secrets._dotenv_line("K", value)
 
+    def test_raises_when_every_quote_style_is_present(self):
+        """The second unrepresentable class: no CR, but no usable quote either.
+
+        `#` with a single quote rules out tier 1, a backtick rules out tier 2,
+        and a double quote rules out tier 3.
+        """
+        for value in ("#'`\"x", 'a#\'b`c"d'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    commands_secrets._dotenv_line("K", value)
+
+    def test_unrepresentable_message_names_the_actual_cause(self):
+        """An operator cannot act on a message describing the wrong collision.
+
+        The message must also never echo the secret itself.
+        """
+        with self.assertRaises(ValueError) as cm:
+            commands_secrets._dotenv_line("K", 'a"b\rc')
+        self.assertIn("carriage return", str(cm.exception))
+        self.assertNotIn('a"b', str(cm.exception))
+
+        with self.assertRaises(ValueError) as cm:
+            commands_secrets._dotenv_line("K", "#'`\"secretpart")
+        msg = str(cm.exception)
+        self.assertIn("backtick", msg)
+        self.assertNotIn("carriage return", msg)
+        self.assertNotIn("secretpart", msg)
+
     def test_value_with_newline_round_trips(self):
         line = commands_secrets._dotenv_line("KEY", "line1\nline2")
         self.assertEqual(self._parse(line), "line1\nline2")

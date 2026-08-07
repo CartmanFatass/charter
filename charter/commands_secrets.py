@@ -281,11 +281,14 @@ def cmd_secret_exec(args) -> int:
                 val = prov.get(key)
                 secret_values.append(val)
                 fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-{key}-")
-                os.write(fd, val.encode())
-                os.close(fd)
+                # Register for cleanup *before* writing: a failure mid-write
+                # (ENOSPC, EIO, a lone surrogate in the value) would otherwise
+                # strand a 0600 file the `finally` never learns about.
+                tmpfiles.append(path)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(val.encode())
                 os.chmod(path, 0o600)
                 env[name] = path
-                tmpfiles.append(path)
 
             # --dotenv ENVVAR=NAME:key (repeatable). Entries sharing an ENVVAR
             # are merged into one file, in flag order, so a consumer that
@@ -321,11 +324,12 @@ def cmd_secret_exec(args) -> int:
                         util.err(str(e))
                         return 2
                 fd, path = tempfile.mkstemp(prefix=f"charter-{args.vault}-dotenv-")
-                os.write(fd, ("\n".join(lines) + "\n").encode())
-                os.close(fd)
+                # Register before writing — see the note on the --file path above.
+                tmpfiles.append(path)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(("\n".join(lines) + "\n").encode())
                 os.chmod(path, 0o600)
                 env[envvar] = path
-                tmpfiles.append(path)
         except base.VaultError as e:
             util.err(str(e))
             return 1
@@ -425,9 +429,20 @@ def _dotenv_line(name: str, value: str) -> str:
     if '"' not in value and not _ESCAPE_SEQ_RE.search(value):
         body = value.replace("\r", "\\r").replace("\n", "\\n")
         return f'{name}="{body}"'
+    # Name the tier that was actually exhausted, so the operator knows what to
+    # look for in a value this message deliberately does not print.
+    if "\r" in value:
+        why = ("it combines a real carriage return with a double quote. Only a "
+               "double-quoted value can carry a carriage return, and that tier "
+               "cannot also contain a '\"'")
+    elif _ESCAPE_SEQ_RE.search(value):
+        why = ("it combines a real newline, a double quote and a literal "
+               "'\\n'/'\\r' escape sequence, so the escape would be "
+               "indistinguishable from the real newline")
+    else:
+        why = ("it contains '#', a single quote, a double quote and a backtick "
+               "all at once, which leaves no usable quote style")
     raise ValueError(
-        f"the secret for '{name}' cannot be represented in dotenv: it "
-        "combines a real carriage return with a double quote (or a real "
-        "newline with a literal '\\n'/'\\r' escape sequence), which no quote "
-        "style can carry unambiguously. Store the value base64-encoded "
-        "instead. (Value withheld from this message.)")
+        f"the secret for '{name}' cannot be represented in dotenv: {why}. "
+        "Store the value base64-encoded instead. "
+        "(Value withheld from this message.)")
