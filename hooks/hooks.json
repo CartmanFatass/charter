@@ -5,8 +5,29 @@
         "hooks": [
           {
             "type": "command",
+            "command": "charter workspace _reconcile >/dev/null 2>&1",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "charter persona _gc >/dev/null 2>&1",
+            "async": true
+          },
+          {
+            "type": "command",
             "command": "charter hook sessionstart --plugin-version 0.1.0",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "out=\"$(charter doctor 2>&1)\" || printf 'charter preflight failed - fix before working:\\n%s\\n' \"$out\"",
+            "timeout": 20,
+            "statusMessage": "charter preflight (charter doctor)"
+          },
+          {
+            "type": "command",
+            "command": "charter gl-refresh >/dev/null 2>&1",
+            "async": true
           }
         ]
       }
@@ -52,6 +73,17 @@
             "type": "command",
             "command": "charter hook posttooluse-dispatch --plugin-version 0.1.0",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "charter workspace _autosave >/dev/null 2>&1",
+            "timeout": 15
           }
         ]
       }
