@@ -1,0 +1,12 @@
+{
+  "name": "charter",
+  "description": "Personas, workspaces and memory for Claude Code agents across many repos",
+  "version": "0.1.0",
+  "author": {
+    "name": "Aaron Yordanyan"
+  },
+  "homepage": "https://github.com/diazoxide/charter",
+  "repository": "https://github.com/diazoxide/charter",
+  "license": "MIT",
+  "keywords": ["claude-code", "agents", "monorepo", "polyrepo", "developer-tools"]
+}

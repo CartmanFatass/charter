@@ -7,10 +7,13 @@ Nothing here changes the system.
 
 from __future__ import annotations
 
+import json
+import os
 import platform
 import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import inventory, util
 from .forge.gitlab import GitLabForge
@@ -294,6 +297,36 @@ def check_vaults() -> Result:
     return Result("vaults", OK, detail=f"{len(vs)} configured, all healthy")
 
 
+def check_plugin_skew() -> Result:
+    """`charter` ships as two artifacts — the CLI (pip/uv) and the Claude Code plugin
+    (``.claude-plugin/plugin.json`` + ``hooks/hooks.json``) — with two version numbers.
+    ``hooks.skew_message`` is the loud guard a running hook speaks through; this is the
+    same check surfaced in `doctor`, for a developer who just wants to ask directly.
+
+    Only meaningful inside a Claude Code session with the plugin installed: Claude Code
+    sets ``CLAUDE_PLUGIN_ROOT`` for the plugin's own processes (including a `charter
+    doctor` a hook or the agent runs), pointing at the installed plugin's own directory.
+    A bare `charter doctor` from a plain terminal (no plugin, pip/uv install only) has
+    nothing to compare against — that's a normal, fully-supported way to run charter, so
+    this stays OK rather than warning about a plugin that was never installed."""
+    from . import hooks
+
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not root:
+        return Result("plugin", OK, detail="not running under the Claude Code plugin")
+    manifest = Path(root) / ".claude-plugin" / "plugin.json"
+    try:
+        plugin_version = json.loads(manifest.read_text()).get("version")
+    except (OSError, ValueError):
+        return Result("plugin", WARN, detail="plugin manifest unreadable",
+                      hint=f"expected a readable plugin.json at {manifest}")
+    msg = hooks.skew_message(plugin_version)
+    if msg:
+        return Result("plugin", WARN,
+                      detail=f"v{plugin_version} (CLI v{hooks.MIN_PLUGIN_VERSION})", hint=msg)
+    return Result("plugin", OK, detail=f"v{plugin_version} matches the installed CLI")
+
+
 def run_all() -> list[Result]:
     """Order: cheap/local checks first, network checks last. The forge cli/auth pair is
     NOT fixed (it used to be exactly one hardcoded GitLab pair) — it's one pair PER
@@ -305,5 +338,5 @@ def run_all() -> list[Result]:
         results.append(check_forge_cli(forge))
         results.append(check_forge_auth(forge))
     results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
-                check_inventory(), check_vaults()]
+                check_inventory(), check_vaults(), check_plugin_skew()]
     return results

@@ -17,7 +17,10 @@ Handlers:
   looks like it contains a secret (D). Never echoes the value.
 
 Design: **never break work.** A guard only fires on a tight, high-confidence pattern;
-everything else falls through to the normal permission flow.
+everything else falls through to the normal permission flow. :func:`skew_message` is the
+sole exception (see its own docstring) — the Claude Code **plugin** (``hooks/hooks.json``
++ ``.claude-plugin/plugin.json``, this package's other shipped artifact) dispatches into
+these handlers via ``charter hook <name> --plugin-version X.Y.Z``; see :func:`dispatch`.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import config
+from . import __version__, config
 
 
 def _read_stdin() -> dict:
@@ -1078,3 +1081,85 @@ def userpromptsubmit() -> int:
             "additionalContext": "\n\n".join(parts),
         }})
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# G: version skew — the ONE hook allowed to speak up. `charter` ships as TWO      #
+# artifacts (the CLI, pip/uv; the Claude Code plugin — `.claude-plugin/plugin.json`#
+# + `hooks/hooks.json`) with two version numbers. Every handler above swallows    #
+# its own exceptions so a bug can never break a turn — but that exact discipline  #
+# is what would make skew invisible: a stale CLI would just stop firing the gate  #
+# while everything still looked installed (the plugin is present, hooks fire,     #
+# nothing errors). So this one check is deliberately loud instead of silent.      #
+# --------------------------------------------------------------------------- #
+
+#: The plugin version this CLI is released together with — see `.claude-plugin/
+#: plugin.json` (`version`) and `hooks/hooks.json` (the literal `--plugin-version` baked
+#: into every command). Both artifacts are bumped in lockstep, so today this equals
+#: `charter.__version__`; kept as its own name rather than a scattered comparison against
+#: `__version__` so the "what does this CLI expect the plugin to be" question has one seam.
+MIN_PLUGIN_VERSION = __version__
+
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_version(v: str | None) -> tuple[int, int, int] | None:
+    """A numeric ``(major, minor, patch)`` tuple, or ``None`` for anything that isn't
+    one — absent, malformed, or hand-typed. Never raises."""
+    if not v:
+        return None
+    m = _VERSION_RE.match(v.strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def skew_message(plugin_version: str | None) -> str | None:
+    """A loud message when the plugin is newer than this CLI, else None.
+
+    This is the ONLY place a charter hook is allowed to interrupt. Everywhere else a hook
+    swallows its errors so it can never break a turn — but that same discipline is what
+    would make version skew invisible, so here it must speak.
+    """
+    plugin = _parse_version(plugin_version)
+    cli = _parse_version(MIN_PLUGIN_VERSION)
+    if plugin is None or cli is None or plugin <= cli:
+        return None
+    return (
+        f"⬢ charter version skew: the plugin is v{plugin_version} but the installed "
+        f"charter CLI is v{MIN_PLUGIN_VERSION}. Two artifacts, two version numbers — "
+        f"upgrade the CLI to match: `pip install --upgrade charter` "
+        f"(or `uv tool upgrade charter`)."
+    )
+
+
+#: Every hook the plugin's `hooks/hooks.json` dispatches into, by the name it passes as
+#: `charter hook <name>`. Each handler still reads stdin and returns an exit code exactly
+#: as it always did when the umbrella wired it directly (`from edm.hooks import <fn>`) —
+#: `dispatch` only adds the loud skew check in front, it changes nothing about a handler's
+#: own behavior or its silent-on-error discipline.
+_HANDLERS = {
+    "sessionstart": sessionstart,
+    "userpromptsubmit": userpromptsubmit,
+    "pretooluse": pretooluse,
+    "posttooluse": posttooluse,
+    "posttooluse-dispatch": posttooluse_dispatch,
+}
+
+
+def dispatch(name: str, plugin_version: str | None) -> int:
+    """``charter hook <name> --plugin-version X.Y.Z`` — what the plugin's `hooks/hooks.json`
+    actually invokes (the plugin ships no Python, so it can't import these handlers
+    directly the way the umbrella's inline `python3 -c "from edm.hooks import …"` does).
+
+    Runs the skew check first — the one place this module speaks up rather than
+    swallowing — then the named handler, unchanged."""
+    msg = skew_message(plugin_version)
+    if msg:
+        print(msg, file=sys.stderr)
+    fn = _HANDLERS.get(name)
+    if fn is None:
+        print(f"charter hook: unknown hook '{name}' (known: {', '.join(sorted(_HANDLERS))})",
+              file=sys.stderr)
+        return 1
+    return fn()

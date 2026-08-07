@@ -12,6 +12,7 @@ from . import (
     commands_secrets,
     commands_workspace,
     commands_worktree,
+    hooks,
     statusline,
     toolgate,
 )
@@ -115,6 +116,15 @@ def build_parser() -> argparse.ArgumentParser:
                              "from each clone's own forge.")
     gl.add_argument("--workspace", "-w", help="Workspace to refresh (default: the active one).")
     gl.set_defaults(func=commands.cmd_gl_refresh)
+
+    hk = sub.add_parser("hook",
+                        help="Dispatch a Claude Code hook by name — what the plugin's "
+                             "hooks/hooks.json actually invokes (the plugin ships no Python).")
+    hk.add_argument("name", choices=sorted(hooks._HANDLERS), help="Which handler to run.")
+    hk.add_argument("--plugin-version", dest="plugin_version",
+                    help="The installed plugin's version (hooks/hooks.json bakes this in); "
+                         "compared against this CLI's own version to catch skew.")
+    hk.set_defaults(func=lambda args: hooks.dispatch(args.name, args.plugin_version))
 
     tr = sub.add_parser("trace",
                         help="Session observability: guard denials, tool approvals, secret warnings, memory writes.")
