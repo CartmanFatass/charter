@@ -97,5 +97,84 @@ class TestAdditiveOnly(InitIso):
         self.assertEqual((d / "settings.json").read_text(), "{ not json")
 
 
+class TestStatuslineFormattingPreserved(InitIso):
+    """F1: adding `statusLine` to an existing settings.json must disturb the rest of the
+    file as little as practical — not re-indent/reformat everything `json.dumps(...,
+    indent=2)` touches. These pin the *formatting*, not just the values (the vacuous
+    check `test_unrelated_settings_keys_survive` already covers values)."""
+
+    def test_compact_single_line_file_stays_single_line(self):
+        d = self.root / ".claude"
+        d.mkdir()
+        original = '{"permissions":{"allow":["Bash(ls)"]},"env":{"FOO":"bar"}}'
+        (d / "settings.json").write_text(original)
+        self._init()
+        text = (d / "settings.json").read_text()
+        # A one-key addition to a compact file must not explode into multi-line output.
+        self.assertNotIn("\n", text.rstrip("\n"))
+        s = json.loads(text)
+        self.assertEqual(s["permissions"]["allow"], ["Bash(ls)"])
+        self.assertEqual(s["env"]["FOO"], "bar")
+        self.assertIn("statusLine", s)
+
+    def test_existing_indent_width_is_matched_not_forced_to_two(self):
+        d = self.root / ".claude"
+        d.mkdir()
+        original = ('{\n'
+                    '    "permissions": {\n'
+                    '        "allow": [\n'
+                    '            "Bash(ls)"\n'
+                    '        ]\n'
+                    '    }\n'
+                    '}\n')
+        (d / "settings.json").write_text(original)
+        self._init()
+        text = (d / "settings.json").read_text()
+        # The file's own 4-space indent must be reused, not overwritten with 2.
+        self.assertIn('\n    "permissions"', text)
+        self.assertIn('\n    "statusLine"', text)
+        self.assertNotIn('\n  "permissions"', text)
+
+
+class TestExitCodeReflectsSkips(InitIso):
+    """F2: any requested piece that could not be created must be visible in the exit
+    code, not just as a warning — a malformed settings.json (statusLine silently not
+    written) is the same shape of failure as a blocked baseline directory (already
+    non-zero), so both must return non-zero."""
+
+    def test_malformed_settings_json_is_a_nonzero_exit(self):
+        d = self.root / ".claude"
+        d.mkdir()
+        (d / "settings.json").write_text("{ not json")
+        self.assertEqual(self._init(), 1)
+
+    def test_blocked_baseline_dir_is_still_a_nonzero_exit(self):
+        (self.root / "personas").write_text("not a dir")
+        self.assertEqual(self._init(), 1)
+
+    def test_fully_successful_init_is_still_zero(self):
+        self.assertEqual(self._init(), 0)
+
+
+class TestGitignorePresenceCheckIsPrecise(InitIso):
+    """F3: the presence check for the workspaces block must key off the exact anchor
+    line `workspace.set_live()` depends on, not a loose substring — a pre-existing rule
+    that merely *contains* "workspaces/" (but isn't the anchor) must not suppress it."""
+
+    def test_substring_match_without_the_anchor_does_not_suppress_it(self):
+        (self.root / ".gitignore").write_text("build/workspaces/output/\n")
+        self._init()
+        body = (self.root / ".gitignore").read_text()
+        self.assertIn("!/workspaces/.gitkeep", body)
+
+    def test_the_real_anchor_is_still_recognised_as_present(self):
+        (self.root / ".gitignore").write_text(
+            "/workspaces/*/*\n!/workspaces/.gitkeep\n/.edm/\n")
+        before = (self.root / ".gitignore").read_text()
+        self._init()
+        after = (self.root / ".gitignore").read_text()
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

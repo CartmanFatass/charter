@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 from pathlib import Path
 
 from . import config, doctor, inventory, render, util, workspace
@@ -641,14 +642,21 @@ def _ensure_gitignore(root: Path) -> bool:
     """Add charter's baseline ignore rules to ``.gitignore`` — creating it fresh if
     absent, or appending only the lines an existing file is missing (existing content is
     never removed, reordered, or rewritten). Returns ``True`` iff the file was created or
-    changed."""
+    changed.
+
+    The presence check keys off the *exact* lines a missing block would add, not a
+    substring test — ``"workspaces/" in body`` used to match any pre-existing rule that
+    happened to contain that text (e.g. ``build/workspaces/output/``) and would then
+    wrongly skip writing ``!/workspaces/.gitkeep``, the literal anchor line
+    ``workspace.set_live()`` searches for to splice in its managed live-workspace block."""
     p = root / ".gitignore"
     if not p.exists():
         p.write_text(_GITIGNORE_BASELINE)
         return True
     body = p.read_text()
+    existing_lines = {line.strip() for line in body.splitlines()}
     missing = []
-    if "workspaces/" not in body:
+    if "!/workspaces/.gitkeep" not in existing_lines:
         missing.append("/workspaces/*/*\n!/workspaces/.gitkeep\n")
     if ".edm/" not in body:
         missing.append("/.edm/\n")
@@ -666,6 +674,26 @@ def _statusline_snippet() -> str:
     """The exact JSON to hand a user whose `.claude/settings.json` we could not safely
     touch — so they can paste the `statusLine` key in themselves."""
     return json.dumps({"statusLine": _STATUSLINE}, indent=2)
+
+
+def _json_style(text: str) -> tuple[str | None, tuple[str, str]]:
+    """Best-effort ``(indent, separators)`` for ``json.dumps`` that echoes ``text``'s own
+    formatting, so adding one key doesn't reformat the whole file. Not a true round-trip
+    (stdlib ``json`` can't preserve comments, trailing whitespace, or hand-tweaked
+    separator spacing byte-for-byte) — just the two knobs that dominate a re-dump's diff:
+
+    - indent: the leading whitespace of the first indented ``"key"`` line, so a 4-space
+      (or tab) file is re-dumped at 4 spaces, not forced to 2. ``None`` (compact, single
+      line) if no such line exists.
+    - separators: for a compact file, whether ``:``/``,`` already carry a trailing space
+      (``{"a": 1}`` vs ``{"a":1}``), inferred from the raw text so a minified file stays
+      minified instead of growing spaces it didn't have."""
+    m = re.search(r'\n([ \t]+)"', text)
+    if m:
+        return m.group(1), (",", ": ")
+    colon_space = re.search(r'":\s', text) is not None
+    comma_space = re.search(r',\s', text) is not None
+    return None, (", " if comma_space else ",", ": " if colon_space else ":")
 
 
 def _ensure_statusline(root: Path) -> tuple[str, Path | None]:
@@ -691,8 +719,9 @@ def _ensure_statusline(root: Path) -> tuple[str, Path | None]:
             return "blocked", d
         p.write_text(json.dumps({"statusLine": dict(_STATUSLINE)}, indent=2) + "\n")
         return "created", None
+    raw = p.read_text()
     try:
-        settings = json.loads(p.read_text())
+        settings = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return "malformed", p
     if not isinstance(settings, dict):
@@ -700,7 +729,14 @@ def _ensure_statusline(root: Path) -> tuple[str, Path | None]:
     if "statusLine" in settings:
         return "present", None
     settings["statusLine"] = dict(_STATUSLINE)
-    p.write_text(json.dumps(settings, indent=2) + "\n")
+    indent, separators = _json_style(raw)
+    rewritten = json.dumps(settings, indent=indent, separators=separators)
+    # Match the original's trailing newline (or lack of one) rather than forcing one —
+    # same "disturb it as little as practical" rule applied to the one byte outside the
+    # JSON grammar itself.
+    if raw.endswith("\n"):
+        rewritten += "\n"
+    p.write_text(rewritten)
     return "created", None
 
 
@@ -760,7 +796,12 @@ def cmd_init(args) -> int:
     elif sl_status == "blocked":
         blocked.append((".claude", sl_detail))
 
-    if blocked:
+    # Same failure shape either way — "you asked for this, it did not happen" — so both
+    # exit non-zero: a blocked baseline path (file already prints its own util.err above)
+    # and a malformed settings.json (its util.warn already fired where sl_status was
+    # decided). Scripted/CI callers must be able to tell from the exit code alone that
+    # something requested was skipped, not just from stderr text.
+    if blocked or sl_status == "malformed":
         for name, p in blocked:
             util.err(f"{name}/ can't be created — {p} already exists and is not a "
                      f"directory. charter never deletes or renames existing content; "
