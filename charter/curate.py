@@ -66,16 +66,11 @@ def report(mem_dir: Path, stale_days: int = 90, near_threshold: float = 0.5,
             stale.append((p.name, d.isoformat(), (day - d).days))
     stale.sort(key=lambda x: -x[2])
 
-    # index health — MEMORY.md links vs actual files. A memory FILENAME is a bare slug
-    # (no slash/space/colon); parse only link targets that match, so a title containing a
-    # URL-ish `](…md` fragment (API paths do) isn't mistaken for a listed file.
-    idx = memstore.index_path(mem_dir)
-    listed, actual = set(), {p.name for p, _t, _x in ents}
-    if idx.exists():
-        import re
-        listed = set(re.findall(r"\(([A-Za-z0-9][\w.-]*\.md)\)", idx.read_text()))
-    index = {"orphans": sorted(listed - actual),          # indexed but file gone
-             "missing": sorted(actual - listed)}           # file exists but unindexed
+    # index health — one implementation, shared with `doctor` so the two can never
+    # disagree about what counts as drift.
+    drift = memstore.index_drift(mem_dir)
+    index = {"orphans": drift["dangling"],   # indexed but file gone
+             "missing": drift["unindexed"]}  # file exists but unindexed
 
     # charter-worthy rule candidates
     rules = sorted(((p.name, t, _rule_score(x)) for p, t, x in ents if _rule_score(x) >= 2),

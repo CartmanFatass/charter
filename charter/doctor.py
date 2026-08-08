@@ -289,6 +289,57 @@ def check_vaults() -> Result:
     return Result("vaults", OK, detail=f"{len(vs)} configured, all healthy")
 
 
+def check_memory_indexes() -> Result:
+    """Every memory base's MEMORY.md must agree with the files beside it.
+
+    A dangling link makes `charter recall` surface a hit nobody can read; an
+    unindexed file is a memory the index — and therefore the SessionStart digest
+    — never mentions. Neither needs a concurrency bug to happen: MEMORY.md is
+    append-heavy and edited by many agents and humans at once, so a merge
+    resolved by taking one side drops the other's line while its file survives.
+    That is exactly how both showed up in a real control plane.
+
+    WARN, never FAIL: drift is a hygiene problem, and this runs from the
+    SessionStart hook, which must never block a session.
+    """
+    from . import config, memstore, persona, workspace
+
+    bases = []
+    try:
+        for name in persona.list_personas():
+            bases.append((name, persona.memory_dir(name)))
+        bases.append((config.SHARED_PERSONA, persona.memory_dir(config.SHARED_PERSONA,
+                                                                shared=True)))
+        for name in workspace.list_workspaces():
+            bases.append((f"ws:{name}", workspace.memory_dir(name)))
+    except OSError as e:
+        # Only an unreadable/absent tree is tolerated. A broader `except` here once
+        # swallowed a NameError and reported OK — a check that silently does
+        # nothing is worse than no check.
+        return Result("memory indexes", OK, detail=f"not checked ({e})")
+
+    dangling = unindexed = 0
+    worst = []
+    for label, mem_dir in bases:
+        if not mem_dir.exists():
+            continue
+        d = memstore.index_drift(mem_dir)
+        if d["dangling"] or d["unindexed"]:
+            dangling += len(d["dangling"])
+            unindexed += len(d["unindexed"])
+            worst.append(f"{label} ({len(d['dangling'])} dangling, "
+                         f"{len(d['unindexed'])} unindexed)")
+    if not worst:
+        return Result("memory indexes", OK, detail=f"{len(bases)} base(s) consistent")
+    hint = ", ".join(worst[:4]) + (", …" if len(worst) > 4 else "")
+    if unindexed:
+        hint += "  → charter persona optimize --all --apply  (links unindexed files)"
+    if dangling:
+        hint += "  → a dangling link is proposal-only: prune it, or write the memory it names"
+    return Result("memory indexes", WARN,
+                  detail=f"{dangling} dangling, {unindexed} unindexed", hint=hint)
+
+
 def check_plugin_skew() -> Result:
     """`charter` ships as two artifacts — the CLI (pip/uv) and the Claude Code plugin
     (``.claude-plugin/plugin.json`` + ``hooks/hooks.json``) — with two version numbers.
@@ -330,5 +381,6 @@ def run_all() -> list[Result]:
         results.append(check_forge_cli(forge))
         results.append(check_forge_auth(forge))
     results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
-                check_inventory(), check_vaults(), check_plugin_skew()]
+                check_inventory(), check_vaults(), check_memory_indexes(),
+                check_plugin_skew()]
     return results

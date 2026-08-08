@@ -105,6 +105,30 @@ def files(mem_dir: Path) -> list[Path]:
     return sorted(p for p in mem_dir.glob("*.md") if p.name != "MEMORY.md")
 
 
+#: A memory FILENAME is a bare slug — no slash, space or colon. Matching only that
+#: shape keeps a title containing a URL-ish `](…md` fragment (API paths do) from being
+#: mistaken for a listed file.
+_INDEX_LINK_RE = re.compile(r"\(([A-Za-z0-9][\w.-]*\.md)\)")
+
+
+def index_drift(mem_dir: Path) -> dict[str, list[str]]:
+    """Compare MEMORY.md's links against the files actually present.
+
+    Returns ``{"dangling": [...], "unindexed": [...]}`` — links pointing at a file
+    that isn't there, and files no link points at. Both are reachable without any
+    concurrency bug: MEMORY.md is append-heavy and edited by many agents and
+    humans at once, so a merge resolved by taking one side drops the other's
+    line while its file survives.
+
+    Cheap by design (one read + one glob, no file contents): `doctor` calls this
+    for every memory base, and runs from the SessionStart hook.
+    """
+    actual = {p.name for p in files(mem_dir)}
+    idx = index_path(mem_dir)
+    listed = set(_INDEX_LINK_RE.findall(idx.read_text())) if idx.exists() else set()
+    return {"dangling": sorted(listed - actual), "unindexed": sorted(actual - listed)}
+
+
 def entries(mem_dir: Path) -> list[tuple[Path, str, str]]:
     """(path, title, text) per memory; title = first '# ' line, else the file stem."""
     out = []
