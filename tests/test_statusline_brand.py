@@ -178,3 +178,36 @@ class NeverBlocks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpgradeAdviceIsRunnable(unittest.TestCase):
+    """Every upgrade command charter prints must actually work.
+
+    Two ways to get this wrong, both of which shipped: the distribution is
+    `charter-cp` (PyPI would not allow `charter`, so `pip install charter` fetches
+    nothing of ours), and `uv tool upgrade` reports "Nothing to upgrade" for a
+    git-installed charter and leaves the user pinned on an old version.
+    """
+
+    def _sources(self):
+        root = Path(__file__).resolve().parent.parent
+        for rel in ("charter/hooks.py", "charter/instance.py"):
+            yield rel, (root / rel).read_text()
+
+    def test_no_upgrade_hint_names_the_wrong_distribution(self):
+        import re
+        bad = re.compile(r"(?:pip|pipx|uv tool)[^`\"']{0,40}?(?:install|upgrade)\s+charter(?!-cp)\b")
+        for rel, text in self._sources():
+            for line in text.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue          # explanatory comments may name the wrong form
+                with self.subTest(file=rel, line=line.strip()[:70]):
+                    self.assertIsNone(bad.search(line))
+
+    def test_no_upgrade_hint_offers_uv_tool_upgrade(self):
+        for rel, text in self._sources():
+            for line in text.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                with self.subTest(file=rel):
+                    self.assertNotIn("uv tool upgrade", line)

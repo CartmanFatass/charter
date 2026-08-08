@@ -1165,11 +1165,16 @@ def skew_message(plugin_version: str | None) -> str | None:
     cli = _parse_version(MIN_PLUGIN_VERSION)
     if plugin is None or cli is None or plugin <= cli:
         return None
+    # The command here has to actually work: this is the one place a hook interrupts,
+    # so wrong advice costs more than silence. `uv tool upgrade` is deliberately NOT
+    # offered — it reports "Nothing to upgrade" for a git-installed charter and leaves
+    # you pinned. And the distribution is `charter-cp`; `charter` is a name PyPI would
+    # not allow, so `pip install charter` installs nothing of ours.
     return (
         f"⬢ charter version skew: the plugin is v{plugin_version} but the installed "
         f"charter CLI is v{MIN_PLUGIN_VERSION}. Two artifacts, two version numbers — "
-        f"upgrade the CLI to match: `pip install --upgrade charter` "
-        f"(or `uv tool upgrade charter`)."
+        f"upgrade the CLI to match: `uv tool install charter-cp --force --refresh` "
+        f"(or `make upgrade` in a control plane that ships it)."
     )
 
 

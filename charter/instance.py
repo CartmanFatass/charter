@@ -41,7 +41,7 @@ def load(root: Path) -> dict:
     if isinstance(found, int) and found > SCHEMA:
         raise SchemaTooNew(
             f"{p} declares schema {found}, but this charter understands {SCHEMA}. "
-            f"Upgrade charter (`uv tool upgrade charter`)."
+            f"Upgrade charter: `uv tool install charter-cp --force --refresh`."
         )
     return cfg
 
