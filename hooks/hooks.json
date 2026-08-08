@@ -87,6 +87,17 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "charter workspace _autosave >/dev/null 2>&1",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

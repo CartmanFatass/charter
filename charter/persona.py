@@ -390,6 +390,14 @@ def lint(name: str) -> list[tuple[str, str]]:
         issues.append(("warn", "no vault named"))
     if not (meta.get("delegate-when") or "").strip():
         issues.append(("warn", "no delegate-when → weak auto-routing"))
+    # A frontmatter key charter neither reads nor emits reaches nothing: it is not copied
+    # into .claude/agents/<name>.md and no charter code consults it, so a typo (`modell:`,
+    # `delegate_when:`) is silently inert. Imported lazily — persona.py is the lower layer
+    # and must not import the command module at import time.
+    from .commands_persona import _AGENT_PASSTHROUGH_KEYS, _CHARTER_OWN_KEYS
+    for key in sorted(set(meta) - (set(_AGENT_PASSTHROUGH_KEYS) | set(_CHARTER_OWN_KEYS))):
+        issues.append(("warn", f"frontmatter key '{key}' is neither read by charter nor "
+                               f"emitted into the sub-agent — it does nothing (typo?)"))
     allnames = set(list_personas())
     for u in uses_of(name):
         if u not in allnames:

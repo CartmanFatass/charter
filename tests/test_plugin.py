@@ -64,31 +64,37 @@ class TestPluginManifest(unittest.TestCase):
         for entry in h["SessionStart"]:
             self.assertNotIn("matcher", entry)
 
-    def test_plugin_declares_all_ten_commands_the_control_plane_used_to_wire_by_hand(self):
+    def test_plugin_declares_every_hook_the_control_plane_used_to_wire_by_hand(self):
         """Parity check against the pre-plugin wiring, enumerated explicitly rather than
         read from a sibling control-plane checkout's .claude/settings.json: charter
         is a public repo (github.com/diazoxide/charter) whose CI and other contributors
         never have that sibling checkout, so a test that stat()s another repo's absolute
-        path would be unrunnable (or silently vacuous) everywhere but this machine. This
-        list is that repo's 10 hook entries, translated 1:1 — 5 already went through the
-        versioned `charter hook <name>` engine; this closes the other 5, which used to be
-        raw `$CLAUDE_PROJECT_DIR/bin/edm <cmd>` invocations with no charter equivalent."""
-        commands = [hook["command"] for _, hook in _flat_hooks()]
-        expected_substrings = [
-            "charter workspace _reconcile",          # SessionStart: reconcile workspace lock/pointer
-            "charter persona _gc",                    # SessionStart: prune ended-session scratch memory
-            "charter hook sessionstart --plugin-version",  # SessionStart: memory digest injection
-            "charter doctor",                          # SessionStart: preflight, message only on failure
-            "charter gl-refresh",                       # SessionStart: refresh forge state
-            "charter hook userpromptsubmit --plugin-version",
-            "charter hook pretooluse --plugin-version",
-            "charter hook posttooluse --plugin-version",
-            "charter hook posttooluse-dispatch --plugin-version",
-            "charter workspace _autosave",              # Stop: debounced auto-save
+        path would be unrunnable (or silently vacuous) everywhere but this machine.
+
+        Asserted as (event, command) pairs rather than a flat count, so the same handler
+        can legitimately appear on two events — `_autosave` runs on both `Stop` and
+        `SubagentStop`, because a dispatched sub-agent finishing fires only the latter
+        and its workspace memo would otherwise wait for the parent session to end.
+        Pairing also catches a handler that drifts onto the wrong event, which a count
+        never could."""
+        pairs = {(ev, hook["command"]) for ev, hook in _flat_hooks()}
+        expected = [
+            ("SessionStart", "charter workspace _reconcile"),   # reconcile workspace lock/pointer
+            ("SessionStart", "charter persona _gc"),             # prune ended-session scratch memory
+            ("SessionStart", "charter hook sessionstart --plugin-version"),  # memory digest injection
+            ("SessionStart", "charter doctor"),                  # preflight, message only on failure
+            ("SessionStart", "charter gl-refresh"),              # refresh forge state
+            ("UserPromptSubmit", "charter hook userpromptsubmit --plugin-version"),
+            ("PreToolUse", "charter hook pretooluse --plugin-version"),
+            ("PostToolUse", "charter hook posttooluse --plugin-version"),
+            ("PostToolUse", "charter hook posttooluse-dispatch --plugin-version"),
+            ("Stop", "charter workspace _autosave"),             # debounced auto-save
+            ("SubagentStop", "charter workspace _autosave"),     # ditto, per dispatch
         ]
-        self.assertEqual(len(commands), len(expected_substrings), commands)
-        for substr in expected_substrings:
-            self.assertEqual(sum(1 for c in commands if substr in c), 1, substr)
+        self.assertEqual(len(pairs), len(expected), sorted(pairs))
+        for event, substr in expected:
+            matches = [c for ev, c in pairs if ev == event and substr in c]
+            self.assertEqual(len(matches), 1, f"{event}: {substr} -> {matches}")
 
     def test_async_hooks_stay_async(self):
         """persona _gc and gl-refresh are network-touching background calls at session

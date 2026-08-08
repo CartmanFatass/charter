@@ -86,3 +86,36 @@ class TestGeneratedAgentForgeWordingMatchesDeclaredForges(PersonaIso):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeneratedAgentBody(unittest.TestCase):
+    """What `_render_agent` emits — the reviewer-reported gaps (#7, #8, #9)."""
+
+    def _render(self, meta, name="p"):
+        from charter.commands_persona import _render_agent
+        return _render_agent(name, meta, "# charter body\n")
+
+    def test_no_persona_name_is_hardcoded_in_the_handoff(self):
+        """#9: it used to name `devops` literally, so a control plane whose infra
+        persona is `sre` silently got no handoff line — while the sentence beside it
+        already pointed at `charter persona list`, which is always correct."""
+        body = self._render({"role": "R", "vault": "v"})
+        self.assertNotIn("devops", body)
+        self.assertIn("charter persona list", body)
+
+    def test_memory_split_is_stated_when_the_charter_sets_memory(self):
+        """#7: `memory:` gives the agent a second store. Say which is for what, or an
+        agent told to record what's durable has two plausible places and no precedence."""
+        body = self._render({"role": "R", "vault": "v", "memory": "true"}, name="qa")
+        self.assertIn(".claude/agent-memory/qa/", body)
+        self.assertIn("personas/qa/memory/", body)
+        self.assertIn("charter recall", body)
+
+    def test_no_memory_split_note_when_the_charter_does_not_set_memory(self):
+        body = self._render({"role": "R", "vault": "v"}, name="qa")
+        self.assertNotIn("agent-memory", body)
+
+    def test_passthrough_keys_are_emitted(self):
+        body = self._render({"role": "R", "vault": "v", "model": "opus", "color": "red"})
+        self.assertIn("model: opus", body)
+        self.assertIn("color: red", body)

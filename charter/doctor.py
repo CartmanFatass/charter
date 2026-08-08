@@ -289,6 +289,12 @@ def check_vaults() -> Result:
     return Result("vaults", OK, detail=f"{len(vs)} configured, all healthy")
 
 
+#: Entry count at which a memory index is worth curating. Not a cap and not a
+#: truncation point — charter injects a bounded digest, so a long index costs
+#: nothing at session start. It is a nudge toward `charter persona optimize`.
+_INDEX_LINES_WARN = 150
+
+
 def check_memory_indexes() -> Result:
     """Every memory base's MEMORY.md must agree with the files beside it.
 
@@ -320,6 +326,7 @@ def check_memory_indexes() -> Result:
 
     dangling = unindexed = 0
     worst = []
+    large = []
     for label, mem_dir in bases:
         if not mem_dir.exists():
             continue
@@ -329,13 +336,28 @@ def check_memory_indexes() -> Result:
             unindexed += len(d["unindexed"])
             worst.append(f"{label} ({len(d['dangling'])} dangling, "
                          f"{len(d['unindexed'])} unindexed)")
-    if not worst:
+        # Growth signal. An index only ever appends, so a long-lived persona's grows
+        # without bound and nothing says so — you have to already suspect you need
+        # `persona optimize`. Not truncation: charter injects a bounded digest at
+        # SessionStart, so nothing is silently dropped. Just a nudge to curate.
+        n = memstore.index_size(mem_dir)
+        if n >= _INDEX_LINES_WARN:
+            large.append(f"{label} ({n} entries)")
+    if not worst and not large:
         return Result("memory indexes", OK, detail=f"{len(bases)} base(s) consistent")
     hint = ", ".join(worst[:4]) + (", …" if len(worst) > 4 else "")
     if unindexed:
         hint += "  → charter persona optimize --all --apply  (links unindexed files)"
     if dangling:
         hint += "  → a dangling link is proposal-only: prune it, or write the memory it names"
+    if large:
+        if hint:
+            hint += "  "
+        hint += ("large: " + ", ".join(large[:4]) + (", …" if len(large) > 4 else "")
+                 + "  → charter persona optimize <name>  (curate; growth is not a defect)")
+    if not worst:
+        return Result("memory indexes", WARN,
+                      detail=f"{len(large)} large index(es)", hint=hint)
     return Result("memory indexes", WARN,
                   detail=f"{dangling} dangling, {unindexed} unindexed", hint=hint)
 

@@ -372,15 +372,45 @@ def _credential_rule() -> str:
     )
 
 
+#: Frontmatter keys `_render_agent` copies straight into the generated sub-agent.
+#: Anything a charter sets that isn't here (and isn't consumed by charter itself)
+#: reaches `.claude/agents/<name>.md` never — a typo is silently inert today, which
+#: `persona lint` now reports.
+_AGENT_PASSTHROUGH_KEYS = ("model", "color", "memory")
+
+#: Keys charter reads itself rather than emitting. Together with the passthrough set
+#: this is the full vocabulary of a persona charter's frontmatter.
+_CHARTER_OWN_KEYS = (
+    "name", "role", "vault", "extends", "uses", "delegate-when", "description",
+    "agent-description", "agent-tools", "tools", "activity",
+)
+
+
 def _render_agent(name: str, meta: dict, charter: str) -> str:
     role = meta.get("role") or name.title()
     desc = meta.get("agent-description") or meta.get("description") or _agent_description(name, meta)
     fm = [f"name: {name}", f"description: {_yaml_str(desc)}"]
     if meta.get("agent-tools"):
         fm.append(f"tools: {meta['agent-tools']}")  # narrow the toolset; omit = inherit all
-    for k in ("model", "color", "memory"):  # pass through when the charter sets them
+    for k in _AGENT_PASSTHROUGH_KEYS:  # pass through when the charter sets them
         if meta.get(k):
             fm.append(f"{k}: {meta[k]}")
+
+    # `memory:` gives the agent Claude Code's own per-agent store *in addition to*
+    # charter's. Both are useful and they are not duplicates — but an agent told to
+    # "record what's durable" then has two plausible places and no stated precedence.
+    # Say which is which, generated, so every persona gets it rather than the one
+    # whose store happened to be annotated by hand.
+    memory_note = ""
+    if meta.get("memory"):
+        memory_note = (
+            f"\n- **Two memory stores, different jobs.** `.claude/agent-memory/{name}/` is "
+            f"the generic Claude-agent memory (user / feedback / project / reference). Your "
+            f"durable domain knowledge — the team-shared, committed base — lives in "
+            f"`personas/{name}/memory/` and is reached with `charter recall`. **Search "
+            f"charter's first**; write there for anything a teammate would want, and keep "
+            f"the generic store to what isn't already in it."
+        )
 
     uses = [u.strip() for u in (meta.get("uses") or "").split(",") if u.strip() and u.strip() != name]
     uses_note = ""
@@ -395,14 +425,14 @@ def _render_agent(name: str, meta: dict, charter: str) -> str:
     # Generic capability handoff — every persona gets this, so it hands work outside its
     # role to the owning persona instead of guessing with partial credentials. Awareness,
     # not access: delegation runs the owner with *its own* vault; only `uses:` shares creds.
-    try:
-        infra = "`devops` owns production cluster/logs/kubectl access. " \
-            if ("devops" in persona.list_personas() and name != "devops") else ""
-    except Exception:
-        infra = ""
+    #
+    # Deliberately names no persona. This used to special-case a persona literally called
+    # `devops`, which silently rendered nothing for a control plane whose infra persona is
+    # `sre` or `ops` — and it sat on top of the `charter persona list` pointer below, which
+    # is generic and always correct. Derive from declared config or say nothing.
     handoff = (
         f"\n- **Outside your domain, hand off — don't guess with partial credentials.** "
-        f"{infra}Delegate to the owner via the Agent tool (`subagent_type: <persona>`; it runs "
+        f"Delegate to the owner via the Agent tool (`subagent_type: <persona>`; it runs "
         f"with *its own* vault — you never see its secrets); `charter persona list` shows who owns "
         f"what. Never `charter persona use` to switch the active persona — that's user-request-only."
     )
@@ -432,7 +462,7 @@ isolated context. Adopt the charter below as your role.
 - {_credential_rule()}
 - **Credentials** come only from this persona's vault, and are **never printed**:
   `charter persona secret --persona {name} <list|exec|cp> …` — use `exec`/`cp`, never `--reveal`.
-  Run tools through it, e.g. `… exec --file KUBECONFIG=kubeconfig -- kubectl -n <ns> get pods`{uses_note}{handoff}
+  Run tools through it, e.g. `… exec --file KUBECONFIG=kubeconfig -- kubectl -n <ns> get pods`{uses_note}{memory_note}{handoff}
 - Follow the control plane's conventions (see CLAUDE.md); report results concisely to the caller.
 {mem}
 """

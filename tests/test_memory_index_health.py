@@ -103,5 +103,35 @@ class DoctorCheck(unittest.TestCase):
             self.assertRegex(r.detail or "", r"\d+ base\(s\)")
 
 
+
+class IndexGrowthSignal(unittest.TestCase):
+    """#2: an index only ever appends, and nothing said when it got long.
+
+    Not a truncation guard — charter injects a bounded digest at SessionStart, so a
+    long index costs nothing there. This is the nudge toward `persona optimize` that
+    otherwise required you to already suspect you needed it.
+    """
+
+    def setUp(self) -> None:
+        self._td = TemporaryDirectory()
+        self.d = Path(self._td.name)
+        self.addCleanup(self._td.cleanup)
+
+    def test_index_size_counts_memories_not_index_lines(self):
+        """Files are the truth: a base mid-drift must not report a number that
+        disagrees with index_drift()."""
+        for i in range(3):
+            (self.d / f"m{i}.md").write_text(f"# m{i}\n\nx\n")
+        (self.d / "MEMORY.md").write_text("# Memory Index\n\n- [a](m0.md)\n")  # 1 of 3 listed
+        self.assertEqual(memstore.index_size(self.d), 3)
+
+    def test_index_size_is_zero_for_an_absent_base(self):
+        self.assertEqual(memstore.index_size(self.d / "nope"), 0)
+
+    def test_threshold_is_a_nudge_not_a_cap(self):
+        """If this ever becomes a hard limit, the docstring above is wrong."""
+        self.assertIsInstance(doctor._INDEX_LINES_WARN, int)
+        self.assertGreater(doctor._INDEX_LINES_WARN, 0)
+
 if __name__ == "__main__":
     unittest.main()

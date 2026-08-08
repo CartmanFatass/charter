@@ -129,6 +129,15 @@ def index_drift(mem_dir: Path) -> dict[str, list[str]]:
     return {"dangling": sorted(listed - actual), "unindexed": sorted(actual - listed)}
 
 
+def index_size(mem_dir: Path) -> int:
+    """How many memories a base holds — the growth signal `doctor` reports.
+
+    Counts files, not index lines: the files are the truth, and a base mid-drift
+    would otherwise report a number that disagrees with `index_drift`.
+    """
+    return len(files(mem_dir))
+
+
 def entries(mem_dir: Path) -> list[tuple[Path, str, str]]:
     """(path, title, text) per memory; title = first '# ' line, else the file stem."""
     out = []

@@ -54,3 +54,24 @@ class SkillRefLintCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnknownFrontmatterKey(unittest.TestCase):
+    """#8: a charter key charter neither reads nor emits reaches nothing.
+
+    `modell:` or `delegate_when:` is silently inert today — not copied into the
+    generated sub-agent, not consulted by any charter code. Lint says so.
+    """
+
+    def test_the_two_key_sets_cover_every_key_a_real_charter_uses(self):
+        """A false positive here would train people to ignore the lint."""
+        from charter.commands_persona import _AGENT_PASSTHROUGH_KEYS, _CHARTER_OWN_KEYS
+        known = set(_AGENT_PASSTHROUGH_KEYS) | set(_CHARTER_OWN_KEYS)
+        for key in ("name", "role", "vault", "extends", "uses", "delegate-when",
+                    "tools", "agent-tools", "model", "color", "memory", "activity"):
+            self.assertIn(key, known, f"real charters use {key!r}")
+
+    def test_the_two_sets_do_not_overlap(self):
+        """A key in both would mean charter reads it AND emits it — say which."""
+        from charter.commands_persona import _AGENT_PASSTHROUGH_KEYS, _CHARTER_OWN_KEYS
+        self.assertEqual(set(_AGENT_PASSTHROUGH_KEYS) & set(_CHARTER_OWN_KEYS), set())
