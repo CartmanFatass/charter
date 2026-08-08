@@ -610,6 +610,12 @@ def cmd_workspace_fork(args) -> int:
     return 0
 
 
+#: Baseline components a LIVE workspace actually shares (see the managed block in
+#: .gitignore that `workspace live` writes). A workspace's refs/ and its structure
+#: marker stay local, so restoring only those gives `save` nothing to commit.
+_LIVE_SHARED_COMPONENTS = {"workspace.md", "memory/MEMORY.md"}
+
+
 def cmd_workspace_reinit(args) -> int:
     """Bring a workspace's on-disk structure up to the current layout — create any missing
     baseline files (workspace.md charter, memory/, refs/) and stamp the structure version.
@@ -636,7 +642,11 @@ def cmd_workspace_reinit(args) -> int:
         what = (", ".join(before["missing"]) if before["missing"]
                 else f"structure v{before['version']} → v{before['target']}")
         util.ok(f"Reinitialized '{n}' → added {what}.")
-        if workspace.is_live(n):
+        # Only advise `save` when something LIVE actually shares was restored. A
+        # workspace's refs/ and its structure marker are gitignored, so healing
+        # only those leaves nothing to commit and the advice sends you to a
+        # command that prints "Nothing to save".
+        if workspace.is_live(n) and set(before["missing"]) & _LIVE_SHARED_COMPONENTS:
             util.info(f"  '{n}' is LIVE — commit the restored files: charter workspace save {n}")
     if healed == 0:
         util.ok(f"Up to date (structure v{workspace.STRUCTURE_VERSION}) — nothing to do.")

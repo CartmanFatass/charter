@@ -18,6 +18,36 @@ class StructureCase(PersonaIso):
         workspace.ensure(name)
         workspace.scaffold(name)
 
+    # --- the LIVE "commit the restored files" hint ---
+    def test_reinit_does_not_advise_save_when_only_local_files_were_restored(self):
+        """refs/ is gitignored for a workspace, so `save` would print "Nothing to save".
+
+        Reported from a real session: reinit healed a LIVE workspace by restoring
+        refs/README.md and told the user to run `charter workspace save`, which
+        then had nothing to do.
+        """
+        import io
+        from contextlib import redirect_stderr
+        self._fresh("w")
+        workspace.set_live("w", True)
+        (workspace.refs_dir("w") / "README.md").unlink()
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            cw.cmd_workspace_reinit(SimpleNamespace(name="w", all=False))
+        self.assertNotIn("charter workspace save", buf.getvalue())
+
+    def test_reinit_does_advise_save_when_a_shared_file_was_restored(self):
+        """workspace.md IS in the LIVE share set — that one is worth committing."""
+        import io
+        from contextlib import redirect_stderr
+        self._fresh("w")
+        workspace.set_live("w", True)
+        workspace.charter_file("w").unlink()
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            cw.cmd_workspace_reinit(SimpleNamespace(name="w", all=False))
+        self.assertIn("charter workspace save", buf.getvalue())
+
     # --- pre-rename marker migration ---
     def test_legacy_marker_is_migrated_not_treated_as_v0(self):
         """The marker was renamed .edm-structure -> .charter-structure.
