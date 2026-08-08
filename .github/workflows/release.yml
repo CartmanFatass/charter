@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/charter
+      url: https://pypi.org/p/charter-cp
     permissions:
       id-token: write        # REQUIRED: mints the OIDC token PyPI verifies
     steps:
