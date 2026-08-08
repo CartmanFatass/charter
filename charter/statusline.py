@@ -795,7 +795,19 @@ def render(payload: dict | None = None) -> str:
         # different places; a count now always sits next to what it counts.
         shared_badge = _mem_badge(_mem_count("_", shared=True),
                                   _mem_count("_", shared=True, ephemeral=True, session=sid))
-        left_head = f"{_CYAN}◫{_R} {_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}"
+        # No decorative glyph here, deliberately. This cell sits in the width-critical
+        # LEFT column: everything in it is padded to `_LEFT_W` so the right column lines
+        # up, and that padding is computed from `tui.width`, which trusts the Unicode
+        # tables. A font that draws a character wider than its table says makes THAT ROW
+        # — and only that row — overhang, so its right-hand cell starts one column late.
+        #
+        # It shipped exactly that way: a `◫` (U+25EB) here put the personas header one
+        # space right of every chip beneath it. The glyphs already in this column
+        # (`├ ─ │ ⑂ ✓ ✗ ·`) are proven safe by the fact that those rows line up with each
+        # other; a newly-introduced one is proven by nothing. Right-column glyphs are
+        # free — they sit past the alignment point — which is why `◈` on the personas
+        # header is fine and this is not.
+        left_head = f"{_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}"
         header = f"{_MAGENTA}◈{_R} {_DIM}personas{_R} {len(chips)}" + (
             f"{_DIM} · vaults{_R} {nv}" if nv else "") + (
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")

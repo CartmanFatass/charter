@@ -67,7 +67,31 @@ class Zones(PersonaIso):
 
     def test_repos_count_heads_the_repo_column(self):
         head = next(ln for ln in _lines() if "repos" in ln)
-        self.assertTrue(head.lstrip().startswith("◫"), head)
+        self.assertTrue(head.startswith("repos"), head)
+
+    def test_the_left_column_introduces_no_unproven_glyph(self):
+        """The left column is width-critical: it is padded to `_LEFT_W` using
+        `tui.width`, so a font that draws any character wider than the Unicode tables
+        claim makes that row overhang and its right-hand cell start late.
+
+        A `◫` on the repo header did exactly that — the personas header rendered one
+        space right of every chip below it. The rule that prevents a repeat: this column
+        may only use glyphs that ALREADY appear in it (proven safe by the fact that its
+        rows line up with each other). Decoration belongs in the right column, past the
+        alignment point.
+        """
+        allowed = set("├└─│↳⑂✓✗●·⚡⛊✎◌⚠")     # already load-bearing in this column
+        for ln in _lines(_USAGE):
+            sep = ln.find("│", 40)      # the column separator, past the tree glyphs
+            if sep < 0:
+                continue                # full-width row (identity, alerts, strip):
+                                        # nothing to its right, so width can't shear it
+            for ch in ln[:sep]:
+                if ord(ch) < 128 or ch.isspace():
+                    continue
+                self.assertIn(ch, allowed,
+                              f"unproven glyph {ch!r} (U+{ord(ch):04X}) in the "
+                              f"width-critical left column: {ln!r}")
 
     def test_personas_and_vaults_count_heads_the_persona_column(self):
         head = next(ln for ln in _lines() if "personas" in ln)
