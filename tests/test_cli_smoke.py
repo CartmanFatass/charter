@@ -29,8 +29,8 @@ _CRASH_MARKERS = ("Traceback (most recent call last):", "ModuleNotFoundError", "
 
 class CliSmokeTest(unittest.TestCase):
     """Runs `python3 -m charter ...` as a real subprocess, isolated from the
-    developer's own ~/.edm and the umbrella's own inventory/vaults via a throwaway
-    EDM_HOME, so a doctor run here can't read or write real secrets/state."""
+    developer's own ~/.charter and the umbrella's own inventory/vaults via a throwaway
+    CHARTER_HOME, so a doctor run here can't read or write real secrets/state."""
 
     def setUp(self) -> None:
         import os
@@ -38,7 +38,7 @@ class CliSmokeTest(unittest.TestCase):
 
         self.tmp = tempfile.mkdtemp(prefix="charter-smoke-")
         self.env = dict(os.environ)
-        self.env["EDM_HOME"] = str(Path(self.tmp) / ".edm")
+        self.env["CHARTER_HOME"] = str(Path(self.tmp) / ".charter")
         # Force non-tty color codes off / deterministic output.
         self.env.pop("FORCE_COLOR", None)
 

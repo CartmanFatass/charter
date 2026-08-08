@@ -20,11 +20,11 @@ class TestLeakGuard(PersonaIso):  # A
         self.assertEqual(_decision(r), "deny")
 
     def test_cat_vault_denied(self):
-        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .edm/vaults/dev.json"}})
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .charter/vaults/dev.json"}})
         self.assertEqual(_decision(r), "deny")
 
     def test_ls_vault_is_fine(self):
-        self.assertIsNone(run_hook(hooks.pretooluse, {"tool_input": {"command": "ls .edm/vaults/"}}))
+        self.assertIsNone(run_hook(hooks.pretooluse, {"tool_input": {"command": "ls .charter/vaults/"}}))
 
 
 class TestCloneGuard(PersonaIso):  # B — a nudge ('ask'), not a hard block
@@ -54,7 +54,7 @@ class TestCloneGuard(PersonaIso):  # B — a nudge ('ask'), not a hard block
                                    {"tool_input": {"command": "git commit -q -F m.txt"}, "cwd": str(self.tmp)}))
 
     def test_secret_leak_still_hard_denied(self):  # A stays a hard block
-        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .edm/vaults/dev.json"}})
+        r = run_hook(hooks.pretooluse, {"tool_input": {"command": "cat .charter/vaults/dev.json"}})
         self.assertEqual(_decision(r), "deny")
 
     def test_add_personas_not_denied(self):
@@ -65,13 +65,13 @@ class TestCloneGuard(PersonaIso):  # B — a nudge ('ask'), not a hard block
 class TestGateFallthrough(PersonaIso):
     def test_declared_tool_allowed(self):
         self.make_persona("dev", role="Dev", vault="dev", tools="kubectl")
-        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+        with mock.patch.dict(os.environ, {"CHARTER_PERSONA": "dev"}):
             r = run_hook(hooks.pretooluse, {"tool_input": {"command": "kubectl get pods"}})
         self.assertEqual(_decision(r), "allow")
 
     def test_undeclared_tool_silent(self):
         self.make_persona("dev", role="Dev", vault="dev", tools="kubectl")
-        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+        with mock.patch.dict(os.environ, {"CHARTER_PERSONA": "dev"}):
             self.assertIsNone(run_hook(hooks.pretooluse, {"tool_input": {"command": "helm list"}}))
 
 
@@ -79,7 +79,7 @@ class TestSessionStart(PersonaIso):  # C
     def test_injects_active_persona_memory(self):
         self.make_persona("dev", role="Dev", vault="dev")
         persona.remember("dev", "fact one", title="one")
-        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev"}):
+        with mock.patch.dict(os.environ, {"CHARTER_PERSONA": "dev"}):
             r = run_hook(hooks.sessionstart, {"session_id": "t"})
         ctx = _context(r)
         self.assertIn("dev", ctx)
@@ -87,18 +87,18 @@ class TestSessionStart(PersonaIso):  # C
 
     def test_role_injected_even_without_memory(self):
         # A persona's ROLE (identity + remit) is injected even with no memory, so the
-        # default persona reliably shapes the session. ($EDM_WORKSPACE suppresses the
+        # default persona reliably shapes the session. ($CHARTER_WORKSPACE suppresses the
         # separate workspace nudge so this isolates the persona branch.)
         self.make_persona("dev", role="Dev", vault="dev", **{"delegate-when": "dev tasks"})
-        with mock.patch.dict(os.environ, {"EDM_PERSONA": "dev", "EDM_WORKSPACE": "default"}):
+        with mock.patch.dict(os.environ, {"CHARTER_PERSONA": "dev", "CHARTER_WORKSPACE": "default"}):
             ctx = _context(run_hook(hooks.sessionstart, {"session_id": "t"}))
         self.assertIn("dev", ctx)
         self.assertIn("acting as", ctx)
         self.assertIn("dev tasks", ctx)  # the remit (delegate-when) is surfaced
 
     def test_no_active_persona_is_silent(self):
-        with mock.patch.dict(os.environ, {"EDM_WORKSPACE": "default"}, clear=False):
-            os.environ.pop("EDM_PERSONA", None)
+        with mock.patch.dict(os.environ, {"CHARTER_WORKSPACE": "default"}, clear=False):
+            os.environ.pop("CHARTER_PERSONA", None)
             self.assertIsNone(run_hook(hooks.sessionstart, {"session_id": "t"}))
 
 

@@ -7,10 +7,10 @@ Different parallel tasks use different workspaces and must never be mixed.
 Which workspace a command acts on is resolved by precedence:
 
 1. an explicit ``--workspace`` flag,
-2. the ``$EDM_WORKSPACE`` env var (set at session launch → hard per-session
+2. the ``$CHARTER_WORKSPACE`` env var (set at session launch → hard per-session
    isolation for parallel agents),
-3. the **per-Claude-session** pointer (``.edm/sessions/<id>.workspace``),
-4. the **per-terminal** pointer (``.edm/terminals/<id>.workspace``) — a terminal
+3. the **per-Claude-session** pointer (``.charter/sessions/<id>.workspace``),
+4. the **per-terminal** pointer (``.charter/terminals/<id>.workspace``) — a terminal
    pane survives closing/reopening Claude, so a pane keeps its own workspace,
 5. otherwise ``default``.
 
@@ -117,12 +117,12 @@ def workspace_dir(name: str) -> Path:
 
 
 def resolve(explicit: str | None = None, session_id: str | None = None) -> str:
-    """Active workspace by precedence: ``--workspace`` → ``$EDM_WORKSPACE`` →
+    """Active workspace by precedence: ``--workspace`` → ``$CHARTER_WORKSPACE`` →
     per-session pointer (Claude session id) → per-terminal pointer (survives reopen)
     → ``default``. No shared/global pointer, so one pane never affects another."""
     if explicit:
         return explicit
-    env = os.environ.get("EDM_WORKSPACE")
+    env = os.environ.get("CHARTER_WORKSPACE")
     if env:
         return env.strip()
     sid = _session_id(session_id)
@@ -142,8 +142,8 @@ def source(explicit: str | None = None, session_id: str | None = None) -> str:
     """Human label for where the active workspace came from (for display)."""
     if explicit:
         return "--workspace"
-    if os.environ.get("EDM_WORKSPACE"):
-        return "$EDM_WORKSPACE"
+    if os.environ.get("CHARTER_WORKSPACE"):
+        return "$CHARTER_WORKSPACE"
     sid = _session_id(session_id)
     if sid and _read(_session_file(sid)):
         return "session"
@@ -199,7 +199,7 @@ def set_active(name: str, session_id: str | None = None, force: bool = False) ->
     locked = is_locked(session_id)
     if locked and locked != name and not force:
         return "locked"
-    config.EDM_HOME.mkdir(parents=True, exist_ok=True)
+    config.STATE_DIR.mkdir(parents=True, exist_ok=True)
     scope = "none"
     tid = _terminal_id()
     if tid:
@@ -616,7 +616,7 @@ def read_vision(name: str) -> str:
 # --------------------------------------------------------------------------- #
 # workspace STRUCTURE VERSION — the durable upgrade anchor. A workspace created  #
 # by an older version of charter can lack files a newer one expects (workspace.md, #
-# refs/, …). We stamp a tiny local marker (.edm-structure) with the layout       #
+# refs/, …). We stamp a tiny local marker (.charter-structure) with the layout   #
 # version scaffold() produces; a workspace whose marker is missing/older, or that #
 # is missing a baseline file, is "stale" and flagged (status line) until          #
 # `charter workspace reinit` heals it. To ship a new structural element in future:    #
@@ -626,7 +626,7 @@ def read_vision(name: str) -> str:
 # --------------------------------------------------------------------------- #
 
 STRUCTURE_VERSION = 2  # v2: memory is a per-file DB (MEMORY.md index), not a lone notes.md
-_STRUCTURE_MARKER = ".edm-structure"
+_STRUCTURE_MARKER = ".charter-structure"
 
 
 def _structure_marker(name: str) -> Path:

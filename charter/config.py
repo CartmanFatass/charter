@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from . import root as _root
@@ -56,32 +57,103 @@ INVENTORY = ROOT / "inventory" / "repos.json"
 #: Generated documentation.
 DOCS_DIR = ROOT / "docs"
 
+# --------------------------------------------------------------------------- #
+# state directory — charter's per-developer home (vault registry, plain-file    #
+# vaults, session/terminal pointers, persona runtime state). Gitignored, never  #
+# committed.                                                                    #
+#                                                                                #
+# Historical note: charter was extracted from a tool formerly called `edm`,     #
+# whose state directory was `.edm/` (override `$EDM_HOME`). The block below      #
+# migrates an existing `.edm/` to `.charter/` transparently, once — the first    #
+# time this control plane is used with the renamed tool — and warns loudly if   #
+# any of the old `edm`-era env vars are still set rather than silently          #
+# ignoring them (which would otherwise look like vaults had vanished).          #
+# --------------------------------------------------------------------------- #
+_LEGACY_ENV_VARS = (("EDM_HOME", "CHARTER_HOME"), ("EDM_WORKSPACE", "CHARTER_WORKSPACE"),
+                    ("EDM_PERSONA", "CHARTER_PERSONA"))
+
+
+def _warn_legacy_env_vars() -> None:
+    """Print a loud stderr warning for each old `edm`-era env var that's still set —
+    its value is never honored (only the new name is), so silence here would look
+    like state (vaults!) vanished rather than simply needing a renamed env var."""
+    for legacy, new in _LEGACY_ENV_VARS:
+        if os.environ.get(legacy):
+            print(f"charter: ${legacy} is no longer used (charter was renamed from `edm`) — "
+                  f"set ${new} instead. Ignoring ${legacy}.", file=sys.stderr)
+
+
+_warn_legacy_env_vars()
+
+
+def _migrate_state_dir(root: Path) -> Path:
+    """Resolve the state directory, migrating a legacy ``.edm/`` to ``.charter/`` once.
+
+    - ``$CHARTER_HOME`` set → use it verbatim, no migration (the user chose a path).
+    - Neither ``.charter/`` nor ``.edm/`` exists → the new default; nothing to migrate.
+    - ``.charter/`` doesn't exist, ``.edm/`` does → ``os.rename`` it to ``.charter/``
+      in place (atomic on the same filesystem, preserves permissions including 0600
+      vault files) and print a one-line notice to stderr.
+    - Both exist → never merge; warn on stderr naming both paths and keep using
+      ``.charter/``.
+    - The rename fails (e.g. cross-device) → don't crash; print an actionable error
+      naming both paths and fall back to the legacy directory so vault access is
+      never silently lost.
+    """
+    override = os.environ.get("CHARTER_HOME")
+    if override:
+        return Path(override)
+
+    new_dir = root / ".charter"
+    legacy_dir = root / ".edm"
+
+    if new_dir.exists():
+        if legacy_dir.exists():
+            print(f"charter: both {new_dir} and {legacy_dir} exist — using {new_dir} and "
+                  f"leaving {legacy_dir} untouched (never auto-merged). Remove the old "
+                  "directory once you've confirmed nothing is missing.", file=sys.stderr)
+        return new_dir
+
+    if legacy_dir.exists():
+        try:
+            os.rename(legacy_dir, new_dir)
+        except OSError as e:
+            print(f"charter: could not migrate {legacy_dir} to {new_dir} ({e}) — "
+                  f"continuing to use {legacy_dir}. Move it to {new_dir} manually, or set "
+                  "$CHARTER_HOME to choose a location.", file=sys.stderr)
+            return legacy_dir
+        print(f"charter: migrated state directory {legacy_dir} -> {new_dir}", file=sys.stderr)
+        return new_dir
+
+    return new_dir
+
+
 #: Per-developer secrets home — vault registry + plain-file vaults. Gitignored,
-#: never committed. Override with ``$EDM_HOME`` (e.g. to share across clones).
-EDM_HOME = Path(os.environ.get("EDM_HOME") or (ROOT / ".edm"))
+#: never committed. Override with ``$CHARTER_HOME`` (e.g. to share across clones).
+STATE_DIR = _migrate_state_dir(ROOT)
 
 #: Registry of configured vaults (name -> provider + config + persona).
-VAULTS_REGISTRY = EDM_HOME / "vaults.json"
+VAULTS_REGISTRY = STATE_DIR / "vaults.json"
 
 #: Default on-disk location for plain-file vaults created without an explicit path.
 #: Note: secrets are intentionally **cross-workspace** (global to the developer),
-#: so vaults live under EDM_HOME, not inside any workspace.
-VAULTS_DIR = EDM_HOME / "vaults"
+#: so vaults live under STATE_DIR, not inside any workspace.
+VAULTS_DIR = STATE_DIR / "vaults"
 
 #: Legacy shared active-workspace pointer. No longer read by ``resolve`` (it caused
 #: one task's selection to leak into every other session); kept only so old files
 #: don't error. Selection now lives per-terminal + per-session (below).
-ACTIVE_WORKSPACE_FILE = EDM_HOME / "active-workspace"
+ACTIVE_WORKSPACE_FILE = STATE_DIR / "active-workspace"
 
 #: Per-Claude-session active-workspace pointers, keyed by session id, so parallel
 #: sessions in one clone can each select a different workspace.
-SESSIONS_DIR = EDM_HOME / "sessions"
+SESSIONS_DIR = STATE_DIR / "sessions"
 
 #: Per-terminal active-workspace pointers, keyed by a stable terminal id
 #: (``$TERM_SESSION_ID``/``$WINDOWID``/``$TMUX_PANE``/tty). Unlike the Claude session
 #: id, a terminal pane survives closing and reopening Claude, so a pane keeps its own
 #: workspace across restarts — without leaking into other panes.
-TERMINALS_DIR = EDM_HOME / "terminals"
+TERMINALS_DIR = STATE_DIR / "terminals"
 
 #: Persona definitions — **committed** and shared with the team (unlike vaults).
 #: A persona is a directory ``personas/<name>/`` holding ``persona.md`` (the
@@ -94,10 +166,10 @@ PERSONAS_DIR = ROOT / "personas"
 SHARED_PERSONA = "_shared"
 
 #: Per-developer persona runtime state — **ephemeral** memory (session-scoped
-#: scratch, auto-pruned) and the local activity log. Gitignored (under EDM_HOME),
+#: scratch, auto-pruned) and the local activity log. Gitignored (under STATE_DIR),
 #: never committed; this is the counterpart to the committed ``personas/*/memory``.
-PERSONA_STATE_DIR = EDM_HOME / "persona-state"
+PERSONA_STATE_DIR = STATE_DIR / "persona-state"
 
 #: Local pointer to the active persona (set by ``charter persona use``). Overridden
-#: by ``$EDM_PERSONA`` and by a command's ``--persona``. Gitignored (in EDM_HOME).
-ACTIVE_PERSONA_FILE = EDM_HOME / "active-persona"
+#: by ``$CHARTER_PERSONA`` and by a command's ``--persona``. Gitignored (in STATE_DIR).
+ACTIVE_PERSONA_FILE = STATE_DIR / "active-persona"

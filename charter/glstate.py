@@ -28,11 +28,11 @@ _EMPTY = {"change": None, "ci": None, "sigil": ""}
 
 
 def _cache_file() -> Path:
-    return config.EDM_HOME / "cache" / "glstate.json"
+    return config.STATE_DIR / "cache" / "glstate.json"
 
 
 def _lock_file() -> Path:
-    return config.EDM_HOME / "cache" / "glstate.refreshing"
+    return config.STATE_DIR / "cache" / "glstate.refreshing"
 
 
 def load() -> dict:

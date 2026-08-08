@@ -8,7 +8,7 @@ from pathlib import Path
 
 from charter import config, persona, commands_persona
 
-_KEYS = ("ROOT", "PERSONAS_DIR", "EDM_HOME", "PERSONA_STATE_DIR", "ACTIVE_PERSONA_FILE")
+_KEYS = ("ROOT", "PERSONAS_DIR", "STATE_DIR", "PERSONA_STATE_DIR", "ACTIVE_PERSONA_FILE")
 
 
 def _git(root, *a):
@@ -31,9 +31,9 @@ class TestMemorySync(unittest.TestCase):
         self._orig = {k: getattr(config, k) for k in _KEYS}
         config.ROOT = self.tmp
         config.PERSONAS_DIR = self.tmp / "personas"
-        config.EDM_HOME = self.tmp / ".edm"
-        config.PERSONA_STATE_DIR = config.EDM_HOME / "persona-state"
-        config.ACTIVE_PERSONA_FILE = config.EDM_HOME / "active-persona"
+        config.STATE_DIR = self.tmp / ".charter"
+        config.PERSONA_STATE_DIR = config.STATE_DIR / "persona-state"
+        config.ACTIVE_PERSONA_FILE = config.STATE_DIR / "active-persona"
         d = config.PERSONAS_DIR / "qa"
         d.mkdir(parents=True)
         (d / "persona.md").write_text("---\nname: qa\nrole: QA\nvault: qa\n---\n\n# QA\n")

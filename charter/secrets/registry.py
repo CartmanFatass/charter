@@ -1,6 +1,6 @@
 """The vault registry: which vaults exist, their provider + config + persona.
 
-Persisted at ``.edm/vaults.json`` (0600, gitignored). This file may reference
+Persisted at ``.charter/vaults.json`` (0600, gitignored). This file may reference
 provider config such as file paths or token locations, so it is treated as
 sensitive and never committed.
 """
@@ -35,7 +35,7 @@ def load_registry() -> dict:
 
 
 def save_registry(doc: dict) -> None:
-    config.EDM_HOME.mkdir(parents=True, exist_ok=True)
+    config.STATE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(config.VAULTS_REGISTRY), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(doc, f, indent=2, ensure_ascii=False)

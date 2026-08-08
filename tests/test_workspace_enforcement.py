@@ -63,9 +63,9 @@ class TestAutosaveGating(unittest.TestCase):
         from pathlib import Path
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-autosave-"))
         self._orig = {k: getattr(config, k) for k in
-                      ("ROOT", "EDM_HOME", "WORKSPACES_DIR", "MEMORY_SHARE")}
+                      ("ROOT", "STATE_DIR", "WORKSPACES_DIR", "MEMORY_SHARE")}
         config.ROOT = self.tmp
-        config.EDM_HOME = self.tmp / ".edm"
+        config.STATE_DIR = self.tmp / ".charter"
         config.WORKSPACES_DIR = self.tmp / "workspaces"
         # a workspace with a memory file so _ws_meta_paths is non-empty
         (config.WORKSPACES_DIR / "default" / "memory").mkdir(parents=True)
@@ -105,7 +105,7 @@ class TestAutosaveGating(unittest.TestCase):
         popen.assert_not_called()
 
     def test_debounce_skips_recent(self):
-        marker = config.EDM_HOME / "ws-autosave" / "default"
+        marker = config.STATE_DIR / "ws-autosave" / "default"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("now")            # fresh marker → within debounce window
         cp, popen = self._run(pending=True)

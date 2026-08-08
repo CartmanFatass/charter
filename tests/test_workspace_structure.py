@@ -1,6 +1,6 @@
-"""Workspace structure versioning: a marker (.edm-structure) anchors the current layout,
+"""Workspace structure versioning: a marker (.charter-structure) anchors the current layout,
 so a workspace from an older umbrella (missing files or an old marker) is detected as stale
-and healed idempotently by `edm workspace reinit`. This is the durable upgrade path for any
+and healed idempotently by `charter workspace reinit`. This is the durable upgrade path for any
 future structural addition — bump STRUCTURE_VERSION + create it in scaffold()."""
 
 from __future__ import annotations

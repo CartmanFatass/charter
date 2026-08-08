@@ -100,9 +100,9 @@ class TestCommitDispatchPosture(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-dispatch-commit-"))
-        self._orig = {k: getattr(config, k) for k in ("ROOT", "EDM_HOME", "MEMORY_SHARE")}
+        self._orig = {k: getattr(config, k) for k in ("ROOT", "STATE_DIR", "MEMORY_SHARE")}
         config.ROOT = self.tmp
-        config.EDM_HOME = self.tmp / ".edm"
+        config.STATE_DIR = self.tmp / ".charter"
         self.path = self.tmp / "personas" / "_dispatch" / "log.jsonl"
         self.path.parent.mkdir(parents=True)
         self.path.write_text('{"ts": "x", "agent": "devops"}\n')
@@ -127,9 +127,9 @@ class TestCommitDispatchPosture(unittest.TestCase):
         flock) had already leaked under `local` — this pins the return to before that."""
         cp = self._run("local")
         cp.assert_not_called()
-        self.assertFalse((config.EDM_HOME / "dispatch-commit.lock").exists())
-        self.assertFalse(config.EDM_HOME.exists(),
-                         "local must not even create EDM_HOME's dispatch-commit.lock parent")
+        self.assertFalse((config.STATE_DIR / "dispatch-commit.lock").exists())
+        self.assertFalse(config.STATE_DIR.exists(),
+                         "local must not even create STATE_DIR's dispatch-commit.lock parent")
 
     def test_commit_records_but_does_not_push(self):
         cp = self._run("commit")
@@ -151,9 +151,9 @@ class TestCommitDispatchPosture(unittest.TestCase):
         sibling path, which degrade gracefully)."""
         cp = self._run("puhs")
         cp.assert_not_called()
-        self.assertFalse((config.EDM_HOME / "dispatch-commit.lock").exists())
-        self.assertFalse(config.EDM_HOME.exists(),
-                         "an unrecognised posture must not even create EDM_HOME's lock parent")
+        self.assertFalse((config.STATE_DIR / "dispatch-commit.lock").exists())
+        self.assertFalse(config.STATE_DIR.exists(),
+                         "an unrecognised posture must not even create STATE_DIR's lock parent")
 
 
 if __name__ == "__main__":

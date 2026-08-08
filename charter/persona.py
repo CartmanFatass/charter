@@ -8,7 +8,7 @@ imitates. It lives in a **committed** directory ``personas/<name>/``:
   shared with the team): a ``MEMORY.md`` index plus one file per durable fact.
 - ``refs/``      — curated docs / links / snippets for the role (committed).
 
-Two more stores live **per-developer** under ``.edm/persona-state/`` (gitignored):
+Two more stores live **per-developer** under ``.charter/persona-state/`` (gitignored):
 
 - **ephemeral** memory — session-scoped scratch the persona can jot down and that
   is deleted after the session (``ephemeral/<session>/<name>/``), and
@@ -18,7 +18,7 @@ So a persona has a 2×2 memory: *own vs shared* × *persistent vs ephemeral*. Th
 persona decides which quadrant a note belongs in (see :func:`remember`).
 
 The active persona is resolved by precedence, mirroring workspaces:
-``--persona`` flag → ``$EDM_PERSONA`` env → ``.edm/active-persona`` file → none.
+``--persona`` flag → ``$CHARTER_PERSONA`` env → ``.charter/active-persona`` file → none.
 
 The legacy flat layout ``personas/<name>.md`` still resolves for read, so old
 checkouts keep working until migrated (``charter persona migrate``).
@@ -222,7 +222,7 @@ def resolve(name: str) -> dict | None:
 # --------------------------------------------------------------------------- #
 def default_persona() -> str | None:
     """The committed, team-wide default persona (``personas/.default``) — adopted when
-    nothing else is selected. Shared/versioned (unlike the local ``.edm/active-persona``);
+    nothing else is selected. Shared/versioned (unlike the local ``.charter/active-persona``);
     ignored if it names a persona that no longer exists."""
     try:
         val = (config.PERSONAS_DIR / ".default").read_text().strip()
@@ -232,11 +232,11 @@ def default_persona() -> str | None:
 
 
 def resolve_active(explicit: str | None = None) -> str | None:
-    """Active persona by precedence: ``--persona`` → ``$EDM_PERSONA`` → local
-    ``.edm/active-persona`` (``charter persona use``) → committed ``personas/.default`` → none."""
+    """Active persona by precedence: ``--persona`` → ``$CHARTER_PERSONA`` → local
+    ``.charter/active-persona`` (``charter persona use``) → committed ``personas/.default`` → none."""
     if explicit:
         return explicit
-    env = os.environ.get("EDM_PERSONA")
+    env = os.environ.get("CHARTER_PERSONA")
     if env:
         return env.strip()
     f = config.ACTIVE_PERSONA_FILE
@@ -250,8 +250,8 @@ def resolve_active(explicit: str | None = None) -> str | None:
 def source(explicit: str | None = None) -> str:
     if explicit:
         return "--persona"
-    if os.environ.get("EDM_PERSONA"):
-        return "$EDM_PERSONA"
+    if os.environ.get("CHARTER_PERSONA"):
+        return "$CHARTER_PERSONA"
     f = config.ACTIVE_PERSONA_FILE
     if f.exists() and f.read_text().strip():
         return "active-file"
@@ -261,7 +261,7 @@ def source(explicit: str | None = None) -> str:
 
 
 def set_active(name: str) -> None:
-    config.EDM_HOME.mkdir(parents=True, exist_ok=True)
+    config.STATE_DIR.mkdir(parents=True, exist_ok=True)
     config.ACTIVE_PERSONA_FILE.write_text((name or "") + "\n")
     try:
         from . import trace

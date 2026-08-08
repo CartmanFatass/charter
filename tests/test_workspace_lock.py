@@ -1,9 +1,9 @@
 """The per-session workspace lock: once a session confirms a workspace, it can't be
 switched mid-session (unless forced), and SessionStart nudges the agent to confirm one.
 
-The lock is keyed by the Claude session id and stored at ``.edm/sessions/<sid>.lock``.
-These paths are import-time-derived from ``EDM_HOME``, so the test repoints
-``EDM_HOME``/``SESSIONS_DIR``/``TERMINALS_DIR``/``WORKSPACES_DIR`` at a tmp dir and pins
+The lock is keyed by the Claude session id and stored at ``.charter/sessions/<sid>.lock``.
+These paths are import-time-derived from ``STATE_DIR``, so the test repoints
+``STATE_DIR``/``SESSIONS_DIR``/``TERMINALS_DIR``/``WORKSPACES_DIR`` at a tmp dir and pins
 ``$CLAUDE_CODE_SESSION_ID`` so ``set_active`` sees a stable session.
 """
 
@@ -29,17 +29,17 @@ class WorkspaceLockBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-wslock-"))
         self._orig = {k: getattr(config, k)
-                      for k in ("ROOT", "EDM_HOME", "SESSIONS_DIR", "TERMINALS_DIR", "WORKSPACES_DIR")}
+                      for k in ("ROOT", "STATE_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "WORKSPACES_DIR")}
         config.ROOT = self.tmp
-        config.EDM_HOME = self.tmp / ".edm"
-        config.SESSIONS_DIR = config.EDM_HOME / "sessions"
-        config.TERMINALS_DIR = config.EDM_HOME / "terminals"
+        config.STATE_DIR = self.tmp / ".charter"
+        config.SESSIONS_DIR = config.STATE_DIR / "sessions"
+        config.TERMINALS_DIR = config.STATE_DIR / "terminals"
         config.WORKSPACES_DIR = self.tmp / "workspaces"
         config.WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 
-        self._orig_env = {k: os.environ.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "EDM_WORKSPACE")}
+        self._orig_env = {k: os.environ.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CHARTER_WORKSPACE")}
         os.environ["CLAUDE_CODE_SESSION_ID"] = self.SID
-        os.environ.pop("EDM_WORKSPACE", None)
+        os.environ.pop("CHARTER_WORKSPACE", None)
         self.addCleanup(self._restore)
 
     def _restore(self) -> None:
@@ -94,9 +94,9 @@ class TestSessionLock(WorkspaceLockBase):
         self.assertFalse(workspace.unlock())
 
     def test_env_pin_still_wins_over_lock(self):
-        # $EDM_WORKSPACE is a hard launch pin: it dominates resolution regardless of lock.
+        # $CHARTER_WORKSPACE is a hard launch pin: it dominates resolution regardless of lock.
         workspace.set_active("alpha")
-        os.environ["EDM_WORKSPACE"] = "pinned"
+        os.environ["CHARTER_WORKSPACE"] = "pinned"
         self.assertEqual(workspace.resolve(), "pinned")
 
     def test_a_different_session_starts_unlocked(self):
@@ -126,7 +126,7 @@ class TestConfirmNudge(WorkspaceLockBase):
         self.assertEqual(hooks._workspace_confirm_nudge(self.SID), "")
 
     def test_no_nudge_when_env_pinned(self):
-        os.environ["EDM_WORKSPACE"] = "pinned"
+        os.environ["CHARTER_WORKSPACE"] = "pinned"
         self.assertEqual(hooks._workspace_confirm_nudge(self.SID), "")
 
     def test_sessionstart_emits_the_nudge(self):

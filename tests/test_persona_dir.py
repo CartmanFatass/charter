@@ -8,7 +8,7 @@ from charter import persona, config
 
 class TestDefaultPersona(PersonaIso):
     def _no_env(self):
-        return mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "EDM_PERSONA"}, clear=True)
+        return mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "CHARTER_PERSONA"}, clear=True)
 
     def test_default_resolves_when_nothing_else_set(self):
         self.make_persona("steward", role="Steward", vault="steward")

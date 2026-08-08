@@ -15,7 +15,7 @@ guarantee that no emitted line ever exceeds the terminal width — overflow is
 truncated with ``…``, never wrapped (a wrap shears every column below it).
 
 Note: Claude Code does **not** pass the session's environment to the status
-line, so an ``$EDM_WORKSPACE``-pinned session shows the active-file/default here
+line, so an ``$CHARTER_WORKSPACE``-pinned session shows the active-file/default here
 even though its commands honor the env var. Cosmetic only.
 """
 
@@ -288,7 +288,7 @@ _STATE_TTL = 5.0  # seconds a cached repo-state is trusted before re-checking
 def _repo_states(dirs: list[Path]) -> dict:
     """Map repo dir -> {dirty, ahead, behind}, cached with a short TTL so
     `git status` runs at most once per repo per few seconds, not every render."""
-    cache_file = config.EDM_HOME / "cache" / "repostate.json"
+    cache_file = config.STATE_DIR / "cache" / "repostate.json"
     try:
         cache = json.loads(cache_file.read_text())
     except Exception:
@@ -582,7 +582,7 @@ def render(payload: dict | None = None) -> str:
         gl = glstate.read_for(dirs, branches)
         glstate.maybe_spawn(dirs, active)
 
-        pin = f"{_YELLOW}*{_R}" if src == "$EDM_WORKSPACE" else ""
+        pin = f"{_YELLOW}*{_R}" if src == "$CHARTER_WORKSPACE" else ""
         # Reinit tip sits right after the name so it survives truncation on narrow panes.
         reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
         summary = f"{_DIM} · {_R}".join(filter(None, [

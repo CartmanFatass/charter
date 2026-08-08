@@ -19,7 +19,7 @@ from pathlib import Path
 
 from charter import config, instance, persona, root
 
-_PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "EDM_HOME", "ACTIVE_PERSONA_FILE",
+_PATCH = ("ROOT", "PERSONAS_DIR", "PERSONA_STATE_DIR", "STATE_DIR", "ACTIVE_PERSONA_FILE",
           "WORKSPACES_DIR", "SESSIONS_DIR", "TERMINALS_DIR", "HAS_CONTROL_PLANE",
           "CONFIG_ERROR", "GROUP", "EXCLUDE", "DEFAULT_WORKSPACE", "INVENTORY",
           "MEMORY_SHARE")
@@ -41,13 +41,13 @@ class PersonaIso(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-test-"))
         self._orig = {k: getattr(config, k) for k in _PATCH}
         config.ROOT = self.tmp
-        config.EDM_HOME = self.tmp / ".edm"
+        config.STATE_DIR = self.tmp / ".charter"
         config.PERSONAS_DIR = self.tmp / "personas"
-        config.PERSONA_STATE_DIR = config.EDM_HOME / "persona-state"
-        config.ACTIVE_PERSONA_FILE = config.EDM_HOME / "active-persona"
+        config.PERSONA_STATE_DIR = config.STATE_DIR / "persona-state"
+        config.ACTIVE_PERSONA_FILE = config.STATE_DIR / "active-persona"
         config.WORKSPACES_DIR = self.tmp / "workspaces"
-        config.SESSIONS_DIR = config.EDM_HOME / "sessions"
-        config.TERMINALS_DIR = config.EDM_HOME / "terminals"
+        config.SESSIONS_DIR = config.STATE_DIR / "sessions"
+        config.TERMINALS_DIR = config.STATE_DIR / "terminals"
         # Task 1's fix round found a test that wrote a fake inventory/repos.json into the
         # REAL checkout because this tuple omitted INVENTORY — every other well-known path
         # was redirected into the tmp tree, but inventory.load()/save() kept resolving

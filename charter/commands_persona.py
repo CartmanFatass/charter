@@ -185,7 +185,7 @@ def cmd_persona_clear(args) -> int:
 
 def cmd_persona_default(args) -> int:
     """Show / set / clear the committed team-wide default persona (personas/.default) —
-    the one adopted when no --persona / $EDM_PERSONA / `charter persona use` is set."""
+    the one adopted when no --persona / $CHARTER_PERSONA / `charter persona use` is set."""
     f = config.PERSONAS_DIR / ".default"
     if getattr(args, "clear", False):
         if f.exists():
@@ -202,7 +202,7 @@ def cmd_persona_default(args) -> int:
         f.write_text(args.name + "\n")
         util.ok(f"Committed default persona set to '{args.name}' → personas/.default (shared; "
                 "commit with `charter save`).")
-        util.info("Overridden per-developer by `charter persona use` / $EDM_PERSONA / --persona.")
+        util.info("Overridden per-developer by `charter persona use` / $CHARTER_PERSONA / --persona.")
         return 0
     d = persona.default_persona()
     if d:
@@ -305,9 +305,9 @@ cmd_persona_secret_audit = _proxy(commands_secrets.cmd_secret_audit)
 
 
 def _warn_env(name: str) -> None:
-    env = os.environ.get("EDM_PERSONA")
+    env = os.environ.get("CHARTER_PERSONA")
     if env and env.strip() != name:
-        util.warn(f"$EDM_PERSONA='{env}' is set and takes precedence — commands use "
+        util.warn(f"$CHARTER_PERSONA='{env}' is set and takes precedence — commands use "
                   f"'{env}', not '{name}'.")
 
 
@@ -635,7 +635,7 @@ def cmd_persona_memory_sync(args) -> int:
             f"{len(changed)} persona memory/ref file(s) committed so the team's personas share "
             f"the knowledge. Synced via `charter persona memory-sync`.\n\n"
             f"Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>\n")
-    cache = config.EDM_HOME / "cache"
+    cache = config.STATE_DIR / "cache"
     cache.mkdir(parents=True, exist_ok=True)
     mf = cache / "memsync-msg.txt"
     mf.write_text(body)

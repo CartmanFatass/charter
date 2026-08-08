@@ -26,10 +26,10 @@ def _git(*a, cwd):
 class FreshBase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="edm-fresh-"))
-        self._orig = {k: getattr(config, k) for k in ("ROOT", "EDM_HOME", "SESSIONS_DIR")}
+        self._orig = {k: getattr(config, k) for k in ("ROOT", "STATE_DIR", "SESSIONS_DIR")}
         config.ROOT = self.tmp
-        config.EDM_HOME = self.tmp / ".edm"
-        config.SESSIONS_DIR = config.EDM_HOME / "sessions"
+        config.STATE_DIR = self.tmp / ".charter"
+        config.SESSIONS_DIR = config.STATE_DIR / "sessions"
         _git("init", "-q", cwd=self.tmp)
         self.addCleanup(self._restore)
 

@@ -87,7 +87,7 @@ def _secret_kind(text: str) -> str | None:
 # --------------------------------------------------------------------------- #
 _READERS = r"cat|less|more|head|tail|bat|nl|tac|xxd|od|strings|grep|rg|ag|awk|sed"
 _REVEAL_RE = re.compile(r"(?:^|\s)--reveal(?:[\s=]|$)")
-_VAULT_READ_RE = re.compile(rf"\b(?:{_READERS})\b[^|;&]*\.edm/(?:vaults|browser|active-)", re.IGNORECASE)
+_VAULT_READ_RE = re.compile(rf"\b(?:{_READERS})\b[^|;&]*\.charter/(?:vaults|browser|active-)", re.IGNORECASE)
 
 
 def _leak_reason(cmd: str) -> str | None:
@@ -96,7 +96,7 @@ def _leak_reason(cmd: str) -> str | None:
                 "Use `charter … secret exec`/`cp` — never --reveal for an agent")
     if _VAULT_READ_RE.search(cmd):
         return ("reads a vault/secret file directly (would print plaintext). "
-                "Use `charter … secret exec`/`cp` instead of catting `.edm/`")
+                "Use `charter … secret exec`/`cp` instead of catting `.charter/`")
     return None
 
 
@@ -482,14 +482,14 @@ def _uncommitted_memory_nudge() -> str:
 
 
 def _workspace_confirm_nudge(session_id: str | None) -> str:
-    """At session start, unless the workspace is hard-pinned via ``$EDM_WORKSPACE`` or
+    """At session start, unless the workspace is hard-pinned via ``$CHARTER_WORKSPACE`` or
     already **locked** (confirmed) for this session, tell the agent to ask the user which
     workspace to use *before* any repo work — create a new one or use an existing one.
     Confirming (``workspace use`` / ``create --use``) locks it for the whole session; it
     can't be switched mid-session. Best-effort; never raises."""
     try:
         from . import workspace
-        if os.environ.get("EDM_WORKSPACE") or workspace.is_locked(session_id):
+        if os.environ.get("CHARTER_WORKSPACE") or workspace.is_locked(session_id):
             return ""
         current = workspace.resolve(session_id=session_id)
         names = workspace.list_workspaces()
@@ -628,7 +628,7 @@ def _ws_edit_first_this_session(session, ws) -> bool:
     if not session:
         return True
     try:
-        d = config.EDM_HOME / "ws-edit-nudge"
+        d = config.STATE_DIR / "ws-edit-nudge"
         d.mkdir(parents=True, exist_ok=True)
         key = re.sub(r"[^A-Za-z0-9._-]", "", f"{session}-{ws}")
         marker = d / key
@@ -889,7 +889,7 @@ def _commit_dispatch(path, agent: str) -> None:
     share = _instance.clamp_share(_cfg.MEMORY_SHARE)
     if share == "local":
         return
-    lock = _cfg.EDM_HOME / "dispatch-commit.lock"
+    lock = _cfg.STATE_DIR / "dispatch-commit.lock"
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         with open(lock, "w") as fh:
@@ -1000,7 +1000,7 @@ def _commit_gate_due(sid: str | None) -> bool:
     if not sid:
         return True
     try:
-        d = config.EDM_HOME / "commit-gate"
+        d = config.STATE_DIR / "commit-gate"
         d.mkdir(parents=True, exist_ok=True)
         f = d / re.sub(r"[^A-Za-z0-9._-]", "", sid)
         n = int(f.read_text().strip()) if f.exists() else 0

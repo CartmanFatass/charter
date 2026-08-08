@@ -316,7 +316,7 @@ def _add_vault_parser(sub) -> None:
     add.add_argument("name")
     add.add_argument("--provider", default="plain-file", choices=sorted(PROVIDERS),
                      help="Vault backend (default: plain-file).")
-    add.add_argument("--file", help="File path for plain-file vaults (default: .edm/vaults/<name>.json).")
+    add.add_argument("--file", help="File path for plain-file vaults (default: .charter/vaults/<name>.json).")
     add.add_argument("--persona", help="Tag this vault for a persona (e.g. devops, qa).")
     add.set_defaults(func=commands_secrets.cmd_vault_add)
 
@@ -419,7 +419,7 @@ def _add_persona_parser(sub) -> None:
     show = psub.add_parser("show", help="Print a persona's metadata and charter.")
     show.add_argument("name"); show.set_defaults(func=commands_persona.cmd_persona_show)
 
-    use = psub.add_parser("use", help="Set the active persona (writes .edm/active-persona).")
+    use = psub.add_parser("use", help="Set the active persona (writes .charter/active-persona).")
     use.add_argument("name"); use.set_defaults(func=commands_persona.cmd_persona_use)
 
     cur = psub.add_parser("current", help="Print the active persona and how it resolved.")

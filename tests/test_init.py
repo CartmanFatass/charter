@@ -48,7 +48,7 @@ class TestFreshDirectory(InitIso):
         self._init()
         body = (self.root / ".gitignore").read_text()
         self.assertIn("workspaces/", body)
-        self.assertIn(".edm/", body)
+        self.assertIn(".charter/", body)
 
     def test_writes_a_statusline_when_none_is_configured(self):
         self._init()
@@ -169,7 +169,7 @@ class TestGitignorePresenceCheckIsPrecise(InitIso):
 
     def test_the_real_anchor_is_still_recognised_as_present(self):
         (self.root / ".gitignore").write_text(
-            "/workspaces/*/*\n!/workspaces/.gitkeep\n/.edm/\n")
+            "/workspaces/*/*\n!/workspaces/.gitkeep\n/.charter/\n")
         before = (self.root / ".gitignore").read_text()
         self._init()
         after = (self.root / ".gitignore").read_text()

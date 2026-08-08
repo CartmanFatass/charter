@@ -581,7 +581,7 @@ def cmd_gl_refresh(args) -> int:
 # a stranger AND actively misleading: `root.py`'s own error already says "run  #
 # `charter init`" (see `root._explain`), and outside a control plane every     #
 # other command silently adopts the cwd (`config.ROOT` falls back there — see  #
-# `root.find_root_or_cwd`) and would scatter `workspaces/`/`.edm/` into it.    #
+# `root.find_root_or_cwd`) and would scatter `workspaces/`/`.charter/` into it. #
 # Same additive discipline as `cmd_reinit` below (create only what's absent,   #
 # never touch what exists, name — never delete/rename — anything blocking a   #
 # path), widened to also cover charter.toml itself, `.gitignore`, and the     #
@@ -626,7 +626,7 @@ _GITIGNORE_BASELINE = """\
 
 # Per-developer secret vaults + registry (plaintext secrets, tokens, file paths).
 # NEVER commit this — it holds credentials.
-/.edm/
+/.charter/
 
 # Python
 __pycache__/
@@ -658,8 +658,8 @@ def _ensure_gitignore(root: Path) -> bool:
     missing = []
     if "!/workspaces/.gitkeep" not in existing_lines:
         missing.append("/workspaces/*/*\n!/workspaces/.gitkeep\n")
-    if ".edm/" not in body:
-        missing.append("/.edm/\n")
+    if ".charter/" not in body:
+        missing.append("/.charter/\n")
     if not missing:
         return False
     p.write_text(body.rstrip("\n") + "\n\n# added by `charter init`\n" + "\n".join(missing))

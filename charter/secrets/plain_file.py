@@ -1,7 +1,7 @@
 """Plain-file vault provider: a JSON object of key -> secret, mode 0600.
 
 The developer may point a vault at any file they already keep (``--file``), or
-let charter manage one under ``.edm/vaults/``. Values may be multi-line (e.g. a
+let charter manage one under ``.charter/vaults/``. Values may be multi-line (e.g. a
 kubeconfig or PEM), which JSON handles cleanly.
 """
 

@@ -34,7 +34,7 @@ class ContextGaugeCase(unittest.TestCase):
     def setUp(self):
         # `test_gauge_appears_in_the_rendered_summary` calls `statusline.render`, which
         # persists usage under `config.SESSIONS_DIR` — isolate it so the suite never
-        # writes into this repo's own `.edm/sessions/`.
+        # writes into this repo's own `.charter/sessions/`.
         import shutil, tempfile
         from pathlib import Path
         from charter import config

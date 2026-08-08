@@ -413,7 +413,7 @@ def cmd_workspace_autosave(args) -> int:
             return 0
         if not _git(["status", "--porcelain", "--", *rel], cwd=config.ROOT).stdout.strip():
             return 0  # nothing pending
-        marker = config.EDM_HOME / "ws-autosave" / name
+        marker = config.STATE_DIR / "ws-autosave" / name
         marker.parent.mkdir(parents=True, exist_ok=True)
         if marker.exists() and time.time() - marker.stat().st_mtime < 90:
             return 0  # debounce: at most once per ~90s per workspace
@@ -646,9 +646,9 @@ def cmd_workspace_reinit(args) -> int:
 
 
 def _warn_env_override(name: str) -> None:
-    env = os.environ.get("EDM_WORKSPACE")
+    env = os.environ.get("CHARTER_WORKSPACE")
     if env and env.strip() != name:
         util.warn(
-            f"$EDM_WORKSPACE='{env}' is set and takes precedence — commands in this "
+            f"$CHARTER_WORKSPACE='{env}' is set and takes precedence — commands in this "
             f"session will still act on '{env}', not '{name}'."
         )

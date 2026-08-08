@@ -3,7 +3,7 @@ decisions and activity charter actually took — guard denials, persona tool
 approvals, secret-scan warnings, memory writes, persona switches.
 
 This is **not** OpenTelemetry — no collector, no network, no deps. It's a stdlib
-JSONL record under gitignored ``.edm/persona-state/trace/<session>.jsonl`` so you can
+JSONL record under gitignored ``.charter/persona-state/trace/<session>.jsonl`` so you can
 answer "what did the agent/personas just do?" and feed the eval loop. Capture is
 best-effort and never raises — observability must never break the thing it observes.
 """

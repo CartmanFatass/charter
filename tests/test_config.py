@@ -25,7 +25,7 @@ class TestConfigErrorResilience(unittest.TestCase):
         (self.tmp / "charter.toml").write_text("this is not = valid = toml\n")
         self.env = dict(os.environ)
         self.env["CHARTER_ROOT"] = str(self.tmp)
-        self.env["EDM_HOME"] = str(self.tmp / ".edm")
+        self.env["CHARTER_HOME"] = str(self.tmp / ".charter")
         self.env.pop("FORCE_COLOR", None)
 
     def tearDown(self) -> None:
