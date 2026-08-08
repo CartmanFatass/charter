@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -122,10 +123,58 @@ def _migrate_state_dir(root: Path) -> Path:
                   f"continuing to use {legacy_dir}. Move it to {new_dir} manually, or set "
                   "$CHARTER_HOME to choose a location.", file=sys.stderr)
             return legacy_dir
+        _repoint_vault_registry(legacy_dir, new_dir)
         print(f"charter: migrated state directory {legacy_dir} -> {new_dir}", file=sys.stderr)
         return new_dir
 
     return new_dir
+
+
+def _repoint_vault_registry(legacy_dir: Path, new_dir: Path) -> None:
+    """Rewrite absolute vault paths that still point into the moved directory.
+
+    ``vaults.json`` stores each plain-file vault's location as an **absolute**
+    path. Renaming the state directory therefore moves the vault files while
+    leaving the registry pointing at where they used to be — every vault then
+    reports "not created yet" and the credentials look lost, which is the exact
+    outcome this migration exists to avoid.
+
+    Only entries under ``legacy_dir`` are touched; a vault deliberately stored
+    somewhere else (a shared drive, a per-machine path) is left alone. Any
+    failure here is non-fatal and reported: the files themselves are already
+    safely moved, and a stale registry is repairable by hand.
+    """
+    registry = new_dir / "vaults.json"
+    if not registry.exists():
+        return
+    old_prefix = f"{legacy_dir}{os.sep}"
+    new_prefix = f"{new_dir}{os.sep}"
+    try:
+        doc = json.loads(registry.read_text())
+        vaults = doc.get("vaults", doc)
+        if not isinstance(vaults, dict):
+            return
+        changed = 0
+        for entry in vaults.values():
+            if not isinstance(entry, dict):
+                continue
+            cfg = entry.get("config")
+            if not isinstance(cfg, dict):
+                continue
+            path = cfg.get("file")
+            if isinstance(path, str) and path.startswith(old_prefix):
+                cfg["file"] = new_prefix + path[len(old_prefix):]
+                changed += 1
+        if changed:
+            registry.write_text(json.dumps(doc, indent=2) + "\n")
+            os.chmod(registry, 0o600)
+            print(f"charter: repointed {changed} vault path(s) to {new_dir}",
+                  file=sys.stderr)
+    except (OSError, ValueError) as e:
+        print(f"charter: state directory moved, but {registry} could not be "
+              f"updated ({e}). Vault files are safe in {new_dir}; fix their "
+              "'file' paths there, or re-add them with `charter vault add`.",
+              file=sys.stderr)
 
 
 #: Per-developer secrets home — vault registry + plain-file vaults. Gitignored,
