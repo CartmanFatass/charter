@@ -853,6 +853,44 @@ def _config_update_nudge(sid: str | None) -> str:
 # only — never the prompt — so there is no secret surface. Reactive like memory: #
 # commit locally, push in the background, never blocking the turn.               #
 # --------------------------------------------------------------------------- #
+def pretooluse_dispatch() -> int:
+    """A dispatch is starting: record it, and nudge if it will overlap another.
+
+    Warns only when the incoming persona declares ``dispatch-isolation: worktree``
+    — i.e. it writes code and therefore cares about the tree. A read-only fan-out
+    (Explore, reviewers) overlapping is normal and correct, and warning on it would
+    train people to ignore the nudge.
+
+    Never denies. `isolation` is the caller's parameter and charter cannot set it;
+    the most honest thing available is to say so at the moment of dispatch.
+    """
+    data = _read_stdin()
+    if (data.get("tool_name") or "") not in ("Task", "Agent"):
+        return 0
+    agent = ((data.get("tool_input") or {}).get("subagent_type") or "").strip()
+    if not agent:
+        return 0
+    try:
+        from . import inflight, persona
+        others = inflight.live()
+        token = inflight.start(agent)
+        if not others:
+            return 0
+        d = persona.load(agent) or {}
+        if ((d.get("meta") or {}).get("dispatch-isolation") or "").strip() != "worktree":
+            return 0  # not a code-writer: overlapping is fine
+        peers = ", ".join(f"`{o}`" for o in others)
+        _ask("PreToolUse",
+             f"`{agent}` writes code and {peers} "
+             f"{'is' if len(others) == 1 else 'are'} already running. They share one "
+             f"working tree, so parallel edits interleave silently. Dispatch this one "
+             f"with `isolation: worktree`, or let the other finish first.")
+        del token
+    except Exception:
+        return 0  # a nudge must never break a turn
+    return 0
+
+
 def posttooluse_dispatch() -> int:
     data = _read_stdin()
     if (data.get("tool_name") or "") not in ("Task", "Agent"):
@@ -867,6 +905,8 @@ def posttooluse_dispatch() -> int:
             return 0
         _trace("dispatch", data.get("session_id"), agent=agent)
         _commit_dispatch(p, agent)
+        from . import inflight
+        inflight.finish(agent)   # this dispatch is no longer in flight
     except Exception:
         return 0  # a tally must never break a turn
     return 0
@@ -1142,6 +1182,7 @@ _HANDLERS = {
     "sessionstart": sessionstart,
     "userpromptsubmit": userpromptsubmit,
     "pretooluse": pretooluse,
+    "pretooluse-dispatch": pretooluse_dispatch,
     "posttooluse": posttooluse,
     "posttooluse-dispatch": posttooluse_dispatch,
 }

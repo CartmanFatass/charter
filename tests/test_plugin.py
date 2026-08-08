@@ -53,9 +53,17 @@ class TestPluginManifest(unittest.TestCase):
         hook fail outright."""
         engine_cmds = [hook["command"] for _, hook in _flat_hooks()
                        if "charter hook " in hook["command"]]
-        self.assertEqual(len(engine_cmds), 5, engine_cmds)
+        self.assertTrue(engine_cmds, "manifest declares no engine hooks — did they move?")
         for c in engine_cmds:
             self.assertIn("--plugin-version", c)
+        # Tied to the handler registry rather than a magic count: a hardcoded number
+        # only says "something changed", and has to be bumped by hand every time a
+        # handler is legitimately added. This says the manifest and the engine agree.
+        from charter import hooks as _h
+        declared = {c.split("charter hook ")[1].split()[0] for c in engine_cmds}
+        self.assertTrue(declared <= set(_h._HANDLERS),
+                        f"manifest names handlers the engine lacks: "
+                        f"{sorted(declared - set(_h._HANDLERS))}")
 
     def test_sessionstart_carries_no_matcher(self):
         """An absent matcher matches startup|resume|clear|compact|fork. Pinning it to
@@ -86,6 +94,7 @@ class TestPluginManifest(unittest.TestCase):
             ("SessionStart", "charter gl-refresh"),              # refresh forge state
             ("UserPromptSubmit", "charter hook userpromptsubmit --plugin-version"),
             ("PreToolUse", "charter hook pretooluse --plugin-version"),
+            ("PreToolUse", "charter hook pretooluse-dispatch --plugin-version"),
             ("PostToolUse", "charter hook posttooluse --plugin-version"),
             ("PostToolUse", "charter hook posttooluse-dispatch --plugin-version"),
             ("Stop", "charter workspace _autosave"),             # debounced auto-save
