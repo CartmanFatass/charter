@@ -117,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     gl.add_argument("--workspace", "-w", help="Workspace to refresh (default: the active one).")
     gl.set_defaults(func=commands.cmd_gl_refresh)
 
+    # Internal: the detached child `statusline` spawns to refresh the update cache.
+    # Hidden from help — nobody needs to run it, and it is not part of the UX.
+    vc = sub.add_parser("_version-check")
+    vc.set_defaults(func=commands.cmd_version_check)
+
     hk = sub.add_parser("hook",
                         help="Dispatch a Claude Code hook by name — what the plugin's "
                              "hooks/hooks.json actually invokes (the plugin ships no Python).")

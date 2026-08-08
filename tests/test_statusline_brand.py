@@ -1,0 +1,180 @@
+"""The right-aligned brand, and the update indicator beside it.
+
+Two rules the status line cannot break, because it renders on every single turn:
+
+* **never block** — the "is there a newer charter?" answer comes from a cache another
+  process fills; nothing here touches the network;
+* **never cost content** — the brand is dropped entirely when the last line is long
+  enough that showing it would crowd a repo row.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from charter import config, statusline, tui, update
+
+
+class BrandLayout(unittest.TestCase):
+    def setUp(self) -> None:
+        self._spawn = update.maybe_spawn      # never fork a network child from a test
+        update.maybe_spawn = lambda: None
+        self.addCleanup(lambda: setattr(update, "maybe_spawn", self._spawn))
+
+    def test_brand_is_right_aligned_on_the_last_line(self):
+        out = statusline._with_brand("short", 120)
+        last = out.split("\n")[-1]
+        self.assertTrue(last.startswith("short"))
+        self.assertEqual(tui.width(last), 120, "must reach exactly the right edge")
+
+    def test_only_the_last_line_is_touched(self):
+        body = "one\ntwo\nthree"
+        out = statusline._with_brand(body, 120)
+        self.assertEqual(out.split("\n")[:-1], ["one", "two"])
+
+    def test_dropped_when_it_would_crowd_the_content(self):
+        """Branding must never push out a repo row."""
+        body = "x" * 112
+        self.assertEqual(statusline._with_brand(body, 120), body)
+
+    def test_dropped_on_a_narrow_pane(self):
+        for w in (24, 30, 40):
+            with self.subTest(width=w):
+                body = "x" * (w - 8)
+                self.assertEqual(statusline._with_brand(body, w), body)
+
+    def test_never_exceeds_the_width(self):
+        for w in (24, 40, 80, 120, 200):
+            for used in (0, 5, 20):
+                with self.subTest(width=w, used=used):
+                    out = statusline._with_brand("x" * used, w)
+                    for line in out.split("\n"):
+                        self.assertLessEqual(tui.width(line), w)
+
+    def test_an_empty_body_does_not_crash(self):
+        statusline._with_brand("", 80)
+
+    def test_layout_failure_returns_the_body_unchanged(self):
+        """The status line's whole contract is that it never crashes."""
+        orig = statusline._brand
+        statusline._brand = lambda: 1 / 0
+        try:
+            self.assertEqual(statusline._with_brand("body", 120), "body")
+        finally:
+            statusline._brand = orig
+
+
+class UpdateIndicator(unittest.TestCase):
+    def setUp(self) -> None:
+        self._td = TemporaryDirectory()
+        self._orig = config.STATE_DIR
+        config.STATE_DIR = Path(self._td.name)
+        self.addCleanup(self._td.cleanup)
+        self.addCleanup(lambda: setattr(config, "STATE_DIR", self._orig))
+        # _brand() calls maybe_spawn(), and a temp STATE_DIR always looks stale — so
+        # without this every test here forks a real network child. A suite that
+        # quietly reaches the internet is not hermetic.
+        self._spawn = update.maybe_spawn
+        update.maybe_spawn = lambda: None
+        self.addCleanup(lambda: setattr(update, "maybe_spawn", self._spawn))
+
+    def _cache(self, latest: str, age: float = 0) -> None:
+        p = config.STATE_DIR / "cache" / "update.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"latest": latest, "ts": time.time() - age}))
+
+    def test_newer_version_is_reported(self):
+        self._cache("9.9.9")
+        self.assertEqual(update.newer_than("0.6.0"), "9.9.9")
+
+    def test_same_version_is_not(self):
+        self._cache("0.6.0")
+        self.assertIsNone(update.newer_than("0.6.0"))
+
+    def test_older_cached_version_is_not(self):
+        self._cache("0.5.0")
+        self.assertIsNone(update.newer_than("0.6.0"))
+
+    def test_version_compare_is_numeric_not_lexical(self):
+        """0.10.0 is newer than 0.9.0 — string comparison gets this backwards."""
+        self._cache("0.10.0")
+        self.assertEqual(update.newer_than("0.9.0"), "0.10.0")
+        self._cache("0.9.0")
+        self.assertIsNone(update.newer_than("0.10.0"))
+
+    def test_no_cache_means_no_claim(self):
+        self.assertIsNone(update.newer_than("0.6.0"))
+
+    def test_an_unparseable_version_never_claims_an_update(self):
+        """Better to show nothing than to nag about a release that isn't there."""
+        for bad in ("", "not-a-version", "junk.junk"):
+            with self.subTest(latest=bad):
+                self._cache(bad)
+                self.assertIsNone(update.newer_than("0.6.0"))
+
+    def test_brand_carries_the_indicator_only_when_newer(self):
+        import charter
+        self._cache("9.9.9")
+        self.assertIn("9.9.9", statusline._brand())
+        self._cache(charter.__version__)
+        self.assertNotIn("↑", statusline._brand())
+
+    def test_brand_always_names_the_running_version(self):
+        import charter
+        self.assertIn(charter.__version__, statusline._brand())
+
+
+class NeverBlocks(unittest.TestCase):
+    """The status line renders every turn — a network call here would be felt."""
+
+    def setUp(self) -> None:
+        self._td = TemporaryDirectory()
+        self._orig = config.STATE_DIR
+        config.STATE_DIR = Path(self._td.name)
+        self.addCleanup(self._td.cleanup)
+        self.addCleanup(lambda: setattr(config, "STATE_DIR", self._orig))
+
+    def test_a_fresh_cache_spawns_nothing(self):
+        p = config.STATE_DIR / "cache" / "update.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"latest": "0.6.0", "ts": time.time()}))
+        calls = []
+        import subprocess
+        orig = subprocess.Popen
+        subprocess.Popen = lambda *a, **k: calls.append(a)
+        try:
+            update.maybe_spawn()
+        finally:
+            subprocess.Popen = orig
+        self.assertEqual(calls, [])
+
+    def test_the_cooldown_survives_a_failed_check(self):
+        """An offline machine must not fork a doomed child on every render, so the
+        lock is touched BEFORE the spawn, not after a success."""
+        update._lock_file().parent.mkdir(parents=True, exist_ok=True)
+        update._lock_file().touch()
+        calls = []
+        import subprocess
+        orig = subprocess.Popen
+        subprocess.Popen = lambda *a, **k: calls.append(a)
+        try:
+            update.maybe_spawn()
+        finally:
+            subprocess.Popen = orig
+        self.assertEqual(calls, [], "cooldown must suppress the spawn")
+
+    def test_render_never_raises_even_if_the_check_explodes(self):
+        orig = update.maybe_spawn
+        update.maybe_spawn = lambda: 1 / 0
+        try:
+            statusline._brand()          # must not raise
+        finally:
+            update.maybe_spawn = orig
+
+
+if __name__ == "__main__":
+    unittest.main()

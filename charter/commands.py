@@ -1010,3 +1010,14 @@ def cmd_git_policy(args) -> int:
                       f"any policy. Declare the host in charter.toml's [[forge]] to bring "
                       f"{'it' if unmanaged == 1 else 'them'} under management.")
     return 0
+
+
+def cmd_version_check(args) -> int:
+    """Internal: refresh the cached "is a newer charter published?" answer.
+
+    Spawned detached by the status line; prints nothing and always exits 0 — a
+    failed check must be indistinguishable from a successful one to any caller.
+    """
+    from . import update
+    update.fetch_and_store()
+    return 0

@@ -50,6 +50,7 @@ _COL_SEP = f" {_DIM}│{_R} "  # divider between the repos and personas columns
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
 _SAFETY = 2  # render to (COLUMNS − this); a line filling the last column can wrap
+_BRAND_GAP = 3  # min blank columns between content and the right-aligned brand
 
 #: GitLab pipeline status → (colour, glyph, label). Glyphs are single-width so
 #: columns stay aligned.
@@ -557,6 +558,48 @@ def _persona_chips(session: str | None = None) -> list[str]:
         return []
 
 
+def _brand() -> str:
+    """`⬢ charter x.y.z`, plus `↑ a.b.c` when a newer release is cached.
+
+    Read-only and offline: the version is this process's own, and the "newer?"
+    answer comes from a cache another process fills. `update.maybe_spawn` may fork
+    a detached child, but nothing here ever waits on the network — the status line
+    renders on every turn.
+    """
+    from . import __version__, update
+    out = f"{_DIM}⬢ charter {__version__}{_R}"
+    try:
+        update.maybe_spawn()
+        newer = update.newer_than(__version__)
+    except Exception:
+        newer = None
+    if newer:
+        out += f" {_YELLOW}↑{newer}{_R}"
+    return out
+
+
+def _with_brand(body: str, width: int) -> str:
+    """Right-align the brand on the last line, if it fits without crowding.
+
+    Appended after layout rather than inside it: the columns are width-constrained
+    and threading a right-hand chunk through them would push real content out.
+    Dropped entirely on a narrow pane — branding must never cost a repo row.
+    """
+    try:
+        brand = _brand()
+        lines = body.split("\n")
+        if not lines:
+            return body
+        last = lines[-1]
+        used, need = tui.width(last), tui.width(brand)
+        if used + need + _BRAND_GAP > width:
+            return body                      # no room: content wins
+        lines[-1] = last + " " * (width - used - need) + brand
+        return "\n".join(lines)
+    except Exception:
+        return body
+
+
 def render(payload: dict | None = None) -> str:
     """FINDING M9: the module docstring promises this NEVER crashes — that guarantee
     lives entirely in this function's two `try/except` blocks, so EVERY step that can
@@ -632,7 +675,7 @@ def render(payload: dict | None = None) -> str:
             plain.append(p)
         body = "\n".join(tui.truncate(ln, width) for ln in plain)
 
-    return body + "\n"  # trailing blank line for breathing room below the status line
+    return _with_brand(body, width) + "\n"  # trailing blank line below the status line
 
 
 def _columns(left_lines: list[str], right_lines: list[str] | None, width: int) -> str:
