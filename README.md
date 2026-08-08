@@ -116,12 +116,19 @@ charter clone some-repo
 ## Worked example: a persona, end to end
 
 ```
-charter persona create devops --role "DevOps Engineer" --with-vault
+charter persona create devops --role "DevOps Engineer" \
+  --delegate-when "CI/CD pipelines, k8s deploys, cluster access" --with-vault
 charter persona use devops
 charter persona secret set API_TOKEN --stdin           # value never touches argv/history
 charter persona remember "prod kubeconfig lives in the devops vault, key KUBECONFIG"
+# …write what the persona owns, then drop the `draft: true` line it was created with:
 charter persona sync-agents
 ```
+
+A new persona starts as `draft: true` and gets **no** generated sub-agent until that
+line is removed — an unwritten charter must never become an agent's system prompt.
+`charter persona lint`, `charter doctor` and the status-line chip (`⚑`) all say so
+meanwhile.
 
 The last step writes `.claude/agents/devops.md` — a generated Claude Code sub-agent
 carrying devops's charter, its memory instructions, and a reminder to use the vault

@@ -430,6 +430,10 @@ def _add_persona_parser(sub) -> None:
     cr = psub.add_parser("create", help="Create a persona → committed personas/<name>.md.")
     cr.add_argument("name")
     cr.add_argument("--role", help='Human role, e.g. "DevOps Engineer".')
+    cr.add_argument("--delegate-when", metavar="WHEN",
+                    help='REQUIRED (unless --extends): when the steward should route work '
+                         'here, e.g. "CI/CD pipelines, k8s deploys". Becomes the persona\'s '
+                         'routing line in its dispatchable description.')
     cr.add_argument("--vault", help="Vault this persona uses (default: the persona name).")
     cr.add_argument("--extends", metavar="PARENT",
                     help="Inherit another persona's charter + tools; this one adds its own on top.")

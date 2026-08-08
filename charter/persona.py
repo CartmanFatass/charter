@@ -313,7 +313,35 @@ def _enabled_plugin_names() -> set[str]:
         return set()
 
 
+#: Process-global memo for the plugin-cache walk below. A sentinel rather than None,
+#: because "no plugin cache on this machine" is itself a cacheable answer.
+_SKILLS_UNSET = object()
+_SKILLS_CACHE: object = _SKILLS_UNSET
+
+
+def _reset_skill_cache() -> None:
+    """Forget the memoised plugin-cache walk. For tests, and for any caller that
+    would install a plugin mid-process."""
+    global _SKILLS_CACHE
+    _SKILLS_CACHE = _SKILLS_UNSET
+
+
 def _installed_skills() -> dict[str, bool] | None:
+    """:func:`_walk_installed_skills`, memoised for the life of the process.
+
+    The walk reads every ``SKILL.md`` under ``~/.claude/plugins`` — 96 skills and
+    ~27ms on a real machine — and :func:`lint` calls it once per persona, so a
+    13-persona roster paid it 13 times: 358ms of a 364ms sweep. That cost is why
+    ``doctor`` could not afford to lint the roster at all. The plugin cache cannot
+    change during a single command, so one walk is enough.
+    """
+    global _SKILLS_CACHE
+    if _SKILLS_CACHE is _SKILLS_UNSET:
+        _SKILLS_CACHE = _walk_installed_skills()
+    return _SKILLS_CACHE  # type: ignore[return-value]
+
+
+def _walk_installed_skills() -> dict[str, bool] | None:
     """Map each installed skill's leaf-name → is it **model-invokable** (i.e. not
     ``disable-model-invocation: true``), scanned from the local Claude plugin cache.
     Returns None when no cache exists (plugins not installed in this checkout) so lint
@@ -373,12 +401,76 @@ def _skill_ref_issues(charter: str) -> list[tuple[str, str]]:
     return out
 
 
-def lint(name: str) -> list[tuple[str, str]]:
+#: Frontmatter values are plain strings — :func:`parse` does no type coercion — so
+#: ``draft: false`` arrives as the string ``"false"``, which is *truthy*. Every read of
+#: the flag goes through :func:`is_draft` for exactly this reason.
+_DRAFT_TRUE = {"true", "yes", "1", "on"}
+
+
+def is_draft(name: str) -> bool:
+    """Is this persona's charter still unfinished, and therefore undispatchable?
+
+    ``charter persona create`` stamps ``draft: true``; the author removes the line when
+    the charter says something real. While it is set, no sub-agent is generated — a
+    generated agent file *is* a sub-agent's system prompt, and shipping an unwritten
+    charter there tells an agent its responsibilities are whatever the scaffold said.
+
+    Adoption is deliberately still allowed: ``persona use`` injects only the identity
+    line and a pointer to ``charter persona show``, never the charter body, and a human
+    is reading. That asymmetry is the whole rule.
+
+    Resolved, not own — a child ``extends:``-ing a draft parent concatenates the
+    parent's unfinished charter into its own dispatched prompt, so it inherits the
+    label like any other scalar (and may override it with an explicit ``draft: false``).
+    """
+    d = resolve(name)
+    if not d:
+        return False
+    return str(d["meta"].get("draft", "")).strip().lower() in _DRAFT_TRUE
+
+
+def structural_errors(name: str, known: set[str] | None = None) -> list[tuple[str, str]]:
+    """The ``error``-level half of :func:`lint`: references that do not resolve.
+
+    A dangling ``extends:``/``uses:`` or an inheritance cycle makes a persona broken
+    rather than untidy — the resolver cannot build it. Split out from :func:`lint`
+    (which calls this, so there is still one implementation) because the status line
+    needs exactly this subset on **every turn** and none of the rest: no ``vault_of``,
+    no role/delegate-when, no unknown-key scan, and in particular no import of
+    ``commands_persona`` to fetch the key whitelist.
+
+    ``known`` lets a caller sweeping the whole roster pass ``list_personas()`` once
+    instead of paying for it per persona — 1.6ms of a 5.2ms 13-persona sweep.
+    """
+    allnames = known if known is not None else set(list_personas())
+    issues: list[tuple[str, str]] = []
+    for u in uses_of(name):
+        if u not in allnames:
+            issues.append(("error", f"uses: '{u}' — no such persona (dangling)"))
+    d = load(name)
+    ext = ((d["meta"] if d else {}).get("extends") or "").strip()
+    if ext and ext not in allnames:
+        issues.append(("error", f"extends: '{ext}' — no such persona (dangling)"))
+    cycle = _inherits_cycle(name)
+    if cycle:
+        issues.append(("error", f"extends: inheritance cycle ({cycle})"))
+    return issues
+
+
+def lint(name: str, deep: bool = True) -> list[tuple[str, str]]:
     """Config-correctness checks for one persona → ``[(level, message)]`` where
     level is ``'error'`` (dangling ``uses:``, or a charter naming a human-only/unknown
-    plugin skill for agent use) or ``'warn'`` (missing role/vault/delegate-when). The
-    agent-in-sync check lives in the CLI (it needs the renderer). A deterministic eval of
-    the persona config — the routing/guard behaviours are covered by the test suite."""
+    plugin skill for agent use) or ``'warn'`` (missing role/vault/delegate-when, or an
+    unfinished ``draft:``). The agent-in-sync check lives in the CLI (it needs the
+    renderer). A deterministic eval of the persona config — the routing/guard behaviours
+    are covered by the test suite.
+
+    ``deep=False`` drops the skill-reference check, the one part that walks the plugin
+    cache. Everything else is frontmatter arithmetic (~0.1ms per persona), which is what
+    lets the status line — rendered on *every turn* — show roster health at all. One
+    implementation with a flag, rather than a second "cheap health" function that would
+    drift from this one the first time a check was added to only one of them.
+    """
     d = load(name)
     if not d:
         return [("error", f"persona '{name}' does not load")]
@@ -390,6 +482,10 @@ def lint(name: str) -> list[tuple[str, str]]:
         issues.append(("warn", "no vault named"))
     if not (meta.get("delegate-when") or "").strip():
         issues.append(("warn", "no delegate-when → weak auto-routing"))
+    if is_draft(name):
+        issues.append(("warn", "draft: true → charter unfinished; no sub-agent is "
+                               "generated and it cannot be dispatched. Finish the "
+                               "charter, drop the line, then `charter persona sync-agents`"))
     # A frontmatter key charter neither reads nor emits reaches nothing: it is not copied
     # into .claude/agents/<name>.md and no charter code consults it, so a typo (`modell:`,
     # `delegate_when:`) is silently inert. Imported lazily — persona.py is the lower layer
@@ -398,17 +494,9 @@ def lint(name: str) -> list[tuple[str, str]]:
     for key in sorted(set(meta) - (set(_AGENT_PASSTHROUGH_KEYS) | set(_CHARTER_OWN_KEYS))):
         issues.append(("warn", f"frontmatter key '{key}' is neither read by charter nor "
                                f"emitted into the sub-agent — it does nothing (typo?)"))
-    allnames = set(list_personas())
-    for u in uses_of(name):
-        if u not in allnames:
-            issues.append(("error", f"uses: '{u}' — no such persona (dangling)"))
-    ext = (meta.get("extends") or "").strip()
-    if ext and ext not in allnames:
-        issues.append(("error", f"extends: '{ext}' — no such persona (dangling)"))
-    cycle = _inherits_cycle(name)
-    if cycle:
-        issues.append(("error", f"extends: inheritance cycle ({cycle})"))
-    issues += _skill_ref_issues(d["charter"])
+    issues += structural_errors(name)
+    if deep:
+        issues += _skill_ref_issues(d["charter"])
     return issues
 
 

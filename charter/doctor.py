@@ -327,8 +327,11 @@ def check_memory_indexes() -> Result:
     resolved by taking one side drops the other's line while its file survives.
     That is exactly how both showed up in a real control plane.
 
-    WARN, never FAIL: drift is a hygiene problem, and this runs from the
-    SessionStart hook, which must never block a session.
+    WARN, never FAIL: drift is a hygiene problem, and doctor's blockers list means
+    "you cannot work" — an out-of-step index does not stop you cloning a repo.
+    (An earlier version of this note justified the same choice with "this runs from
+    the SessionStart hook, which must never block a session". It does not: `hooks.py`
+    never imports this module. Right conclusion, wrong reason.)
     """
     from . import config, memstore, persona, workspace
 
@@ -384,6 +387,64 @@ def check_memory_indexes() -> Result:
                   detail=f"{dangling} dangling, {unindexed} unindexed", hint=hint)
 
 
+def check_personas() -> Result:
+    """Roster config health — `persona lint` across every persona, summarised.
+
+    `lint` could always find a dangling ``extends:``, an inheritance cycle, or a
+    charter naming a skill no sub-agent can invoke; nothing ever ran it. It was in no
+    hook and in no other command, so it reported drift only to someone who already
+    suspected drift. This is the check running by itself, in the preflight a developer
+    already runs.
+
+    One line, not a per-persona dump: the detail names what is wrong and the hint
+    points at `charter persona lint`, which has room to explain. WARN, never FAIL —
+    doctor's blockers list means "you cannot work", and an untidy persona does not stop
+    you cloning a repo or reaching the forge.
+
+    Affordable only because :func:`persona._installed_skills` is memoised: the walk it
+    performs is ~27ms and `lint` calls it once per persona, which is what made a
+    13-persona sweep cost 364ms.
+    """
+    from . import persona
+    try:
+        names = persona.list_personas()
+    except Exception as e:
+        return Result("personas", OK, detail=f"not checked ({e})")
+    if not names:
+        return Result("personas", OK, detail="none defined")
+
+    errors: dict[str, int] = {}
+    warns: dict[str, int] = {}
+    drafts: list[str] = []
+    for n in names:
+        try:
+            issues = persona.lint(n)
+            if persona.is_draft(n):
+                drafts.append(n)
+        except Exception:
+            # A persona charter is a file humans edit; a malformed one must not take
+            # down the command you run *because* something is wrong.
+            errors[n] = errors.get(n, 0) + 1
+            continue
+        for level, _msg in issues:
+            (errors if level == "error" else warns)[n] = \
+                (errors if level == "error" else warns).get(n, 0) + 1
+
+    if not errors and not warns:
+        return Result("personas", OK, detail=f"{len(names)} persona(s), all clean")
+
+    bits = []
+    if errors:
+        bits.append(f"{len(errors)} with error(s): {', '.join(sorted(errors))}")
+    if drafts:
+        bits.append(f"{len(drafts)} draft: {', '.join(sorted(drafts))}")
+    soft = sorted(set(warns) - set(drafts))
+    if soft:
+        bits.append(f"{len(soft)} with warning(s): {', '.join(soft)}")
+    return Result("personas", WARN, detail=" · ".join(bits),
+                  hint="charter persona lint  (per-persona detail and how to fix each)")
+
+
 def check_plugin_skew() -> Result:
     """`charter` ships as two artifacts — the CLI (pip/uv) and the Claude Code plugin
     (``.claude-plugin/plugin.json`` + ``hooks/hooks.json``) — with two version numbers.
@@ -426,6 +487,6 @@ def run_all() -> list[Result]:
         results.append(check_forge_auth(forge))
     results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
                 check_inventory(), check_vaults(), check_version_lock(),
-                check_memory_indexes(),
+                check_memory_indexes(), check_personas(),
                 check_plugin_skew()]
     return results

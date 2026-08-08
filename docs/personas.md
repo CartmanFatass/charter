@@ -25,14 +25,33 @@ never do.
 ## Creating one
 
 ```
-charter persona create devops --role "DevOps Engineer" --with-vault
+charter persona create devops --role "DevOps Engineer" \
+  --delegate-when "CI/CD pipelines, k8s deploys, cluster access" --with-vault
 ```
 
 writes `personas/devops/persona.md` from a template, scaffolds `memory/` and `refs/`
-(with keep-files so git tracks the empty dirs), registers a local plain-file vault named
-`devops`, and — because a generated Claude Code sub-agent is written alongside it —
-prints `generated .claude/agents/devops.md`. Edit the charter (the prose section) to
-actually describe the role; the scaffold is deliberately a skeleton.
+(with keep-files so git tracks the empty dirs), and registers a local plain-file vault
+named `devops`.
+
+**`--delegate-when` is required** (unless `--extends`, which inherits it). It is the
+line that decides whether the steward ever routes anything here, it becomes the
+persona's dispatchable description, and unlike the charter body it is knowable at
+creation. Without it a persona lint-warns from birth and quietly loses its work to
+`general-purpose` — the failure `charter persona stats` reports as `⚑ never dispatched`.
+
+**A new persona is a `draft`.** The template stamps `draft: true`, and while it is set
+charter generates **no** sub-agent — so the persona can be *adopted* (`persona use`, how
+you work on it) but not *dispatched*. That asymmetry is mechanical: dispatch bakes the
+whole charter into a sub-agent's system prompt with nobody reading it, while adoption
+injects only the identity line. Write what the persona owns, drop the `draft: true`
+line, then:
+
+```
+charter persona sync-agents        # now .claude/agents/devops.md is generated
+```
+
+Until then `charter persona lint` says so, `charter doctor` counts it, and the status
+line marks the chip `⚑`.
 
 ## The charter format
 
@@ -146,6 +165,32 @@ charter persona show devops                # effective (inheritance-merged) char
 charter persona use devops                 # make it the active persona (this session)
 charter persona secret set API_TOKEN --stdin   # store a credential (never on argv)
 charter persona secret exec --env TOKEN=API_TOKEN -- some-cli   # use it without ever seeing it
-charter persona lint                       # dangling uses:/extends:, missing role/vault, stale agents
+charter persona lint                       # dangling uses:/extends:, missing role/vault, drafts, stale agents
 charter persona stats                      # roster health: usage, verification rate, dispatch count
 ```
+
+## Health: where it surfaces
+
+Persona health shows up in three places, deliberately at three depths — the same
+checks, shown in proportion to how much room each surface has to explain.
+
+| Surface | Shows | Cost |
+| --- | --- | --- |
+| **Status line** chips | only what's *wrong*: `⚑` draft (undispatchable), `✗` broken config (dangling `extends:`/`uses:`, cycle) | ~2.7ms, renders every turn |
+| **`charter doctor`** | one line — how many personas have errors, drafts, warnings | ~6ms, run by hand |
+| **`charter persona lint`** | every finding per persona, with how to fix it | ~5ms for 13 personas |
+
+Two rules keep this honest:
+
+- **`doctor` WARNs, never FAILs.** Its blockers list means *"you cannot work"*, and an
+  untidy persona doesn't stop you cloning a repo or reaching the forge. Keeping the
+  roster out of the exit code is what preserves that meaning.
+- **The chips stay silent when healthy.** No `✓` per persona — a row of them becomes
+  furniture within a day, and then a real `✗` inside it draws no more attention than a
+  zero. Soft findings (no role, no `delegate-when`) stay in `lint`/`doctor`, which have
+  room to explain them.
+
+The vault dot beside each chip has four states, matching what `persona list` says in
+words: `✓` healthy · `◦` registered but not created yet · `!` unhealthy · `·` not set
+up locally (the *normal* state for most of a committed roster — personas are committed,
+vaults are private).

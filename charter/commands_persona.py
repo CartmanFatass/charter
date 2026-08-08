@@ -13,10 +13,23 @@ import os
 from . import commands_secrets, config, persona, trace, util
 from .secrets import base, registry
 
+#: The scaffold a new persona starts from.
+#:
+#: Every line here is a *true statement about this persona*, never an instruction to
+#: whoever is writing it. The earlier scaffold carried slots — `(describe what this
+#: persona owns and does)`, `(which repos this role typically works in)` — and `create`
+#: generated `.claude/agents/<name>.md` from it straight away, so a persona dispatched
+#: before anyone edited it handed those parentheticals to a sub-agent as its actual
+#: remit. Author-facing guidance belongs in the CLI output and `persona lint`; what
+#: belongs in this file is only what an agent should read as fact.
+#:
+#: The unfinished-ness is carried by `draft: true` instead, which blocks generation
+#: outright — an honest flag rather than prose hoping to be noticed.
 _TEMPLATE = """---
 name: {name}
 role: {role}
 vault: {vault}
+draft: true
 ---
 
 # {role}
@@ -24,14 +37,18 @@ vault: {vault}
 You are the **{name}** persona — {role}. When this persona is
 active, adopt this role: its responsibilities, focus, and conventions.
 
-## Responsibilities
-- (describe what this persona owns and does)
-
 ## How to work as this persona
-- Focus repos: (which repos this role typically works in — see `charter status`)
 - Credentials: use `charter persona secret …` (this persona's vault: `{vault}`).
   Never print secret values.
-- Conventions: (persona-specific norms, tools, definition of done)
+- Defer to each repo's own `CLAUDE.md` / `AGENTS.md` and its tooling over general habits.
+- Record durable facts with `charter persona remember {name} "<fact>"`. Never store
+  secrets there — those belong in the vault.
+"""
+
+#: Appended when the persona states its own routing intent (i.e. not purely inherited).
+_TEMPLATE_DELEGATE = """
+## When to delegate here
+{delegate_when}
 """
 
 
@@ -53,10 +70,30 @@ def cmd_persona_create(args) -> int:
         util.err(f"--extends '{extends}': no such persona to inherit from (see `charter persona list`).")
         return 1
 
+    # Routing intent is required up front — unlike the charter body, it is knowable at
+    # creation, and it is the field that decides whether the steward ever routes anything
+    # here. A persona created without it lint-warned from birth and quietly lost every
+    # dispatch to `general-purpose`. `--extends` is the one exemption: the parent's
+    # delegate-when is inherited like any other scalar.
+    delegate_when = (getattr(args, "delegate_when", None) or "").strip()
+    if not delegate_when and not extends:
+        util.err(
+            f"--delegate-when is required: say when the steward should route work to "
+            f"'{args.name}', e.g.\n"
+            f"  charter persona create {args.name} --delegate-when "
+            f"\"CI/CD pipelines, k8s deploys, cluster access\"\n"
+            "It becomes the persona's routing line in its dispatchable description. "
+            "(Inheriting one? Pass --extends <parent> instead.)")
+        return 1
+
     vault = args.vault or args.name
     p = persona.dir_of(args.name) / "persona.md"  # always create in the directory layout
     p.parent.mkdir(parents=True, exist_ok=True)
     text = _TEMPLATE.format(name=args.name, role=args.role or args.name.title(), vault=vault)
+    if delegate_when:
+        text = text.replace("vault: {v}\n".format(v=vault),
+                            f"vault: {vault}\ndelegate-when: {delegate_when}\n", 1)
+        text += _TEMPLATE_DELEGATE.format(delegate_when=delegate_when)
     if extends:
         # inherit charter + tools from the parent; this file adds the child's specialization
         text = text.replace(f"vault: {vault}\n", f"vault: {vault}\nextends: {extends}\n", 1)
@@ -69,8 +106,16 @@ def cmd_persona_create(args) -> int:
     persona.ensure_shared()             # the cross-persona _shared/ namespace
     util.ok(f"Created persona '{args.name}' → {p.parent.relative_to(config.ROOT)}/ "
             "(persona.md + memory/ + refs/; edit the charter, then commit — personas are shared).")
-    if _write_agent(args.name) == "written":
+    outcome = _write_agent(args.name)
+    if outcome == "written":
         util.info(f"  generated .claude/agents/{args.name}.md — invokable as subagent '{args.name}'.")
+    elif outcome == "draft":
+        util.info(
+            f"  marked `draft: true` — no sub-agent yet, so '{args.name}' cannot be "
+            f"dispatched.\n"
+            f"  Write what it owns and how it works in {p.relative_to(config.ROOT)}, "
+            f"drop the `draft: true` line,\n"
+            f"  then: charter persona sync-agents")
 
     if args.with_vault:
         cfg = {"file": str(config.VAULTS_DIR / f"{vault}.json")}
@@ -390,6 +435,7 @@ _AGENT_PASSTHROUGH_KEYS = ("model", "color", "memory")
 _CHARTER_OWN_KEYS = (
     "name", "role", "vault", "extends", "uses", "delegate-when", "description",
     "agent-description", "agent-tools", "tools", "activity", "dispatch-isolation",
+    "draft",
 )
 
 
@@ -477,11 +523,19 @@ isolated context. Adopt the charter below as your role.
 
 
 def _write_agent(name: str) -> str | None:
-    """Generate/refresh one persona's sub-agent. Returns 'written'|'skipped'|None.
+    """Generate/refresh one persona's sub-agent. Returns 'written'|'skipped'|'draft'|None.
     Uses the RESOLVED persona (inheritance applied: merged charter + unioned tools)."""
     d = persona.resolve(name)
     if not d:
         return None
+    if persona.is_draft(name):
+        # The generated file IS the sub-agent's system prompt, so an unfinished charter
+        # must not become one. Any agent generated BEFORE the persona was marked draft is
+        # removed rather than left behind: a stale file keeps the persona dispatchable,
+        # which is precisely what the flag exists to prevent. Hand-written agents (no
+        # marker) are never charter's to touch.
+        _remove_agent(name)
+        return "draft"
     path = _agents_dir() / f"{name}.md"
     if path.exists() and _AGENT_MARKER not in path.read_text():
         util.warn(f"{path.relative_to(config.ROOT)} exists and isn't generated — "
@@ -719,6 +773,9 @@ def _agent_sync_issues(name: str) -> list[tuple[str, str]]:
     d = persona.resolve(name)  # resolved, so a parent charter/tool change marks children stale
     if not d:
         return []
+    if persona.is_draft(name):
+        return []  # by design, and the draft warning already says so — telling the author
+                   # to run sync-agents here would be advice that cannot work
     path = _agents_dir() / f"{name}.md"
     if not path.exists():
         return [("warn", "no generated sub-agent — run `charter persona sync-agents`")]
@@ -769,10 +826,10 @@ def cmd_persona_stats(args) -> int:
     # DISPATCH is the signal memory volume is blind to: a persona can hold plenty of
     # memory and still never be *used*, while the work it owns routes to a generic agent.
     disp = dispatch.tally()
-    glyph = {"active": "●", "idle": "○", "dormant": "✗",
+    glyph = {"active": "●", "idle": "○", "dormant": "✗", "draft": "⚑",
              "orchestrator": "⬡", "standby": "◇", "advisory": "◇"}
     print(f"{'PERSONA':<28}{'MEM':>5}{'RECENT':>8}{'VERIFY':>8}{'DUP':>6}{'DISP':>6}  STATUS")
-    dormant = idle = unused = 0
+    dormant = idle = unused = drafts = 0
     for r in rows:
         v = f"{r['verify_pct']}%" if r["verify_pct"] is not None else "—"
         d = f"{r['dup_pct']}%" if r["dup_pct"] is not None else "—"
@@ -780,8 +837,14 @@ def cmd_persona_stats(args) -> int:
         n_disp = disp.get(r["persona"], 0)
         shared_row = r["persona"] == config.SHARED_PERSONA
         # "never dispatched" outranks the memory-derived status — it's the louder problem.
+        # A draft outranks BOTH: charter refuses to generate its sub-agent, so it *cannot*
+        # be dispatched. Counting it as "never dispatched" would blame a persona for
+        # obeying a rule we impose on it, and would bury the real signal among false ones.
         status = r["status"]
-        if not shared_row and n_disp == 0 and disp:
+        if not shared_row and persona.is_draft(r["persona"]):
+            status = "draft"
+            drafts += 1
+        elif not shared_row and n_disp == 0 and disp:
             status = "never dispatched"
             unused += 1
         print(f"{r['persona']:<28}{r['count']:>5}{rec:>8}{v:>8}{d:>6}"
@@ -805,6 +868,10 @@ def cmd_persona_stats(args) -> int:
     if unused:
         util.warn(f"{unused} persona(s) NEVER dispatched — they exist, lint green, and are "
                   f"unused. Check whether their work is routing to a generic agent instead.")
+    if drafts:
+        util.info(f"{drafts} draft persona(s) — charter generates no sub-agent while "
+                  f"`draft: true` is set, so they are undispatchable BY DESIGN and are not "
+                  f"counted above. Finish the charter, drop the line, then sync-agents.")
     if dormant:
         util.warn(f"{dormant} dormant persona(s) — a REAL prune signal (old, zero memory, no "
                   f"declared activity: profile). The steward can quiz-propose removal (cite this).")
@@ -1009,7 +1076,9 @@ def cmd_persona_sync_agents(args) -> int:
         util.info("No personas to sync. Create one first: charter persona create <name>.")
         return 0
 
-    written = [n for n in names if _write_agent(n) == "written"]
+    outcomes = {n: _write_agent(n) for n in names}
+    written = [n for n, o in outcomes.items() if o == "written"]
+    drafts = [n for n, o in outcomes.items() if o == "draft"]
 
     removed = []
     if not one and _agents_dir().exists():  # full sync also prunes orphaned generated agents
@@ -1021,6 +1090,10 @@ def cmd_persona_sync_agents(args) -> int:
 
     util.ok(f"Synced {len(written)} persona sub-agent(s) → "
             f".claude/agents/ ({', '.join(written) or 'none'})")
+    if drafts:
+        util.warn(f"Skipped {len(drafts)} draft persona(s): {', '.join(drafts)} — "
+                  "an unfinished charter must not become a sub-agent's system prompt. "
+                  "Finish it, drop the `draft: true` line, then re-run.")
     if removed:
         util.info("Removed stale generated agents: " + ", ".join(removed))
     for n in written:

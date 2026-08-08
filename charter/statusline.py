@@ -501,13 +501,58 @@ def _vault_glyph(vault: str) -> str:
 
 
 def _vault_dot(vault: str | None) -> str:
-    """Compact vault mark for persona chips: ✓ healthy · ! unhealthy · · not set up."""
+    """Compact vault mark for persona chips — four states, matching what
+    ``charter persona list`` reports in words:
+
+    * ``✓`` healthy — registered, readable, holding secrets;
+    * ``◦`` registered, but the file does not exist yet;
+    * ``!`` registered and unhealthy (unreadable, bad provider config);
+    * ``·`` not set up locally at all — the *normal* state across most of a committed
+      roster, since personas are committed and vaults are private.
+
+    The ``◦`` state used to render as a green ``✓``: ``plain-file.health()`` returns
+    ``ok=True`` with the detail "not created yet (<path>)", and this read only ``ok``.
+    `persona list` prints the detail and so was honest; the status line was claiming a
+    vault existed when it did not.
+    """
     try:
         from .secrets import registry
         if not vault or vault not in registry.vaults():
             return f" {_DIM}·{_R}"
-        ok, _ = registry.provider_for(vault).health()
-        return f" {_GREEN}✓{_R}" if ok else f" {_YELLOW}!{_R}"
+        ok, detail = registry.provider_for(vault).health()
+        if not ok:
+            return f" {_YELLOW}!{_R}"
+        if "not created yet" in (detail or ""):
+            return f" {_DIM}◦{_R}"
+        return f" {_GREEN}✓{_R}"
+    except Exception:
+        return ""
+
+
+def _health_mark(name: str, known: set[str] | None = None) -> str:
+    """Health mark for a persona chip — **only when something is wrong**.
+
+    ``⚑`` the charter is a draft, so charter generates no sub-agent for it and it
+    cannot be dispatched; ``✗`` its config is broken (dangling ``extends:``/``uses:``,
+    or an inheritance cycle). A healthy persona gets nothing: a row of ✓s becomes
+    furniture within a day, and then a real ✗ inside it draws no more attention than a
+    zero would.
+
+    Soft findings — no role, no ``delegate-when`` — deliberately do not appear here.
+    They are real, and `lint`/`doctor` have room to explain them; a chip does not.
+
+    Cost is why this calls :func:`persona.structural_errors` rather than `lint`: the
+    full lint walks the plugin cache, and even `lint(deep=False)` pays for the vault,
+    role, delegate-when and unknown-key checks (plus an import of `commands_persona`)
+    that produce nothing a chip can show. This renders on every single turn.
+    """
+    try:
+        from . import persona
+        if persona.is_draft(name):
+            return f" {_YELLOW}⚑{_R}"
+        if persona.structural_errors(name, known=known):
+            return f" {_RED}✗{_R}"
+        return ""
     except Exception:
         return ""
 
@@ -545,14 +590,16 @@ def _persona_chips(session: str | None = None) -> list[str]:
             return []
         active = persona.resolve_active()
         order = ([active] if active in names else []) + [n for n in names if n != active]
+        known = set(names)   # computed once for the whole column, not once per persona
         chips = []
         for n in order:
             dot = _vault_dot(persona.vault_of(n))
             badge = _mem_badge(_mem_count(n), _mem_count(n, ephemeral=True, session=session))
+            health = _health_mark(n, known=known)
             if n == active:
-                chips.append(f"{_MAGENTA}◆ {_BOLD}{n}{_R}{dot}{badge}")
+                chips.append(f"{_MAGENTA}◆ {_BOLD}{n}{_R}{dot}{badge}{health}")
             else:
-                chips.append(f"{_DIM}○ {n}{_R}{dot}{badge}")
+                chips.append(f"{_DIM}○ {n}{_R}{dot}{badge}{health}")
         return chips
     except Exception:
         return []
