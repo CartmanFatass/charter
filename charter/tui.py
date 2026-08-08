@@ -124,9 +124,17 @@ def term_width(default: int = 80, floor: int = 1) -> int:
 
     Clamped to at least *floor*. Status-line style programs get their size via
     ``$COLUMNS`` because stdout is a pipe, hence the env-first order.
+
+    Only a **positive** ``$COLUMNS`` counts. A real environment in this project exports
+    ``COLUMNS=0``; ``int("0")`` parses happily, so the env branch accepted it and
+    ``max(floor, 0)`` turned a meaningless value into a plausible-looking floor-width
+    render — the whole status line silently squeezed into 24 columns. Zero and
+    negatives now fall through to the tty size like any other unusable value.
     """
     try:
         w = int(os.environ["COLUMNS"])
+        if w <= 0:
+            raise ValueError(w)
     except (KeyError, ValueError):
         try:
             w = os.get_terminal_size().columns
