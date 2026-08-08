@@ -1,4 +1,4 @@
-"""Deterministic memory-curation engine (edm/curate.py): finds exact/near dups, stale,
+"""Deterministic memory-curation engine (charter/curate.py): finds exact/near dups, stale,
 index drift, and charter-worthy rule candidates; auto-applies ONLY tier-1 safe/reversible
 ops (exact-dup collapse via archive + index repair) and returns the rest as proposals.
 No LLM, fully deterministic — the semantic judgment stays in the steward agent layer."""
@@ -18,12 +18,60 @@ TODAY = datetime.date(2026, 7, 24)
 
 class CurateCase(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp(prefix="edm-curate-"))
+        self.d = Path(tempfile.mkdtemp(prefix="charter-curate-"))
         self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
 
     def _w(self, title, body, days_ago=0):
         stamp = datetime.datetime(2026, 7, 24, 12, 0) - datetime.timedelta(days=days_ago)
         return memstore.write(self.d, body, title, timestamped=True, stamp=stamp)
+
+    # --- read-only must disclose what --apply would do ---
+    def test_pending_auto_names_the_index_repair(self):
+        """A read-only report that hides an auto-op is how --apply surprises you.
+
+        Regression: an unindexed memory was silently linked by --apply while the
+        read-only run said nothing about it, so there was no way to know the
+        command would rewrite MEMORY.md.
+        """
+        p = self._w("Kept", "a fact")
+        memstore.index_path(self.d).write_text("# Memory Index\n")   # drop the link
+        rep = curate.report(self.d)
+        self.assertEqual(rep["index"]["missing"], [p.name])
+        pending = curate.pending_auto(rep)
+        self.assertTrue(any("repair index" in x for x in pending), pending)
+        self.assertTrue(any(p.name in x for x in pending), pending)
+
+    def test_pending_auto_names_exact_dup_collapse(self):
+        self._w("One", "identical body")
+        self._w("Two", "identical body")
+        rep = curate.report(self.d)
+        pending = curate.pending_auto(rep)
+        self.assertTrue(any("exact-duplicate" in x for x in pending), pending)
+
+    def test_pending_auto_is_empty_on_a_tidy_corpus(self):
+        self._w("Only", "a unique fact")
+        self.assertEqual(curate.pending_auto(curate.report(self.d)), [])
+
+    def test_pending_auto_mirrors_what_apply_safe_actually_does(self):
+        """The two must not drift: anything announced has to really happen."""
+        p = self._w("Kept", "a fact")
+        memstore.index_path(self.d).write_text("# Memory Index\n")
+        rep = curate.report(self.d)
+        self.assertTrue(curate.pending_auto(rep), "announced nothing")
+        actions = curate.apply_safe(self.d)
+        self.assertTrue(actions, "announced an op that apply_safe did not perform")
+        self.assertEqual(curate.report(self.d)["index"]["missing"], [])
+        self.assertIn(p.name, memstore.index_path(self.d).read_text())
+
+    def test_a_dangling_link_stays_a_proposal_not_an_auto_op(self):
+        """Pruning is a judgment call — the fix may be to write the missing file."""
+        self._w("Real", "a fact")
+        idx = memstore.index_path(self.d)
+        idx.write_text(idx.read_text() + "- [Gone](never-written.md)\n")
+        rep = curate.report(self.d)
+        self.assertEqual(rep["index"]["orphans"], ["never-written.md"])
+        self.assertFalse(any("never-written" in x for x in curate.pending_auto(rep)))
+        self.assertTrue(any("never-written" in x for x in curate.proposals(rep)))
 
     # --- body normalization (exact-dup basis) ---
     def test_body_strips_header_and_normalizes(self):

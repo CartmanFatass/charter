@@ -839,6 +839,15 @@ def cmd_persona_optimize(args) -> int:
                 rel = str(mdir.relative_to(config.ROOT))
                 commit_memory_reactive([rel], f"persona({n}): curate — {len(actions)} safe op(s)")
             rep = curate.report(mdir, stale_days=stale_days)  # refresh for proposals
+        else:
+            # A read-only run must name the ops --apply would perform. Silently
+            # rewriting an index the report never mentioned is how "read-only"
+            # stops meaning anything.
+            pending = curate.pending_auto(rep)
+            if pending:
+                print("  would auto-apply (re-run with --apply):")
+                for a in pending:
+                    print(f"    + {a}")
         props = curate.proposals(rep)
         if props:
             print("  proposals (steward: quiz the engineer — not auto-applied):")

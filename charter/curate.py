@@ -107,6 +107,27 @@ def apply_safe(mem_dir: Path) -> list[str]:
     return actions
 
 
+def pending_auto(rep: dict) -> list[str]:
+    """What ``apply_safe`` *would* do — for the read-only report.
+
+    Deliberately kept beside ``apply_safe``: a read-only report that hides a
+    change the tool will make is worse than no report, because you approve
+    ``--apply`` without knowing it rewrites ``MEMORY.md``. Every branch here
+    must mirror one in ``apply_safe``.
+    """
+    out = []
+    if rep["exact_dups"]:
+        redundant = sum(len(g) - 1 for g in rep["exact_dups"])
+        out.append(f"collapse {len(rep['exact_dups'])} exact-duplicate group(s) — "
+                   f"archives {redundant} redundant copy(ies), reversible")
+    missing = rep["index"]["missing"]
+    if missing:
+        shown = ", ".join(missing[:3]) + (", …" if len(missing) > 3 else "")
+        out.append(f"repair index: link {len(missing)} memory(ies) that exist but "
+                   f"aren't listed ({shown})")
+    return out
+
+
 def proposals(rep: dict) -> list[str]:
     """Human-readable tier-2 PROPOSALS from a report — what the steward should quiz on
     (never auto-applied): near-dup merges, stale archives, charter promotions."""
