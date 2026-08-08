@@ -12,7 +12,7 @@ today — stores secrets as **plaintext JSON on disk**, at file mode **0600** (o
 read/write only). There is **no encryption at rest**. Anyone with read access to your
 user account, or a backup of your home directory, or a malicious process running as
 you, can read the file directly. `charter` does not pretend otherwise: the vault
-registry and every vault file live under `.edm/` (gitignored — never committed, never
+registry and every vault file live under `.charter/` (gitignored — never committed, never
 synced anywhere by `charter` itself).
 
 If you want encryption at rest, use your **OS keychain** (macOS Keychain, a real
@@ -51,14 +51,14 @@ shell history**, while still letting an agent *use* the credential:
   argument — an argument shows up in shell history and `ps` output for any other
   process on the machine to read.
 - A Claude Code guard hook denies `--reveal` outright, and denies reading a vault file
-  directly (`cat .edm/vaults/…`) — both would print a secret straight into the
+  directly (`cat .charter/vaults/…`) — both would print a secret straight into the
   conversation. **A denial here is that guard working, not a bug** — see the README's
   "one credential" section for the same idea applied to git auth.
 
 ## Setting one up
 
 ```
-charter vault add devops --provider plain-file --file .edm/vaults/devops.json --persona devops
+charter vault add devops --provider plain-file --file .charter/vaults/devops.json --persona devops
 charter secret set devops API_TOKEN --stdin
 charter secret list devops                 # keys only, never values
 charter secret audit devops --days 90       # flag anything old enough to rotate

@@ -88,8 +88,8 @@ ephemeral**:
 
 |  | Persistent (committed) | Ephemeral (session scratch) |
 | --- | --- | --- |
-| **Own** | `personas/<name>/memory/` | `.edm/persona-state/ephemeral/<session>/<name>/` |
-| **Shared** | `personas/_shared/memory/` | `.edm/persona-state/ephemeral/<session>/_shared/` |
+| **Own** | `personas/<name>/memory/` | `.charter/persona-state/ephemeral/<session>/<name>/` |
+| **Shared** | `personas/_shared/memory/` | `.charter/persona-state/ephemeral/<session>/_shared/` |
 
 The persona decides the quadrant when it writes:
 
