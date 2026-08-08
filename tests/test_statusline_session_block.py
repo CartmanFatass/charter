@@ -1,13 +1,15 @@
-"""The session block — the rows under the repo tree that the layout already wasted.
+"""Session news and control-plane alerts.
 
-A third column was the obvious idea and does not fit: two columns already need 131
-cols, a third needs 167, and a typical pane is 150. The free space is *vertical* —
-on a real control plane 11 of 13 left-hand rows were `│` padding — so this block
-costs no width and works at 80 columns.
+These used to render as one block *inside the repo column*, filling the `│` padding
+rows the layout already wasted. That was free vertically but wrong by scope: "⛊ 1
+denied" sat under a repo tree and read as news about a repo. They are now split by
+what they are — `_session_news` (counters about THIS session, which join the context
+gauges on the bottom strip) and `_alerts` (actionable control-plane problems that
+carry the command that fixes them, on their own full-width lines).
 
-It renders ONLY when it has news. A block present every turn becomes furniture
-within a day, and then a real guard denial in it gets no more attention than a
-zero. Presence is the signal.
+Both still render ONLY when they have something to say. A counter present every turn
+becomes furniture within a day, and then a real guard denial in it gets no more
+attention than a zero. Presence is the signal.
 """
 
 from __future__ import annotations
@@ -39,35 +41,35 @@ class Silence(unittest.TestCase):
         self.addCleanup(_restore)
 
     def test_quiet_session_renders_nothing(self):
-        self.assertEqual(statusline._session_block("no-such-session", "default"), [])
+        self.assertEqual(statusline._session_news("no-such-session"), [])
 
     def test_no_session_id_renders_nothing(self):
-        self.assertEqual(statusline._session_block(None, "default"), [])
+        self.assertEqual(statusline._session_news(None), [])
 
     def test_in_flight_dispatch_appears(self):
         from charter import inflight
         inflight.start("coder")
-        out = _plain(statusline._session_block(None, "default"))
+        out = _plain(statusline._session_news(None))
         self.assertTrue(any("in flight" in l and "coder" in l for l in out), out)
 
     def test_many_in_flight_are_truncated_not_wrapped(self):
         from charter import inflight
         for n in ("a", "b", "c", "d", "e"):
             inflight.start(n)
-        out = _plain(statusline._session_block(None, "default"))
+        out = _plain(statusline._session_news(None))
         self.assertTrue(any("…" in l for l in out), out)
 
     def test_version_drift_appears_with_its_fix(self):
         from charter import instance
         instance.set_locked_version(config.ROOT, "99.0.0")
-        out = _plain(statusline._session_block(None, "default"))
+        out = _plain(statusline._alerts("default"))
         self.assertTrue(any("pinned" in l and "99.0.0" in l for l in out), out)
         self.assertTrue(any("charter version sync" in l for l in out), out)
 
     def test_a_matching_lock_is_not_reported(self):
         from charter import __version__, instance
         instance.set_locked_version(config.ROOT, __version__)
-        out = _plain(statusline._session_block(None, "default"))
+        out = _plain(statusline._alerts("default"))
         self.assertFalse(any("pinned" in l for l in out), out)
 
 
@@ -83,21 +85,30 @@ class NeverBreaksTheStatusLine(unittest.TestCase):
         orig = config.ROOT
         config.ROOT = Path("/nonexistent-control-plane-xyz")
         try:
-            statusline._session_block("s", "default")   # must not raise
+            statusline._session_news("s")   # must not raise
         finally:
             config.ROOT = orig
 
-    def test_render_still_works_when_the_block_explodes(self):
+    def test_render_still_works_when_the_news_explodes(self):
         """The status line's whole contract is that it never crashes."""
-        orig = statusline._session_block
-        statusline._session_block = lambda *a: 1 / 0
+        orig = statusline._session_news
+        statusline._session_news = lambda *a: 1 / 0
         try:
             out = statusline.render({"session_id": "s"})
             self.assertTrue(out.strip())
         finally:
-            statusline._session_block = orig
+            statusline._session_news = orig
 
-    def test_block_lines_respect_the_width(self):
+    def test_render_still_works_when_the_alerts_explode(self):
+        orig = statusline._alerts
+        statusline._alerts = lambda *a: 1 / 0
+        try:
+            out = statusline.render({"session_id": "s"})
+            self.assertTrue(out.strip())
+        finally:
+            statusline._alerts = orig
+
+    def test_news_lines_respect_the_width(self):
         from charter import inflight
         td = TemporaryDirectory()
         self.addCleanup(td.cleanup)

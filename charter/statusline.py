@@ -51,6 +51,11 @@ _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
 _SAFETY = 2  # render to (COLUMNS − this); a line filling the last column can wrap
 _BRAND_GAP = 3  # min blank columns between content and the right-aligned brand
+# Extra headroom the brand demands beyond `width`. A real session cropped the brand to
+# `⬢ charter 0.10…` — impossible from `_with_brand`, which fits-or-drops — so the pane
+# gives ~1 column less than COLUMNS advertises. The brand is the one thing that must
+# never be half-rendered, so it alone pays this margin.
+_BRAND_MARGIN = 2
 
 #: GitLab pipeline status → (colour, glyph, label). Glyphs are single-width so
 #: columns stay aligned.
@@ -605,16 +610,22 @@ def _persona_chips(session: str | None = None) -> list[str]:
         return []
 
 
-def _session_block(sid: str | None, active: str) -> list[str]:
-    """Lines for the empty rows under the repo tree — only when there is news.
+def _session_news(sid: str | None) -> list[str]:
+    """Counters for what has happened **in this session** — in flight, denied,
+    recorded, dispatched.
 
-    Deliberately silent when nothing is happening. A block that renders every turn
-    becomes furniture within a day, and then a real guard denial appearing in it
-    gets no more attention than a zero would. Presence IS the signal.
+    Deliberately silent when nothing is happening. A counter that renders every turn
+    becomes furniture within a day, and then a real guard denial appearing in it gets
+    no more attention than a zero would. Presence IS the signal.
 
-    Everything here is already computed elsewhere and costs well under a
-    millisecond; the status line renders on every turn, so nothing may be added
-    that reads the network or walks a repo.
+    Returns the pieces, not a line: they join the context gauges on the session strip,
+    because they answer the same question (*what is happening right now*) — which is
+    exactly what they did NOT do while they rendered inside the repo column, where
+    "⛊ 1 denied" sat under a repo tree and read as news about a repo.
+
+    Everything here is already computed elsewhere and costs well under a millisecond;
+    the status line renders on every turn, so nothing may be added that reads the
+    network or walks a repo.
     """
     out: list[str] = []
     try:
@@ -622,7 +633,7 @@ def _session_block(sid: str | None, active: str) -> list[str]:
         live = inflight.live()
         if live:
             who = ", ".join(live[:3]) + (", …" if len(live) > 3 else "")
-            out.append(f"  {_YELLOW}⚡{_R} {_DIM}in flight{_R} {len(live)} {_DIM}· {who}{_R}")
+            out.append(f"{_YELLOW}⚡{_R}{_DIM}in flight{_R} {len(live)} {_DIM}· {who}{_R}")
     except Exception:
         pass
 
@@ -634,31 +645,54 @@ def _session_block(sid: str | None, active: str) -> list[str]:
             k = e.get("event")
             if k:
                 kinds[k] = kinds.get(k, 0) + 1
-        bits = []
         if kinds.get("deny"):
-            bits.append(f"{_RED}⛊ {kinds['deny']} denied{_R}")
+            out.append(f"{_RED}⛊ {kinds['deny']} denied{_R}")
         if kinds.get("memory"):
-            bits.append(f"{_GREEN}✎ {kinds['memory']}{_R}{_DIM} recorded{_R}")
+            out.append(f"{_GREEN}✎ {kinds['memory']}{_R}{_DIM} recorded{_R}")
         if kinds.get("dispatch"):
-            bits.append(f"{_DIM}⇢ {kinds['dispatch']} dispatched{_R}")
-        if bits:
-            out.append("  " + f"{_DIM} · {_R}".join(bits))
+            out.append(f"{_DIM}⇢ {kinds['dispatch']} dispatched{_R}")
     except Exception:
         pass
+    return out
 
+
+def _alerts(active: str) -> list[str]:
+    """Full-width alert lines — a pinned-version mismatch, workspaces needing reinit.
+
+    Kept off the session strip and out of both columns: these are not telemetry but
+    *actionable* problems that carry the command that fixes them, and they are about
+    the control plane rather than this session's activity. They render only when real,
+    so they cost no rows on a healthy control plane.
+    """
+    out: list[str] = []
     try:
         from . import __version__, config, instance as _instance, workspace as _ws
         locked = _instance.locked_version(_instance.load(config.ROOT))
         if locked and locked != __version__:
-            out.append(f"  {_YELLOW}⚠{_R} {_DIM}charter{_R} {__version__} {_DIM}→ pinned{_R} "
+            out.append(f"{_YELLOW}⚠{_R} {_DIM}charter{_R} {__version__} {_DIM}→ pinned{_R} "
                        f"{locked}{_DIM} · charter version sync{_R}")
         stale = [w for w in _ws.list_workspaces() if w != active and _ws.needs_reinit(w)]
         if stale:
-            out.append(f"  {_YELLOW}⚠{_R} {_DIM}reinit{_R} {len(stale)} {_DIM}ws · "
+            out.append(f"{_YELLOW}⚠{_R} {_DIM}reinit{_R} {len(stale)} {_DIM}ws · "
                        f"charter ws reinit --all{_R}")
     except Exception:
         pass
     return out
+
+
+def _session_strip(payload: dict, sid: str | None) -> str:
+    """The bottom zone: everything true of **this session**, on one line.
+
+    ``ctx``/``⚡`` (context + cache health) sit here rather than in the top line
+    because they describe the session, not the workspace — the top line answers
+    *where am I*, and mixing a session gauge into it was most of why the old header
+    read as unrelated items in a row.
+
+    Empty string when there is nothing to report (a fresh session or one just past
+    ``/compact`` has no usage yet): the brand alone does not justify a row.
+    """
+    parts = [*_context_gauge(payload), *_session_news(sid)]
+    return f"{_DIM} · {_R}".join(parts) if parts else ""
 
 
 def _brand() -> str:
@@ -687,6 +721,13 @@ def _with_brand(body: str, width: int) -> str:
     Appended after layout rather than inside it: the columns are width-constrained
     and threading a right-hand chunk through them would push real content out.
     Dropped entirely on a narrow pane — branding must never cost a repo row.
+
+    ``_BRAND_MARGIN`` is why the check is not simply "does it fit in ``width``". A real
+    session rendered ``⬢ charter 0.10…``, which this function cannot produce — it fits
+    or it drops, it never truncates. So the crop came from outside: the pane gave one
+    column less than ``COLUMNS`` promised. Rather than guess the exact reserve, keep a
+    margin, so an off-by-one anywhere (the pane's, or a terminal that draws ``⬢`` two
+    cells wide) costs the brand instead of shearing it into nonsense.
     """
     try:
         brand = _brand()
@@ -695,7 +736,7 @@ def _with_brand(body: str, width: int) -> str:
             return body
         last = lines[-1]
         used, need = tui.width(last), tui.width(brand)
-        if used + need + _BRAND_GAP > width:
+        if used + need + _BRAND_GAP + _BRAND_MARGIN > width:
             return body                      # no room: content wins
         lines[-1] = last + " " * (width - used - need) + brand
         return "\n".join(lines)
@@ -731,13 +772,14 @@ def render(payload: dict | None = None) -> str:
         pin = f"{_YELLOW}*{_R}" if src == "$CHARTER_WORKSPACE" else ""
         # Reinit tip sits right after the name so it survives truncation on narrow panes.
         reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
+        # Zone 1 — WHERE I am. Identity and navigation only: which workspace is active,
+        # and how many others exist to switch to. Everything that used to ride along
+        # here (repo count, vault count, ctx/⚡) described something else and now sits
+        # with the thing it describes.
         summary = f"{_DIM} · {_R}".join(filter(None, [
             f"{_CYAN}⬢{_R} {_BOLD}{active}{_R}{pin}",
             reinit,
-            f"{_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}",
             f"{_DIM}ws{_R} {nws}",
-            f"{_DIM}vaults{_R} {nv}" if nv else None,
-            *_context_gauge(payload),
         ]))
 
         sid = payload.get("session_id")
@@ -747,12 +789,22 @@ def render(payload: dict | None = None) -> str:
         return f"{_CYAN}⬢{_R} charter"
 
     try:
-        # shared-namespace memory: persistent (committed) + ephemeral (this session)
+        # Zone 2 — one header row, one head per column, each stating what its own
+        # column holds. `repos N/M` used to sit in the top line and `personas`/`vaults`
+        # in the right column, so two structurally identical facts rendered in two
+        # different places; a count now always sits next to what it counts.
         shared_badge = _mem_badge(_mem_count("_", shared=True),
                                   _mem_count("_", shared=True, ephemeral=True, session=sid))
-        header = f"{_MAGENTA}◈{_R} {_DIM}personas{_R}" + (
+        left_head = f"{_CYAN}◫{_R} {_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}"
+        header = f"{_MAGENTA}◈{_R} {_DIM}personas{_R} {len(chips)}" + (
+            f"{_DIM} · vaults{_R} {nv}" if nv else "") + (
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")
-        if repo_lines and chips and width >= _LEFT_W + _RIGHT_MIN_W:
+        strip = _session_strip(payload, sid)
+        alerts = _alerts(active)
+        # `left_head` means the left column is never empty, so two columns no longer
+        # require a cloned repo — a fresh workspace still gets the grouped layout with
+        # an honest `◫ repos 0/38`.
+        if chips and width >= _LEFT_W + _RIGHT_MIN_W:
             # Summary on its own full-width line; below it, two columns — repos left,
             # personas right. The header sits beside a full repo row (pairing it with
             # the short summary row misaligned it on some terminals), so it lines up
@@ -760,20 +812,30 @@ def render(payload: dict | None = None) -> str:
             # with │ so no row is blank on the left (Claude Code collapses those to col 0).
             # News goes in the rows the repo tree already leaves blank — free
             # vertically, so it costs no width and works at 80 columns.
-            left = list(repo_lines) + _session_block(sid, active)
+            left = [left_head, *repo_lines]
             right = [header, *chips]
             if len(right) > len(left):
-                if left:
-                    left[-1] = left[-1].replace(_TREE_END, _TREE_MID, 1)  # tree keeps going
+                # The tree keeps going below the last repo, so its `└─` must become
+                # `├─`. Find the row that actually carries the elbow — `left[-1]` is
+                # not it whenever the last repo emitted a worktree summary line
+                # underneath, which left a `└─` sitting above a column of `│`.
+                for i in range(len(left) - 1, -1, -1):
+                    if _TREE_END in left[i]:
+                        left[i] = left[i].replace(_TREE_END, _TREE_MID, 1)
+                        break
                 while len(left) < len(right):
                     left.append(f"  {_DIM}│{_R}")
-            body = tui.truncate(summary, width) + "\n" + _columns(left, right, width)
+            rows = [tui.truncate(summary, width), _columns(left, right, width)]
+            rows += [tui.truncate(a, width) for a in alerts]
+            if strip:
+                rows.append(tui.truncate(strip, width))
+            body = "\n".join(rows)
         elif chips:
-            body = _columns([summary, *repo_lines, *_session_block(sid, active),
-                             header, *chips], None, width)
+            body = _columns([summary, left_head, *repo_lines, header, *chips,
+                             *alerts, *([strip] if strip else [])], None, width)
         else:
-            body = _columns([summary, *repo_lines, *_session_block(sid, active)],
-                            None, width)
+            body = _columns([summary, left_head, *repo_lines,
+                             *alerts, *([strip] if strip else [])], None, width)
     except Exception:
         # Never crash the status line if layout fails — plain truncated stack.
         plain = [summary, *repo_lines]

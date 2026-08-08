@@ -203,3 +203,35 @@ other way — an *older* control plane opened by a newer charter — is always f
 charter versions can add baseline directories (`personas/`, `inventory/`, `workspaces/`)
 a control plane predates, and `charter reinit` creates whatever's missing, additively,
 never touching what's already there.
+
+## The status line
+
+Wired by `charter init` into `.claude/settings.json`, rendered by Claude Code on every
+turn. It is grouped by **scope** — each zone answers exactly one question, and a count
+always sits next to the thing it counts:
+
+```
+⬢ umbrella-improvements · ws 9                                    ← WHERE am I
+◫ repos 2/38                    │ ◈ personas 13 · vaults 6 · shared ✎130
+├─ easysender-ui-workspace  main  ✗ failed │ ◆ steward · ✎2       ← WHAT I'm on × WHO I am
+└─ iam-service ⑂2           main  ✓ passed │ ○ devops ✓ ✎192
+ctx 22% · ⚡90% · ⛊1 denied · ✎1 recorded            ⬢ charter 0.10.0   ← THIS session
+```
+
+- **Top — identity and navigation.** The active workspace and how many others exist.
+  Nothing else: the repo count describes the left column, the vault count describes the
+  right one, and the gauges describe the session, so each lives with what it describes.
+- **Columns — the Role × Task axes.** Left is the *task* (repos cloned into this
+  workspace, their branch, CI and MRs); right is the *role* (the persona roster, each
+  chip carrying its vault state and memory counts). Personas are global, repos are
+  workspace-scoped — two independent axes, two columns.
+- **Bottom — this session.** Context and prompt-cache health, plus counters for what has
+  happened: in-flight sub-agents, guard denials, memories recorded, dispatches. Absent
+  entirely when there is nothing to report, so a denial appearing there is *news*.
+  The brand and version sit at its right edge.
+- **Alerts** (a pinned-version mismatch, workspaces needing `reinit`) get their own
+  full-width lines above the strip — actionable problems carrying the command that
+  fixes them, not telemetry.
+
+Two columns need 131 columns of width; below that everything stacks in the same order.
+Nothing here reads the network or shells out to git — it renders every turn.

@@ -77,11 +77,15 @@ class ContextGaugeCase(unittest.TestCase):
         self.assertIn("⚡50%", out)
         self.assertNotIn("ctx", out)
 
-    def test_gauge_appears_in_the_rendered_summary(self):
-        line = statusline.render({"session_id": "t", **_payload(pct=42, read=900, write=100)})
-        first = re.sub(r"\033\[[0-9;]*m", "", line.splitlines()[0])
-        self.assertIn("ctx 42%", first)
-        self.assertIn("⚡90%", first)
+    def test_gauge_appears_on_the_session_strip(self):
+        """The gauges describe the SESSION, so they belong on the bottom strip with the
+        rest of it — not in the top line, which answers only 'where am I'. Mixing them
+        into that line was most of why the old header read as unrelated items."""
+        out = statusline.render({"session_id": "t", **_payload(pct=42, read=900, write=100)})
+        lines = [re.sub(r"\033\[[0-9;]*m", "", l) for l in out.splitlines() if l.strip()]
+        self.assertIn("ctx 42%", lines[-1])
+        self.assertIn("⚡90%", lines[-1])
+        self.assertNotIn("ctx", lines[0])
 
     def test_render_survives_a_malformed_payload(self):
         # the status line must never crash the footer
