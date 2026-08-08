@@ -18,6 +18,44 @@ class StructureCase(PersonaIso):
         workspace.ensure(name)
         workspace.scaffold(name)
 
+    # --- pre-rename marker migration ---
+    def test_legacy_marker_is_migrated_not_treated_as_v0(self):
+        """The marker was renamed .edm-structure -> .charter-structure.
+
+        Reading the new name only would reset every existing workspace to v0:
+        an up-to-date workspace reads as stale, gets flagged for reinit, and on
+        a LIVE workspace that manufactures a commit. Found in the wild — nine
+        workspaces all reported stale after the rename.
+        """
+        self._fresh("w")
+        d = workspace.workspace_dir("w")
+        (d / workspace._STRUCTURE_MARKER).rename(d / workspace._LEGACY_STRUCTURE_MARKER)
+
+        self.assertEqual(workspace.structure_version("w"), workspace.STRUCTURE_VERSION)
+        self.assertFalse(workspace.needs_reinit("w"))
+        self.assertTrue((d / workspace._STRUCTURE_MARKER).exists())
+        self.assertFalse((d / workspace._LEGACY_STRUCTURE_MARKER).exists(),
+                         "the legacy marker should be renamed, not left as litter")
+
+    def test_legacy_marker_keeps_its_own_version(self):
+        """Migrate by rename, never by re-stamping — a genuinely old workspace
+        must stay old so reinit still heals it."""
+        self._fresh("w")
+        d = workspace.workspace_dir("w")
+        (d / workspace._STRUCTURE_MARKER).unlink()
+        (d / workspace._LEGACY_STRUCTURE_MARKER).write_text("1\n")
+
+        self.assertEqual(workspace.structure_version("w"), 1)
+        self.assertTrue(workspace.needs_reinit("w"))
+
+    def test_both_markers_present_keeps_the_new_one_and_drops_the_old(self):
+        self._fresh("w")
+        d = workspace.workspace_dir("w")
+        (d / workspace._LEGACY_STRUCTURE_MARKER).write_text("0\n")
+
+        self.assertEqual(workspace.structure_version("w"), workspace.STRUCTURE_VERSION)
+        self.assertFalse((d / workspace._LEGACY_STRUCTURE_MARKER).exists())
+
     # --- detection ---
     def test_fresh_workspace_is_up_to_date(self):
         self._fresh("w")

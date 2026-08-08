@@ -627,10 +627,30 @@ def read_vision(name: str) -> str:
 
 STRUCTURE_VERSION = 2  # v2: memory is a per-file DB (MEMORY.md index), not a lone notes.md
 _STRUCTURE_MARKER = ".charter-structure"
+_LEGACY_STRUCTURE_MARKER = ".edm-structure"   # pre-rename; migrated in place on read
 
 
 def _structure_marker(name: str) -> Path:
-    return workspace_dir(name) / _STRUCTURE_MARKER
+    """The marker path, migrating a pre-rename ``.edm-structure`` the first time.
+
+    Renaming the marker without moving it would silently reset every existing
+    workspace to v0: the new name isn't there, so a fully up-to-date workspace
+    reads as stale and gets flagged for reinit. Harmless (reinit is additive and
+    idempotent) but wrong, noisy, and on a LIVE workspace it manufactures a
+    commit. Rename rather than re-stamp, so a genuinely older marker keeps its
+    own version instead of being claimed as current.
+    """
+    d = workspace_dir(name)
+    new = d / _STRUCTURE_MARKER
+    legacy = d / _LEGACY_STRUCTURE_MARKER
+    if not new.exists() and legacy.exists():
+        try:
+            legacy.rename(new)
+        except OSError:
+            return legacy          # unreadable/cross-device: still read the old one
+    elif new.exists() and legacy.exists():
+        legacy.unlink(missing_ok=True)   # both present: the new one already won
+    return new
 
 
 def _required_components(name: str) -> dict[str, Path]:
