@@ -78,7 +78,50 @@ charter persona secret exec --env TOKEN=API_TOKEN -- some-cli
 
 | Provider | id | Status |
 | --- | --- | --- |
-| Plain file (JSON, 0600) | `plain-file` | Implemented — the only provider that ships today. |
+| Plain file (JSON, 0600) | `plain-file` | Implemented. Stores the value itself. |
+| Reference (`op://`, `vault://`) | `reference` | Implemented. Stores a **URI**; the value is fetched at read time. |
+
+### Reference vaults — when your secrets already live somewhere else
+
+If your team already runs HashiCorp Vault or 1Password, a charter vault would be a
+**third** place a credential lives, and a third place it can go stale. A reference
+vault avoids that: the file holds a pointer, not a secret.
+
+```bash
+charter vault add team --provider reference --file .charter/vaults/team.json
+charter secret set team DEPLOY_TOKEN --value 'op://Eng/deploy/token'
+```
+
+Every consuming path works unchanged — the value is resolved only when something
+actually needs it:
+
+```bash
+charter secret exec team --env T=DEPLOY_TOKEN -- deploy.sh
+charter secret exec team --dotenv F=TOKEN:DEPLOY_TOKEN -- some-tool
+```
+
+| Reference | Resolved with |
+| --- | --- |
+| `op://<vault>/<item>/<field>` | `op read --no-newline <uri>` |
+| `vault://<path>#<FIELD>` | `vault kv get -field=<FIELD> <path>` |
+
+Deliberate properties:
+
+- **A bare value is refused.** Storing one would quietly turn a reference vault into a
+  plaintext vault — the exact divergence this provider exists to prevent.
+- **References are validated when you write them**, so a malformed URI fails as you
+  type it, not at 3am when something tries to read it.
+- **Resolvers are invoked as argv, never a shell string**, so a reference can never be
+  command injection whatever it contains.
+- **`health()` never resolves.** `vault list` and `doctor` call it routinely; resolving
+  there would hit 1Password on every listing and could prompt for re-auth.
+- **A failed resolve reports status, not output** — a resolver's stderr can echo what it
+  fetched.
+- You still need the CLI installed and authenticated; charter shells out to it and says
+  so plainly when it is missing.
+
+The reference file is still written 0600. It holds no secrets, but it names your vault
+layout, which is not worth publishing either.
 
 The interface (`charter.secrets.base.VaultProvider`) is deliberately small (`get`,
 `set`, `delete`, `keys`, `health`) so a keychain- or vault-backed provider can be added

@@ -13,12 +13,14 @@ import os
 from .. import config
 from .base import VaultError, VaultNotConfigured, VaultProvider
 from .plain_file import PlainFileProvider
+from .reference import ReferenceProvider
 
 #: provider id -> implementation class. Add real providers here as they land.
 PROVIDERS: dict[str, type[VaultProvider]] = {
     cls.id: cls
     for cls in (
         PlainFileProvider,
+        ReferenceProvider,
     )
 }
 
