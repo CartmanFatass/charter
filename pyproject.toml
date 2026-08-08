@@ -8,9 +8,31 @@ version = "0.1.0"
 description = "Personas, workspaces and memory for Claude Code agents across many repos"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
 keywords = ["claude-code", "agents", "monorepo", "polyrepo", "developer-tools"]
+authors = [{ name = "Aaron Yordanyan", email = "aaron.yor@gmail.com" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Version Control :: Git",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/diazoxide/charter"
+Repository = "https://github.com/diazoxide/charter"
+Issues = "https://github.com/diazoxide/charter/issues"
+Changelog = "https://github.com/diazoxide/charter/commits/main"
 
 [project.scripts]
 charter = "charter.cli:main"
