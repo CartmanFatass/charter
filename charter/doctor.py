@@ -295,6 +295,28 @@ def check_vaults() -> Result:
 _INDEX_LINES_WARN = 150
 
 
+def check_version_lock() -> Result:
+    """`[charter] version` vs what is installed.
+
+    Opt-in: a control plane that pins nothing is a perfectly normal state and
+    reports OK, not a nag. When it does pin, drift is a WARN rather than a FAIL —
+    this runs from the SessionStart hook, and charter must never make its own
+    tooling the reason someone cannot work (being offline is not a defect).
+    """
+    from . import __version__, config as _config, instance as _instance
+    try:
+        locked = _instance.locked_version(_instance.load(_config.ROOT))
+    except Exception as e:
+        return Result("version lock", OK, detail=f"not checked ({e})")
+    if not locked:
+        return Result("version lock", OK, detail="not pinned")
+    if locked == __version__:
+        return Result("version lock", OK, detail=f"pinned {locked}, in sync")
+    return Result("version lock", WARN,
+                  detail=f"pinned {locked}, running {__version__}",
+                  hint="Run: charter version sync  (conforms this machine to the lock)")
+
+
 def check_memory_indexes() -> Result:
     """Every memory base's MEMORY.md must agree with the files beside it.
 
@@ -403,6 +425,7 @@ def run_all() -> list[Result]:
         results.append(check_forge_cli(forge))
         results.append(check_forge_auth(forge))
     results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
-                check_inventory(), check_vaults(), check_memory_indexes(),
+                check_inventory(), check_vaults(), check_version_lock(),
+                check_memory_indexes(),
                 check_plugin_skew()]
     return results

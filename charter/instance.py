@@ -87,6 +87,60 @@ def default_workspace_of(cfg: dict, fallback: str) -> str:
 SHARE_MODES = ("local", "commit", "push")
 
 
+# --------------------------------------------------------------------------- #
+# version lock — `[charter] version`, an OPT-IN pin shared like a lockfile.    #
+# Absent means charter does nothing: committing the key is the act of opting a  #
+# team into conformance. Exact, not a floor, so it downgrades too — pinning     #
+# back to a known-good release is the case you most want to be automatic.      #
+# --------------------------------------------------------------------------- #
+def locked_version(cfg: dict) -> str | None:
+    """The version this control plane pins, or None when it does not pin one."""
+    v = (cfg.get("charter") or {}).get("version")
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def set_locked_version(root: Path, version: str) -> bool:
+    """Write ``[charter] version`` into charter.toml, preserving the rest verbatim.
+
+    Edited as text rather than round-tripped: stdlib ``tomllib`` reads TOML but
+    cannot write it, and re-emitting through any serialiser would strip every
+    comment the file carries — unacceptable in a file people hand-edit.
+
+    The edit is confined to the ``[charter]`` section's own line span. An earlier
+    draft substituted the first ``version =`` line in the file, which happily
+    rewrote ``[[forge]] version = "api-v4"`` and left the lock untouched — silent
+    corruption of a committed config.
+    """
+    import re
+    p = Path(root) / MARKER
+    try:
+        lines = p.read_text().splitlines(keepends=True)
+    except OSError:
+        return False
+
+    header = re.compile(r"^[ \t]*\[charter\][ \t]*$")
+    any_header = re.compile(r"^[ \t]*\[")
+    key = re.compile(r"^([ \t]*version[ \t]*=[ \t]*).*$")
+
+    start = next((i for i, ln in enumerate(lines) if header.match(ln)), None)
+    if start is None:
+        tail = "" if not lines or lines[-1].endswith("\n") else "\n"
+        lines += [tail, "\n", "[charter]\n", f'version = "{version}"\n']
+    else:
+        stop = next((i for i in range(start + 1, len(lines)) if any_header.match(lines[i])),
+                    len(lines))
+        hit = next((i for i in range(start + 1, stop) if key.match(lines[i])), None)
+        if hit is None:
+            lines.insert(start + 1, f'version = "{version}"\n')
+        else:
+            lines[hit] = key.sub(lambda m: f'{m.group(1)}"{version}"', lines[hit])
+    try:
+        p.write_text("".join(lines))
+    except OSError:
+        return False
+    return True
+
+
 def clamp_share(value: str | None) -> str:
     """Clamp any candidate posture value to a known ``SHARE_MODES`` entry, defaulting to
     ``local`` when it isn't one.

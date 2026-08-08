@@ -561,12 +561,51 @@ def _memory_digest(name: str) -> str:
     )
 
 
+def _autosync_version_lock() -> str | None:
+    """Conform this machine to `[charter] version` — once per session, loudly.
+
+    Opt-in: no lock, nothing happens. Exact match, so it downgrades too — pinning a
+    team back to a known-good release is the case you most want automatic.
+
+    Never blocks. A failed install (offline, bad pin, no uv) returns a message and
+    the session proceeds on whatever is installed; charter must not make its own
+    tooling the reason someone cannot work.
+
+    Session start, never mid-turn and never the status line: this replaces the
+    binary that enforces the credential guard, and a session boundary is the only
+    safe moment to do that.
+    """
+    try:
+        from . import __version__, commands, config, instance as _instance
+        locked = _instance.locked_version(_instance.load(config.ROOT))
+        if not locked or locked == __version__:
+            return None
+        ok, detail = commands.sync_to(locked)
+        if not ok:
+            return (f"⬢ charter: this control plane pins {locked}, you are running "
+                    f"{__version__}, and the auto-update failed ({detail}). Working on "
+                    f"{__version__}; fix with `charter version sync`.")
+        # The running process is still the old build — it cannot replace itself
+        # mid-call. Say so, or a user sees "installed" and then `charter --version`
+        # reporting the old number for this one invocation.
+        return (f"⬢ charter: auto-updated {__version__} → {locked} to match this control "
+                f"plane's lock. The next `charter …` call uses it.")
+    except Exception:
+        return None
+
+
 def sessionstart() -> int:
     data = _read_stdin()
     sid = data.get("session_id")
     try:
         from . import persona
         parts: list[str] = []
+        # Before anything else: conform this machine to the control plane's version
+        # lock, if it declares one. Says what it did — an auto-update that changes
+        # the guard binary should never be silent.
+        sync = _autosync_version_lock()
+        if sync:
+            parts.append(sync)
         ws = _workspace_confirm_nudge(sid)
         if ws:
             parts.append(ws)  # first: the start-of-session action gate

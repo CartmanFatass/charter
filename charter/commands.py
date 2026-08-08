@@ -1021,3 +1021,115 @@ def cmd_version_check(args) -> int:
     from . import update
     update.fetch_and_store()
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# version lock — `[charter] version` in charter.toml                          #
+# --------------------------------------------------------------------------- #
+def _installed_version() -> str:
+    from . import __version__
+    return __version__
+
+
+def _dist() -> str:
+    from . import update
+    return update.DIST
+
+
+def _sync_cmd(version: str) -> list[str]:
+    """The install that actually works. NOT `uv tool upgrade` — it reports
+    "Nothing to upgrade" for a git-installed charter and leaves you pinned."""
+    return ["uv", "tool", "install", f"{_dist()}=={version}", "--force", "--refresh"]
+
+
+def sync_to(version: str) -> tuple[bool, str]:
+    """Install exactly *version*. Returns (ok, detail). Never raises."""
+    import shutil
+    if not shutil.which("uv"):
+        return False, "uv is not on PATH — install it, or run the pip equivalent by hand"
+    proc = util.run(_sync_cmd(version), check=False)
+    if proc.returncode != 0:
+        why = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, (why[-1][:200] if why else f"exit {proc.returncode}")
+    return True, version
+
+
+def cmd_version(args) -> int:
+    """Show the lock, what is installed, and what to run next."""
+    from . import instance as _instance, update
+    cfg = _instance.load(config.ROOT)
+    locked = _instance.locked_version(cfg)
+    installed = _installed_version()
+    latest = (update.load().get("latest") or "").strip() or None
+
+    print(f"  installed  {installed}")
+    print(f"  locked     {locked or '— (this control plane pins no version)'}")
+    print(f"  latest     {latest or '— (not checked yet)'}")
+    print()
+    if locked and locked != installed:
+        util.warn(f"drift: this control plane pins {locked}, you are running {installed}.")
+        util.info(f"  conform this machine:  charter version sync")
+        return 1
+    if latest and update.newer_than(installed):
+        util.info(f"A newer charter is published ({latest}).")
+        util.info(f"  update, commit and push the lock:  charter version bump --push")
+        return 0
+    util.ok("up to date." if not locked else f"in sync with the lock ({locked}).")
+    return 0
+
+
+def cmd_version_sync(args) -> int:
+    """Conform this machine to the lock — including downgrading, which is the point."""
+    from . import instance as _instance
+    locked = _instance.locked_version(_instance.load(config.ROOT))
+    if not locked:
+        util.info("This control plane pins no version — nothing to sync. "
+                  "Pin one with: charter version bump --push")
+        return 0
+    installed = _installed_version()
+    if locked == installed:
+        util.ok(f"already on the locked version ({locked}).")
+        return 0
+    util.info(f"syncing {installed} → {locked} …")
+    ok, detail = sync_to(locked)
+    if not ok:
+        util.err(f"could not install {locked}: {detail}")
+        util.info(f"  run by hand: {' '.join(_sync_cmd(locked))}")
+        return 1
+    util.ok(f"installed charter {locked}.")
+    util.info("  The command you just ran is still the old build; the next "
+              "`charter …` call uses the new one.")
+    return 0
+
+
+def cmd_version_bump(args) -> int:
+    """Install → verify → write the lock → commit (+push). Team-affecting, so in that order."""
+    from . import instance as _instance, update
+    target = (getattr(args, "to", None) or "").strip()
+    if not target:
+        update.fetch_and_store()
+        target = (update.load().get("latest") or "").strip()
+        if not target:
+            util.err("could not determine the latest version (offline?). "
+                     "Pass one explicitly: charter version bump --to X.Y.Z")
+            return 1
+    if target != _installed_version():
+        util.info(f"installing {target} to verify it before pinning the team to it …")
+        ok, detail = sync_to(target)
+        if not ok:
+            util.err(f"refusing to pin {target}: it did not install ({detail}).")
+            return 1
+    if not _instance.set_locked_version(config.ROOT, target):
+        util.err(f"could not write the lock into {config.ROOT / 'charter.toml'}")
+        return 1
+    util.ok(f"pinned this control plane to charter {target}.")
+    rel = "charter.toml"
+    if getattr(args, "push", False):
+        rc = commit_push(config.ROOT, ["git", "add", rel], f"charter: pin to {target}")
+        if rc != 0:
+            util.warn("lock written, but commit/push failed — commit charter.toml yourself.")
+            return rc
+        util.ok("committed + pushed — teammates conform on their next session.")
+    else:
+        util.info(f"  commit it to share: git add {rel} && git commit -m 'charter: pin to {target}'")
+    return 0

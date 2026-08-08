@@ -147,6 +147,52 @@ session or terminal pane. Defaults to `"default"` (and `default` always exists �
 clone` creates it on first use). See `docs/personas.md`'s sibling in spirit, workspaces,
 for the full precedence chain.
 
+## `[charter].version` — pinning the CLI
+
+**Opt-in.** Absent, charter does nothing: you track whatever you have installed. Present,
+this control plane pins one charter version and every machine conforms to it — shared the
+way a lockfile is.
+
+```toml
+[charter]
+version = "0.7.1"
+```
+
+| Command | What it does |
+| --- | --- |
+| `charter version` | Shows installed / locked / latest, and the exact next command |
+| `charter version sync` | Installs the locked version on this machine |
+| `charter version bump [--to X] [--push]` | Moves the pin, after verifying the target installs |
+
+**It is exact, not a floor — so it downgrades.** That is the point: pinning a team back to a
+known-good release is precisely the case you want to be automatic.
+
+**Auto-conformance runs once per session.** The `SessionStart` hook installs the locked
+version when it differs from what is running, and says so:
+
+```
+⬢ charter: auto-updated 0.7.1 → 0.8.0 to match this control plane's lock.
+  The next `charter …` call uses it.
+```
+
+That wording is literal — a running process cannot replace itself mid-call, so *this*
+invocation finishes on the old build and every later `charter …` in the session uses the
+new one.
+
+It never runs on the status line (which renders every turn) and never mid-turn: the
+install replaces the binary enforcing the credential guard, and a session boundary is the
+only safe moment for that.
+
+**A failed auto-update never blocks you.** Offline, no `uv`, or a pin that does not exist
+— charter warns, names the manual command, and the session proceeds on whatever is
+installed. Being on a plane is not a defect. The drift stays visible in `charter doctor`
+until it is resolved.
+
+**Bumping is deliberate, because it is team-wide.** `charter version bump` installs and
+verifies the target *before* writing the lock, so you cannot pin colleagues to a build you
+have not run; `--push` commits and pushes, and everyone conforms on their next session.
+charter only ever *shows* you that command — it never bumps on its own.
+
 ## Schema drift and healing
 
 `schema` is a stamp, not just a version number: a control plane written by a *newer*

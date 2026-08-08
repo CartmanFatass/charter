@@ -122,6 +122,26 @@ def build_parser() -> argparse.ArgumentParser:
     vc = sub.add_parser("_version-check")
     vc.set_defaults(func=commands.cmd_version_check)
 
+    ver = sub.add_parser("version",
+                         help="The control plane's charter version lock: show drift, "
+                              "conform this machine to it, or move the pin.")
+    vsub = ver.add_subparsers(dest="version_cmd")
+    ver.set_defaults(func=commands.cmd_version)     # bare `charter version` = show
+
+    vsy = vsub.add_parser("sync",
+                          help="Install exactly the version this control plane pins "
+                               "(downgrades too — that is the point of a pin).")
+    vsy.set_defaults(func=commands.cmd_version_sync)
+
+    vbp = vsub.add_parser("bump",
+                          help="Move the pin: install + verify the target, then write "
+                               "charter.toml. Affects every teammate, so in that order.")
+    vbp.add_argument("--to", help="Version to pin (default: the latest published).")
+    vbp.add_argument("--push", action="store_true",
+                     help="Also commit + push the lock, so teammates conform on their "
+                          "next session.")
+    vbp.set_defaults(func=commands.cmd_version_bump)
+
     hk = sub.add_parser("hook",
                         help="Dispatch a Claude Code hook by name — what the plugin's "
                              "hooks/hooks.json actually invokes (the plugin ships no Python).")
