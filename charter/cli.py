@@ -593,10 +593,41 @@ def _hoist_persona_memory(argv: list[str]) -> list[str]:
     return argv
 
 
+#: argv prefixes whose trailing `-- <command…>` must survive argparse untouched.
+_EXEC_PREFIXES = (("secret", "exec"), ("persona", "secret", "exec"))
+
+
+def _split_exec_command(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Peel a trailing ``-- <command…>`` off an ``exec`` invocation before parsing.
+
+    On **Python 3.11** argparse cannot hold a ``nargs="*"`` positional that follows
+    repeated optionals, so the documented shape
+
+        charter secret exec <vault> --env NAME=key -- kubectl get pods
+
+    dies with "unrecognized arguments: -- kubectl get pods". 3.12 parses it fine —
+    which is why this went unnoticed: the suite calls ``cmd_secret_exec`` directly
+    and never crosses argparse, so CI was green on every version while the CLI was
+    broken on the one charter declares as its floor.
+
+    Splitting here makes the behaviour identical across versions. Only the `exec`
+    subcommands are touched, and only at the FIRST ``--`` — anything after it is
+    the child's, flags included.
+    """
+    for prefix in _EXEC_PREFIXES:
+        if tuple(argv[:len(prefix)]) == prefix and "--" in argv[len(prefix):]:
+            cut = argv.index("--", len(prefix))
+            return argv[:cut], argv[cut + 1:]
+    return argv, None
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = _hoist_persona_memory(argv)
+    argv, exec_command = _split_exec_command(argv)
     args = build_parser().parse_args(argv)
+    if exec_command is not None:
+        args.command = exec_command
     try:
         return args.func(args) or 0
     except KeyboardInterrupt:
