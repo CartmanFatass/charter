@@ -332,6 +332,13 @@ def _agent_description(name: str, meta: dict) -> str:
     tools = meta.get("tools")
     tail = (f" Runs {tools} and pulls credentials from the '{name}' vault."
             if tools else f" Pulls credentials from the '{name}' vault.")
+    # `isolation` is a parameter of the Agent TOOL, chosen by the caller at dispatch
+    # time — there is no agent-side way to declare it (confirmed against the shipped
+    # Claude Code schema). A persona that writes code therefore cannot isolate itself;
+    # the best charter can do is say so in the one string the router actually reads
+    # when it picks an agent. Advisory by construction, and aimed at whoever decides.
+    if (meta.get("dispatch-isolation") or "").strip() == "worktree":
+        tail += " Dispatch with isolation: worktree — it writes code, and parallel dispatches share one working tree."
     # The `delegate-when` triggers are what let the agent auto-route work here; a
     # persona without them falls back to a generic (weakly-triggering) description.
     if when:
@@ -382,7 +389,7 @@ _AGENT_PASSTHROUGH_KEYS = ("model", "color", "memory")
 #: this is the full vocabulary of a persona charter's frontmatter.
 _CHARTER_OWN_KEYS = (
     "name", "role", "vault", "extends", "uses", "delegate-when", "description",
-    "agent-description", "agent-tools", "tools", "activity",
+    "agent-description", "agent-tools", "tools", "activity", "dispatch-isolation",
 )
 
 

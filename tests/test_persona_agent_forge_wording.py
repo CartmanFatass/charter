@@ -119,3 +119,50 @@ class GeneratedAgentBody(unittest.TestCase):
         body = self._render({"role": "R", "vault": "v", "model": "opus", "color": "red"})
         self.assertIn("model: opus", body)
         self.assertIn("color: red", body)
+
+
+class DispatchIsolationHint(unittest.TestCase):
+    """#12: `isolation` is an Agent TOOL parameter, chosen by the caller.
+
+    There is no agent-side way to declare it, so a persona that writes code cannot
+    isolate itself. The only lever charter has is the `description` — the one string
+    the router reads when picking an agent. Advisory by construction.
+    """
+
+    def _desc(self, **extra):
+        from charter.commands_persona import _agent_description
+        meta = {"role": "Dev", "delegate-when": "writing code", "tools": "glab"}
+        meta.update(extra)
+        return _agent_description("dev", meta)
+
+    def test_absent_by_default(self):
+        self.assertNotIn("isolation", self._desc())
+
+    def test_present_when_the_charter_asks_for_it(self):
+        d = self._desc(**{"dispatch-isolation": "worktree"})
+        self.assertIn("isolation: worktree", d)
+        self.assertIn("share one working tree", d)   # says why, not just what
+
+    def test_only_worktree_is_recognised(self):
+        """An unknown value must not silently produce a nonsense instruction."""
+        self.assertNotIn("isolation", self._desc(**{"dispatch-isolation": "sandbox"}))
+
+    def test_the_hint_lands_at_the_end_where_truncation_costs_least(self):
+        """delegate-when triggers drive routing; the hint must not displace them."""
+        d = self._desc(**{"dispatch-isolation": "worktree"})
+        self.assertLess(d.index("writing code"), d.index("isolation: worktree"))
+
+    def test_the_key_is_in_the_lint_vocabulary(self):
+        """Otherwise the whitelist added for #8 would flag charter's own key."""
+        from charter.commands_persona import _AGENT_PASSTHROUGH_KEYS, _CHARTER_OWN_KEYS
+        self.assertIn("dispatch-isolation",
+                      set(_AGENT_PASSTHROUGH_KEYS) | set(_CHARTER_OWN_KEYS))
+
+    def test_it_is_not_emitted_as_frontmatter(self):
+        """It is charter's own key — emitting it would be an invented agent field,
+        exactly the mistake #1 was closed for."""
+        from charter.commands_persona import _render_agent
+        body = _render_agent("dev", {"role": "Dev", "vault": "v",
+                                     "dispatch-isolation": "worktree"}, "# body\n")
+        head = body.split("---")[1]
+        self.assertNotIn("dispatch-isolation:", head)
