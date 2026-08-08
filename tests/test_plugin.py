@@ -66,7 +66,7 @@ class TestPluginManifest(unittest.TestCase):
 
     def test_plugin_declares_all_ten_commands_the_control_plane_used_to_wire_by_hand(self):
         """Parity check against the pre-plugin wiring, enumerated explicitly rather than
-        read from a sibling `easydmarc-umbrella` checkout's .claude/settings.json: charter
+        read from a sibling control-plane checkout's .claude/settings.json: charter
         is a public repo (github.com/diazoxide/charter) whose CI and other contributors
         never have that sibling checkout, so a test that stat()s another repo's absolute
         path would be unrunnable (or silently vacuous) everywhere but this machine. This

@@ -149,9 +149,9 @@ placed in argv.
 
 ```bash
 charter secret exec qa \
-  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=EASYDMARC_USER:platform-user \
-  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=EASYDMARC_PASS:platform-pass \
-  -- npx @playwright/cli@0.1.18 -s=login fill e3 EASYDMARC_PASS
+  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=APP_USER:platform-user \
+  --dotenv PLAYWRIGHT_MCP_SECRETS_FILE=APP_PASS:platform-pass \
+  -- npx @playwright/cli@0.1.18 -s=login fill e3 APP_PASS
 ```
 
 Repeats sharing an env-var name merge into a single file, in flag order.
@@ -159,7 +159,7 @@ Different names produce separate files. Defining the same NAME twice under one
 ENVVAR is an error (exit code 2).
 
 The value is never typed by the caller: the tool refers to the secret by the
-**name** you gave it (`EASYDMARC_PASS`), and resolves it from the file. Any
+**name** you gave it (`APP_PASS`), and resolves it from the file. Any
 value that does appear in captured output is redacted.
 
 `--dotenv` cannot be combined with `--exec` — exec replaces this process, so

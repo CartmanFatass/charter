@@ -145,8 +145,8 @@ class SingleCredentialGuardCase(unittest.TestCase):
         return hooks._single_credential_reason(cmd)
 
     def test_denies_ssh_gitlab_url_to_git(self):
-        self.assertIsNotNone(self._deny(f"git clone {SSH_SCP}easydmarc/x.git"))
-        self.assertIsNotNone(self._deny(f"git remote set-url origin {SSH_URL}easydmarc/x.git"))
+        self.assertIsNotNone(self._deny(f"git clone {SSH_SCP}acme/x.git"))
+        self.assertIsNotNone(self._deny(f"git remote set-url origin {SSH_URL}acme/x.git"))
 
     def test_denies_git_ssh_command_override(self):
         self.assertIsNotNone(self._deny("GIT_SSH_COMMAND='ssh -i ~/.ssh/id' git push origin main"))
@@ -173,7 +173,7 @@ class SingleCredentialGuardCase(unittest.TestCase):
     # --- FINDING 2, shape B: git treats hostnames case-insensitively — so must the guard
     def test_denies_uppercase_host_in_ssh_url(self):
         self.assertIsNotNone(self._deny("git clone git@GITHUB.COM:acme/api.git"))
-        self.assertIsNotNone(self._deny("git clone git@GitLab.Com:easydmarc/x.git"))
+        self.assertIsNotNone(self._deny("git clone git@GitLab.Com:acme/x.git"))
 
     def test_denies_uppercase_host_ssh_probe(self):
         self.assertIsNotNone(self._deny("ssh -T git@GITHUB.COM"))
@@ -233,7 +233,7 @@ class SingleCredentialGuardCase(unittest.TestCase):
 
     def test_allows_normal_git_over_https(self):
         for ok in ("git push origin main", "git pull --ff-only", "git status",
-                   "git clone https://gitlab.com/easydmarc/x.git", "git commit -m 'x'"):
+                   "git clone https://gitlab.com/acme/x.git", "git commit -m 'x'"):
             self.assertIsNone(self._deny(ok), ok)
 
     def test_allows_pickaxe_search_not_mistaken_for_signing(self):

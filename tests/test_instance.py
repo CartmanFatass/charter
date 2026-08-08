@@ -1,6 +1,6 @@
 """Per-instance config, read from charter.toml.
 
-These three values were hardcoded to one organisation (`GROUP = "easydmarc"`), which is
+These three values were hardcoded to a single organisation, which is
 the other half of what made the engine unshippable."""
 from __future__ import annotations
 
