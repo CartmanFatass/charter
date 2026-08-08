@@ -558,6 +558,62 @@ def _persona_chips(session: str | None = None) -> list[str]:
         return []
 
 
+def _session_block(sid: str | None, active: str) -> list[str]:
+    """Lines for the empty rows under the repo tree — only when there is news.
+
+    Deliberately silent when nothing is happening. A block that renders every turn
+    becomes furniture within a day, and then a real guard denial appearing in it
+    gets no more attention than a zero would. Presence IS the signal.
+
+    Everything here is already computed elsewhere and costs well under a
+    millisecond; the status line renders on every turn, so nothing may be added
+    that reads the network or walks a repo.
+    """
+    out: list[str] = []
+    try:
+        from . import inflight
+        live = inflight.live()
+        if live:
+            who = ", ".join(live[:3]) + (", …" if len(live) > 3 else "")
+            out.append(f"  {_YELLOW}⚡{_R} {_DIM}in flight{_R} {len(live)} {_DIM}· {who}{_R}")
+    except Exception:
+        pass
+
+    try:
+        from . import trace
+        ev = trace.read(sid) if sid else []
+        kinds: dict[str, int] = {}
+        for e in ev:
+            k = e.get("event")
+            if k:
+                kinds[k] = kinds.get(k, 0) + 1
+        bits = []
+        if kinds.get("deny"):
+            bits.append(f"{_RED}⛊ {kinds['deny']} denied{_R}")
+        if kinds.get("memory"):
+            bits.append(f"{_GREEN}✎ {kinds['memory']}{_R}{_DIM} recorded{_R}")
+        if kinds.get("dispatch"):
+            bits.append(f"{_DIM}⇢ {kinds['dispatch']} dispatched{_R}")
+        if bits:
+            out.append("  " + f"{_DIM} · {_R}".join(bits))
+    except Exception:
+        pass
+
+    try:
+        from . import __version__, config, instance as _instance, workspace as _ws
+        locked = _instance.locked_version(_instance.load(config.ROOT))
+        if locked and locked != __version__:
+            out.append(f"  {_YELLOW}⚠{_R} {_DIM}charter{_R} {__version__} {_DIM}→ pinned{_R} "
+                       f"{locked}{_DIM} · charter version sync{_R}")
+        stale = [w for w in _ws.list_workspaces() if w != active and _ws.needs_reinit(w)]
+        if stale:
+            out.append(f"  {_YELLOW}⚠{_R} {_DIM}reinit{_R} {len(stale)} {_DIM}ws · "
+                       f"charter ws reinit --all{_R}")
+    except Exception:
+        pass
+    return out
+
+
 def _brand() -> str:
     """`⬢ charter x.y.z`, plus `↑ a.b.c` when a newer release is cached.
 
@@ -655,7 +711,9 @@ def render(payload: dict | None = None) -> str:
             # the short summary row misaligned it on some terminals), so it lines up
             # with the chips. When personas outnumber repos, continue the repo tree
             # with │ so no row is blank on the left (Claude Code collapses those to col 0).
-            left = list(repo_lines)
+            # News goes in the rows the repo tree already leaves blank — free
+            # vertically, so it costs no width and works at 80 columns.
+            left = list(repo_lines) + _session_block(sid, active)
             right = [header, *chips]
             if len(right) > len(left):
                 if left:
@@ -664,9 +722,11 @@ def render(payload: dict | None = None) -> str:
                     left.append(f"  {_DIM}│{_R}")
             body = tui.truncate(summary, width) + "\n" + _columns(left, right, width)
         elif chips:
-            body = _columns([summary, *repo_lines, header, *chips], None, width)
+            body = _columns([summary, *repo_lines, *_session_block(sid, active),
+                             header, *chips], None, width)
         else:
-            body = _columns([summary, *repo_lines], None, width)
+            body = _columns([summary, *repo_lines, *_session_block(sid, active)],
+                            None, width)
     except Exception:
         # Never crash the status line if layout fails — plain truncated stack.
         plain = [summary, *repo_lines]
