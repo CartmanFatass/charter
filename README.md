@@ -8,7 +8,7 @@ and a **vault** that keeps credentials out of the model's context — so an agen
 whole team of them) can move between repos and tasks without losing what it has learned
 or leaking a secret into a transcript.
 
-If you've never seen it before, you can go from `uv tool install charter` to a working
+If you've never seen it before, you can go from `uv tool install charter-cp` to a working
 control plane in about a minute — see [60 seconds](#60-seconds-from-nothing-to-a-working-control-plane) below.
 
 ## Install
@@ -20,7 +20,7 @@ plugin is what actually wires them into Claude Code.
 ### 1. The CLI
 
 ```
-uv tool install charter
+uv tool install charter-cp     # installs the `charter` command
 ```
 
 Lead with [`uv`](https://docs.astral.sh/uv/) for a concrete reason, not a preference:
@@ -31,9 +31,20 @@ you; `pipx` and `pip` both require one to already be on your `PATH`.
 Alternatives, once you have a 3.11+ Python:
 
 ```
-pipx install charter
-pip install charter
+pipx install charter-cp        # installs the `charter` command
+pip install charter-cp
 ```
+
+Or run it without installing anything:
+
+```
+uvx --from charter-cp charter <cmd>
+```
+
+> **The package is `charter-cp`; the command is `charter`.** PyPI would not
+> allow `charter` as a project name, so the distribution carries a suffix — but
+> everything you type, and everything in this README, is `charter`.
+
 
 ### 2. The Claude Code plugin
 
