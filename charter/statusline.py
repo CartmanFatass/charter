@@ -35,7 +35,13 @@ _R, _DIM, _BOLD, _UNDER = "\033[0m", "\033[2m", "\033[1m", "\033[4m"
 _CYAN, _YELLOW, _MAGENTA, _GREEN = "\033[36m", "\033[33m", "\033[35m", "\033[32m"
 _BLUE, _RED = "\033[34m", "\033[31m"
 
-_TREE_MID, _TREE_END = "├─ ", "└─ "
+# ASCII, deliberately. Every character up to and including a row's last alignment
+# point must be one whose rendered width no font can dispute: `tui.width` trusts the
+# Unicode tables, and a terminal that draws a character wider (or narrower) shifts
+# everything after it on that row only. Box-drawing characters are East-Asian
+# *Ambiguous* — exactly the class that varies by font and locale. Decoration is fine
+# once nothing on the row still has to line up.
+_TREE_MID, _TREE_END, _TREE_PIPE = "|- ", "`- ", "|  "
 # Bounds the TOTAL rows `_repo_rows` returns — repo rows + each repo's one-line worktree
 # summary + the trailing "…(+N more)" — not merely the repo count: a repo with worktrees
 # emits 2 lines, so counting repos alone let the footer grow past its budget.
@@ -45,8 +51,16 @@ _MAX_REPO_LINES = 14  # keep the footer from growing unbounded
 _NAME_W, _BRANCH_W, _CI_W = 32, 34, 12
 _MR_W = 6  # fixed MR cell, so a right-hand persona column stays aligned
 _GAP = "  "  # between repo-table cells
-_COL_SEP = f" {_DIM}│{_R} "  # divider between the repos and personas columns
-# Visible width of the whole left/repo block: "  " + "├─ " + name + gaps + branch + ci + mr.
+_COL_SEP = f" {_DIM}|{_R} "  # divider between the repos and personas columns (ASCII: see above)
+# Both column headers are indented by exactly this, in SPACES, so a header's text starts
+# in the same column as the text of the rows beneath it — `* steward` and `|- iam-service`
+# each put their first letter two columns in. Spaces rather than a matching glyph on
+# purpose: the point is that no font gets a vote on where a header's text begins. This
+# shipped broken both ways — a `◈` on the personas header rendered wide and pushed its
+# title a column right of the chips; removing the glyph then left the title two columns
+# LEFT of them, because the glyph had been doing the indenting.
+_HEAD_PAD = "  "
+# Visible width of the whole left/repo block: "  " + "|- " + name + gaps + branch + ci + mr.
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
 _SAFETY = 2  # render to (COLUMNS − this); a line filling the last column can wrap
@@ -451,9 +465,9 @@ def _repo_rows(dirs, active, cur, states, branches, gl) -> list[tui.Node]:
         # reading as a child of its repo.
         if wts and wt_budget > 0:
             wt_budget -= 1
-            lead = f"  {_DIM}│{_R}  {_DIM}↳ {_R}"
+            lead = f"  {_DIM}{_TREE_PIPE}{_R} {_DIM}+- {_R}"
             pieces = tui.truncate(" · ".join(w.name for w in wts),
-                                  max(1, _LEFT_W - tui.width(f"  │  ↳ ")))
+                                  max(1, _LEFT_W - tui.width("  |   +- ")))
             rows.append(tui.Text(f"{lead}{_DIM}{pieces}{_R}"))
 
     if capped:
@@ -601,10 +615,15 @@ def _persona_chips(session: str | None = None) -> list[str]:
             dot = _vault_dot(persona.vault_of(n))
             badge = _mem_badge(_mem_count(n), _mem_count(n, ephemeral=True, session=session))
             health = _health_mark(n, known=known)
+            # ASCII marker, and always exactly two columns wide, so every persona
+            # name starts in the same column as every other AND as the column header
+            # above them. A `◆`/`○` here made the name's position depend on how the
+            # font draws a diamond; the header, having no diamond, then sat two
+            # columns off. Badges trail the name, where nothing has to line up.
             if n == active:
-                chips.append(f"{_MAGENTA}◆ {_BOLD}{n}{_R}{dot}{badge}{health}")
+                chips.append(f"{_MAGENTA}* {_BOLD}{n}{_R}{dot}{badge}{health}")
             else:
-                chips.append(f"{_DIM}○ {n}{_R}{dot}{badge}{health}")
+                chips.append(f"{_DIM}- {n}{_R}{dot}{badge}{health}")
         return chips
     except Exception:
         return []
@@ -715,6 +734,37 @@ def _brand() -> str:
     return out
 
 
+def _boxed(body: str, width: int) -> str:
+    """Frame the whole status line: ``+---+`` above and below, ``|`` down each side.
+
+    Applied last, over finished lines, so the box cannot perturb the column maths that
+    ran inside it. Every character it draws is ASCII — a box made of ``┌─┐│`` would be
+    the same East-Asian-Ambiguous class that made the columns drift in the first place.
+
+    The frame earns its two rows by being a *ruler*: with a right edge, a row whose
+    content renders wider than ``tui.width`` believes pushes its own ``|`` past the
+    others, so drift becomes a thing you can see and point at instead of a mystery. The
+    left edge and both headers stay honest regardless, since everything up to a row's
+    last alignment point is ASCII.
+
+    Silently returns the body unchanged if the pane is too narrow to frame — the box is
+    decoration and must never cost content.
+    """
+    try:
+        inner = width - 4                      # "| " + content + " |"
+        if inner < 20:
+            return body
+        rule = f"{_DIM}+{'-' * (width - 2)}+{_R}"
+        out = [rule]
+        for ln in body.split("\n"):
+            ln = tui.truncate(ln, inner)
+            out.append(f"{_DIM}|{_R} {ln}{' ' * max(0, inner - tui.width(ln))} {_DIM}|{_R}")
+        out.append(rule)
+        return "\n".join(out)
+    except Exception:
+        return body
+
+
 def _with_brand(body: str, width: int) -> str:
     """Right-align the brand on the last line, if it fits without crowding.
 
@@ -762,7 +812,10 @@ def render(payload: dict | None = None) -> str:
         cur = _current(payload)
         # Render a hair under COLUMNS (which Claude Code sets to the pane width) so a
         # line never fills the last column (which the terminal would wrap).
-        width = max(24, tui.term_width(default=80, floor=24) - _SAFETY)
+        frame_w = max(24, tui.term_width(default=80, floor=24) - _SAFETY)
+        # Everything below lays out inside the frame, so it gets the pane minus the
+        # box's own chrome ("| " each side). `_boxed` re-widens to `frame_w` at the end.
+        width = max(24, frame_w - 4)
         states = _repo_states(dirs)
         branches = {d: _branch(d) for d in dirs}
         from . import glstate
@@ -812,8 +865,8 @@ def render(payload: dict | None = None) -> str:
         #
         # So: labels only up here. Decoration lives on the content rows, where a
         # sibling would expose it.
-        left_head = f"{_DIM}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}"
-        header = f"{_DIM}personas{_R} {len(chips)}" + (
+        left_head = f"{_DIM}{_HEAD_PAD}repos{_R} {len(dirs)}{_DIM}/{avail}{_R}"
+        header = f"{_DIM}{_HEAD_PAD}personas{_R} {len(chips)}" + (
             f"{_DIM} · vaults{_R} {nv}" if nv else "") + (
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")
         strip = _session_strip(payload, sid)
@@ -841,7 +894,7 @@ def render(payload: dict | None = None) -> str:
                         left[i] = left[i].replace(_TREE_END, _TREE_MID, 1)
                         break
                 while len(left) < len(right):
-                    left.append(f"  {_DIM}│{_R}")
+                    left.append(f"  {_DIM}{_TREE_PIPE}{_R}")
             rows = [tui.truncate(summary, width), _columns(left, right, width)]
             rows += [tui.truncate(a, width) for a in alerts]
             if strip:
@@ -861,7 +914,8 @@ def render(payload: dict | None = None) -> str:
             plain.append(p)
         body = "\n".join(tui.truncate(ln, width) for ln in plain)
 
-    return _with_brand(body, width) + "\n"  # trailing blank line below the status line
+    # Brand first (it right-aligns against the content width), then the frame around it.
+    return _boxed(_with_brand(body, width), frame_w) + "\n"
 
 
 def _columns(left_lines: list[str], right_lines: list[str] | None, width: int) -> str:

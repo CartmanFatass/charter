@@ -29,7 +29,8 @@ def _plain(s: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 
-def _lines(payload=None, width=200):
+def _raw(payload=None, width=200):
+    """Rendered lines exactly as emitted, frame included."""
     import os
     old = os.environ.get("COLUMNS")
     os.environ["COLUMNS"] = str(width)
@@ -40,6 +41,19 @@ def _lines(payload=None, width=200):
             os.environ.pop("COLUMNS", None)
         else:
             os.environ["COLUMNS"] = old
+
+
+def _lines(payload=None, width=200):
+    """Content lines with the frame stripped — these tests are about the zones inside
+    the box, not the box."""
+    out = []
+    for ln in _raw(payload, width):
+        if not ln.strip() or set(ln.strip()) <= set("+-"):
+            continue                      # top/bottom rule
+        if ln.startswith("| ") and ln.rstrip().endswith("|"):
+            ln = ln[2:].rstrip()[:-1].rstrip()
+        out.append(ln)
+    return out
 
 
 _USAGE = {"context_window": {"used_percentage": 22,
@@ -67,7 +81,7 @@ class Zones(PersonaIso):
 
     def test_repos_count_heads_the_repo_column(self):
         head = next(ln for ln in _lines() if "repos" in ln)
-        self.assertTrue(head.startswith("repos"), head)
+        self.assertTrue(head.lstrip().startswith("repos"), head)
 
     def test_the_left_column_introduces_no_unproven_glyph(self):
         """The left column is width-critical: it is padded to `_LEFT_W` using
@@ -80,9 +94,9 @@ class Zones(PersonaIso):
         rows line up with each other). Decoration belongs in the right column, past the
         alignment point.
         """
-        allowed = set("├└─│↳⑂✓✗●·⚡⛊✎◌⚠")     # already load-bearing in this column
+        allowed = set("↳⑂✓✗●·⚡⛊✎◌⚠")          # already load-bearing in this column
         for ln in _lines(_USAGE):
-            sep = ln.find("│", 40)      # the column separator, past the tree glyphs
+            sep = ln.find("|", 40)      # the column separator, past the tree glyphs
             if sep < 0:
                 continue                # full-width row (identity, alerts, strip):
                                         # nothing to its right, so width can't shear it
@@ -112,7 +126,7 @@ class Zones(PersonaIso):
         each other is what proves `◆`/`○`. A header has no sibling to expose drift, so
         it gets a plain label.
         """
-        rows = [ln for ln in _lines(_USAGE) if ln.find("│", 40) > 0]
+        rows = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0]
         head, content = rows[0], rows[1:]
         elsewhere = {ch for ln in content for ch in ln}
         for ch in head:
@@ -144,7 +158,7 @@ class Zones(PersonaIso):
         head = next(i for i, ln in enumerate(ls) if "repos" in ln)
         last = max(i for i, ln in enumerate(ls) if ln.strip())
         for ln in ls[head:last]:
-            left = ln.split("│")[0]
+            left = ln.split("|", 1)[0] if "|" in ln[40:] else ln
             for token in ("denied", "recorded", "dispatched", "ctx", "⚡"):
                 self.assertNotIn(token, left, f"session news leaked into the repo column: {ln}")
 
@@ -211,3 +225,76 @@ class BrandFits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Framed(PersonaIso):
+    """The box, and the alignment guarantee it makes visible.
+
+    Everything up to a row's last alignment point is ASCII — the frame, the tree, the
+    column divider, and the chip bullets — because `tui.width` only knows what the
+    Unicode tables claim and a terminal that disagrees shifts that row alone. Decoration
+    is fine after nothing on the row still has to line up.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        for n in ("alpha", "beta", "gamma"):
+            self.make_persona(n, role=n.title(), vault=n, **{"delegate-when": f"{n} work"})
+
+    def test_it_has_a_top_and_bottom_rule(self):
+        rows = [ln for ln in _raw(_USAGE) if ln.strip()]
+        self.assertTrue(set(rows[0]) <= set("+-"), rows[0])
+        self.assertTrue(set(rows[-1]) <= set("+-"), rows[-1])
+
+    def test_every_content_row_is_bounded_on_both_sides(self):
+        rows = [ln for ln in _raw(_USAGE) if ln.strip()][1:-1]
+        for ln in rows:
+            self.assertTrue(ln.startswith("|"), ln)
+            self.assertTrue(ln.endswith("|"), ln)
+
+    def test_every_row_is_exactly_the_same_width(self):
+        """The point of the right edge: a row that renders wider than counted pushes
+        its own `|` out, so drift is visible instead of mysterious."""
+        widths = {statusline.tui.width(ln) for ln in _raw(_USAGE) if ln.strip()}
+        self.assertEqual(len(widths), 1, f"ragged frame: {sorted(widths)}")
+
+    def test_the_frame_never_exceeds_the_pane(self):
+        for w in (40, 80, 131, 160, 200, 240):
+            with self.subTest(width=w):
+                for ln in _raw(_USAGE, width=w):
+                    self.assertLessEqual(statusline.tui.width(ln), w)
+
+    def test_a_pane_too_narrow_to_frame_still_renders(self):
+        out = _raw(_USAGE, width=24)
+        self.assertTrue(any(ln.strip() for ln in out))
+
+    def test_structure_up_to_the_divider_is_pure_ascii(self):
+        """No font may get a vote on where the right column begins."""
+        for ln in _lines(_USAGE):
+            sep = ln.find("|", 40)
+            if sep < 0:
+                continue
+            for ch in ln[:sep + 1]:
+                self.assertLess(ord(ch), 128,
+                                f"non-ASCII {ch!r} (U+{ord(ch):04X}) before the column "
+                                f"divider: {ln!r}")
+
+    def test_every_persona_name_starts_in_the_same_column_as_the_header(self):
+        """The defect that survived three fixes: `personas` sat at column 98 while every
+        chip name sat at 100, because a `◈` had been doing the indenting and removing it
+        took the indent with it. Headers pad with SPACES now, so this cannot recur."""
+        rows = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0]
+        starts = set()
+        for ln in rows:
+            right = ln[ln.find("|", 40) + 1:]
+            m = re.search(r"[A-Za-z]", right)
+            self.assertIsNotNone(m, right)
+            starts.add(m.start())
+        self.assertEqual(len(starts), 1,
+                         f"right-column text starts at differing columns: {sorted(starts)}")
+
+    def test_chip_bullets_are_ascii_and_uniform_width(self):
+        chips = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0][1:]
+        for ln in chips:
+            marker = ln[ln.find("|", 40) + 2]
+            self.assertLess(ord(marker), 128, f"non-ASCII chip bullet {marker!r}: {ln!r}")
