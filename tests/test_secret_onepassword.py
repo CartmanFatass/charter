@@ -240,3 +240,29 @@ class MissingCli(unittest.TestCase):
             self.assertIn("PATH", detail)
         finally:
             _op_mod.shutil.which = orig
+
+
+class WriteFailuresNamePermissions(_OpOnPath):
+    """Verified against a real account: a service-account token with read access to a
+    vault but not write fails with 1Password error (101). The first version of this
+    message told the reader to check that `op` was signed in and the vault existed —
+    both were true, so it pointed away from the actual cause."""
+
+    def test_a_write_failure_mentions_permissions(self):
+        rec = _Recorder([(0, _items()), (1, "")])
+        with self.assertRaises(VaultError) as cm:
+            _provider(rec).set("TOKEN", SECRET)
+        self.assertIn("WRITE", str(cm.exception).upper())
+
+    def test_a_delete_failure_mentions_permissions(self):
+        rec = _Recorder([(0, _items("charter-devops-TOKEN")), (1, "")])
+        with self.assertRaises(VaultError) as cm:
+            _provider(rec).delete("TOKEN")
+        self.assertIn("WRITE", str(cm.exception).upper())
+
+    def test_a_read_failure_does_not_blame_permissions(self):
+        """A miss is far more often a typo'd key than a rights problem."""
+        rec = _Recorder([(1, "")])
+        with self.assertRaises(SecretNotFound) as cm:
+            _provider(rec).get("TOKEN")
+        self.assertNotIn("WRITE", str(cm.exception).upper())

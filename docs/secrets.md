@@ -131,6 +131,12 @@ Deliberate properties:
 - **`charter doctor` and `vault list` never read a value.** They count items, so
   routine status never triggers a 1Password re-auth prompt.
 
+**A service-account token needs WRITE access to the vault.** A token that can read it
+still fails every write with 1Password error `(101) You do not have permission to
+perform this action` — reads, `secret list` and `doctor` all look healthy while
+`secret set` refuses. charter's write errors name this first, because the obvious
+suspects (signed in? vault exists?) are both fine when it happens.
+
 ### Reference vaults — when your secrets already live somewhere else
 
 If your team already runs HashiCorp Vault or 1Password, a charter vault would be a

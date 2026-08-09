@@ -93,16 +93,26 @@ class OnePasswordProvider(VaultProvider):
         return self.runner(argv, input=stdin, check=False)
 
     @staticmethod
-    def _fail(what: str, proc) -> VaultError:
+    def _fail(what: str, proc, write: bool = False) -> VaultError:
         """Errors never carry the process output.
 
         ``op``'s stderr can echo the assignment it was given, and on a read path its
         stdout *is* the secret. Report the exit status and what was attempted.
+
+        Write failures name **permissions** first, from experience: against a real
+        account the first failure was ``(101) You do not have permission to perform
+        this action`` — a service-account token that could read the vault but not write
+        to it. The original message suggested checking that `op` was signed in and the
+        vault existed; both were true, so it sent the reader looking in the wrong place.
         """
+        hint = ("Check that `op` is signed in (`op whoami`), that the vault exists, and "
+                "— for a service-account token — that it has WRITE access to this vault; "
+                "a read-only token fails here with 1Password error (101)."
+                if write else
+                "Check that `op` is signed in (`op whoami`) and the vault exists.")
         return VaultError(
-            f"{what} failed (op exit {proc.returncode}). Check that `op` is signed in "
-            f"(`op whoami`) and the vault exists. (op output withheld — it can contain "
-            f"the secret.)")
+            f"{what} failed (op exit {proc.returncode}). {hint} "
+            "(op output withheld — it can contain the secret.)")
 
     # --- CRUD -------------------------------------------------------------- #
     def get(self, key: str) -> str:
@@ -138,12 +148,12 @@ class OnePasswordProvider(VaultProvider):
             proc = self._run(self._argv("item", "edit", title,
                                         "--vault", self.op_vault), stdin=template)
             if proc.returncode != 0:
-                raise self._fail(f"updating '{key}' in 1Password", proc)
+                raise self._fail(f"updating '{key}' in 1Password", proc, write=True)
             return
         proc = self._run(self._argv("item", "create", "-",
                                     "--vault", self.op_vault), stdin=template)
         if proc.returncode != 0:
-            raise self._fail(f"creating '{key}' in 1Password", proc)
+            raise self._fail(f"creating '{key}' in 1Password", proc, write=True)
 
     def delete(self, key: str) -> None:
         title = self._title(key)
@@ -151,7 +161,7 @@ class OnePasswordProvider(VaultProvider):
             raise SecretNotFound(f"no secret '{key}' in vault '{self.name}'")
         proc = self._run(self._argv("item", "delete", title, "--vault", self.op_vault))
         if proc.returncode != 0:
-            raise self._fail(f"deleting '{key}' from 1Password", proc)
+            raise self._fail(f"deleting '{key}' from 1Password", proc, write=True)
 
     def keys(self) -> list[str]:
         """Item titles charter owns in this vault, mapped back to key names.
