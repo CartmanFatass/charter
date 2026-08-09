@@ -48,9 +48,9 @@ def _lines(payload=None, width=200):
     the box, not the box."""
     out = []
     for ln in _raw(payload, width):
-        if not ln.strip() or set(ln.strip()) <= set("+-"):
+        if not ln.strip() or set(ln.strip()) <= set("┌─┐└┘"):
             continue                      # top/bottom rule
-        if ln.startswith("| ") and ln.rstrip().endswith("|"):
+        if ln.startswith("│ ") and ln.rstrip().endswith("│"):
             ln = ln[2:].rstrip()[:-1].rstrip()
         out.append(ln)
     return out
@@ -96,7 +96,7 @@ class Zones(PersonaIso):
         """
         allowed = set("↳⑂✓✗●·⚡⛊✎◌⚠")          # already load-bearing in this column
         for ln in _lines(_USAGE):
-            sep = ln.find("|", 40)      # the column separator, past the tree glyphs
+            sep = ln.find("│", 40)      # the column separator, past the tree glyphs
             if sep < 0:
                 continue                # full-width row (identity, alerts, strip):
                                         # nothing to its right, so width can't shear it
@@ -126,7 +126,7 @@ class Zones(PersonaIso):
         each other is what proves `◆`/`○`. A header has no sibling to expose drift, so
         it gets a plain label.
         """
-        rows = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0]
+        rows = [ln for ln in _lines(_USAGE) if ln.find("│", 40) > 0]
         head, content = rows[0], rows[1:]
         elsewhere = {ch for ln in content for ch in ln}
         for ch in head:
@@ -158,7 +158,7 @@ class Zones(PersonaIso):
         head = next(i for i, ln in enumerate(ls) if "repos" in ln)
         last = max(i for i, ln in enumerate(ls) if ln.strip())
         for ln in ls[head:last]:
-            left = ln.split("|", 1)[0] if "|" in ln[40:] else ln
+            left = ln.split("│", 1)[0] if "│" in ln[40:] else ln
             for token in ("denied", "recorded", "dispatched", "ctx", "⚡"):
                 self.assertNotIn(token, left, f"session news leaked into the repo column: {ln}")
 
@@ -243,14 +243,14 @@ class Framed(PersonaIso):
 
     def test_it_has_a_top_and_bottom_rule(self):
         rows = [ln for ln in _raw(_USAGE) if ln.strip()]
-        self.assertTrue(set(rows[0]) <= set("+-"), rows[0])
-        self.assertTrue(set(rows[-1]) <= set("+-"), rows[-1])
+        self.assertTrue(set(rows[0]) <= set("┌─┐"), rows[0])
+        self.assertTrue(set(rows[-1]) <= set("└─┘"), rows[-1])
 
     def test_every_content_row_is_bounded_on_both_sides(self):
         rows = [ln for ln in _raw(_USAGE) if ln.strip()][1:-1]
         for ln in rows:
-            self.assertTrue(ln.startswith("|"), ln)
-            self.assertTrue(ln.endswith("|"), ln)
+            self.assertTrue(ln.startswith("│"), ln)
+            self.assertTrue(ln.endswith("│"), ln)
 
     def test_every_row_is_exactly_the_same_width(self):
         """The point of the right edge: a row that renders wider than counted pushes
@@ -268,13 +268,21 @@ class Framed(PersonaIso):
         out = _raw(_USAGE, width=24)
         self.assertTrue(any(ln.strip() for ln in out))
 
-    def test_structure_up_to_the_divider_is_pure_ascii(self):
-        """No font may get a vote on where the right column begins."""
+    def test_structure_before_the_divider_is_ascii_apart_from_the_divider(self):
+        """What breaks a layout is not width but width that differs BETWEEN rows.
+
+        The divider (and the frame) may be box-drawing because every row carries
+        exactly one of each: a terminal drawing them wide shifts every row identically
+        and the columns stay true. The tree markers may not, because they differ per
+        row — `|- ` on a repo, nothing on the header — so an unexpected width there
+        moves one row and not its neighbour.
+        """
         for ln in _lines(_USAGE):
-            sep = ln.find("|", 40)
+            sep = ln.find("│", 40)
             if sep < 0:
                 continue
-            for ch in ln[:sep + 1]:
+            self.assertEqual(ln[:sep].count("│"), 0, f"a second divider: {ln!r}")
+            for ch in ln[:sep]:
                 self.assertLess(ord(ch), 128,
                                 f"non-ASCII {ch!r} (U+{ord(ch):04X}) before the column "
                                 f"divider: {ln!r}")
@@ -283,10 +291,10 @@ class Framed(PersonaIso):
         """The defect that survived three fixes: `personas` sat at column 98 while every
         chip name sat at 100, because a `◈` had been doing the indenting and removing it
         took the indent with it. Headers pad with SPACES now, so this cannot recur."""
-        rows = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0]
+        rows = [ln for ln in _lines(_USAGE) if ln.find("│", 40) > 0]
         starts = set()
         for ln in rows:
-            right = ln[ln.find("|", 40) + 1:]
+            right = ln[ln.find("│", 40) + 1:]
             m = re.search(r"[A-Za-z]", right)
             self.assertIsNotNone(m, right)
             starts.add(m.start())
@@ -294,9 +302,9 @@ class Framed(PersonaIso):
                          f"right-column text starts at differing columns: {sorted(starts)}")
 
     def test_chip_bullets_are_ascii_and_uniform_width(self):
-        chips = [ln for ln in _lines(_USAGE) if ln.find("|", 40) > 0][1:]
+        chips = [ln for ln in _lines(_USAGE) if ln.find("│", 40) > 0][1:]
         for ln in chips:
-            marker = ln[ln.find("|", 40) + 2]
+            marker = ln[ln.find("│", 40) + 2]
             self.assertLess(ord(marker), 128, f"non-ASCII chip bullet {marker!r}: {ln!r}")
 
     def test_the_frame_leaves_headroom_for_the_host_crop(self):

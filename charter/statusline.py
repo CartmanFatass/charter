@@ -51,7 +51,9 @@ _MAX_REPO_LINES = 14  # keep the footer from growing unbounded
 _NAME_W, _BRANCH_W, _CI_W = 32, 34, 12
 _MR_W = 6  # fixed MR cell, so a right-hand persona column stays aligned
 _GAP = "  "  # between repo-table cells
-_COL_SEP = f" {_DIM}|{_R} "  # divider between the repos and personas columns (ASCII: see above)
+# One divider on every row, so even a terminal that draws it two cells wide shifts
+# every row identically — see `_boxed` for why that is the safe case.
+_COL_SEP = f" {_DIM}│{_R} "  # divider between the repos and personas columns
 # Both column headers are indented by exactly this, in SPACES, so a header's text starts
 # in the same column as the text of the rows beneath it — `* steward` and `|- iam-service`
 # each put their first letter two columns in. Spaces rather than a matching glyph on
@@ -747,8 +749,16 @@ def _boxed(body: str, width: int) -> str:
     """Frame the whole status line: ``+---+`` above and below, ``|`` down each side.
 
     Applied last, over finished lines, so the box cannot perturb the column maths that
-    ran inside it. Every character it draws is ASCII — a box made of ``┌─┐│`` would be
-    the same East-Asian-Ambiguous class that made the columns drift in the first place.
+    ran inside it.
+
+    Box-drawing here, ASCII in the tree, and the split is not arbitrary. These
+    characters are East-Asian *Ambiguous*: a terminal may draw them one cell or two.
+    What breaks a layout is not width itself but width that differs *between rows* —
+    every row carries exactly one left border, one divider and one right border, so a
+    terminal drawing them wide shifts every row identically and the columns stay true.
+    The tree markers are the opposite: `|- ` on a repo row, nothing on the header, so an
+    unexpected width there moves one row and not its neighbour. That is the asymmetry
+    that caused the original drift, and it stays ASCII.
 
     The frame earns its two rows by being a *ruler*: with a right edge, a row whose
     content renders wider than ``tui.width`` believes pushes its own ``|`` past the
@@ -760,15 +770,16 @@ def _boxed(body: str, width: int) -> str:
     decoration and must never cost content.
     """
     try:
-        inner = width - 4                      # "| " + content + " |"
+        inner = width - 4                      # "│ " + content + " │"
         if inner < 20:
             return body
-        rule = f"{_DIM}+{'-' * (width - 2)}+{_R}"
-        out = [rule]
+        top = f"{_DIM}┌{'─' * (width - 2)}┐{_R}"
+        bot = f"{_DIM}└{'─' * (width - 2)}┘{_R}"
+        out = [top]
         for ln in body.split("\n"):
             ln = tui.truncate(ln, inner)
-            out.append(f"{_DIM}|{_R} {ln}{' ' * max(0, inner - tui.width(ln))} {_DIM}|{_R}")
-        out.append(rule)
+            out.append(f"{_DIM}│{_R} {ln}{' ' * max(0, inner - tui.width(ln))} {_DIM}│{_R}")
+        out.append(bot)
         return "\n".join(out)
     except Exception:
         return body
