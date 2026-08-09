@@ -63,7 +63,16 @@ _HEAD_PAD = "  "
 # Visible width of the whole left/repo block: "  " + "|- " + name + gaps + branch + ci + mr.
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
-_SAFETY = 2  # render to (COLUMNS − this); a line filling the last column can wrap
+# Render to (COLUMNS − this). The pane gives LESS than `$COLUMNS` advertises, and the
+# amount was measured rather than guessed: at 2, a line ending exactly at COLUMNS−2 lost
+# its final character to the host's own `…` crop (the brand rendered `⬢ charter 0.10…`),
+# so the usable width is COLUMNS−3. 4 leaves one spare column.
+#
+# This only became loud with the frame. Before it, a single line — the right-aligned
+# brand — reached the right edge, so only that line was ever cropped; a right border puts
+# EVERY row against the edge, which turned one truncated word into a column of `…` down
+# the whole status line.
+_SAFETY = 4
 _BRAND_GAP = 3  # min blank columns between content and the right-aligned brand
 # Extra headroom the brand demands beyond `width`. A real session cropped the brand to
 # `⬢ charter 0.10…` — impossible from `_with_brand`, which fits-or-drops — so the pane

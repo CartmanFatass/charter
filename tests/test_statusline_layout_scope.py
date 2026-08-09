@@ -298,3 +298,16 @@ class Framed(PersonaIso):
         for ln in chips:
             marker = ln[ln.find("|", 40) + 2]
             self.assertLess(ord(marker), 128, f"non-ASCII chip bullet {marker!r}: {ln!r}")
+
+    def test_the_frame_leaves_headroom_for_the_host_crop(self):
+        """The pane is narrower than `$COLUMNS` claims. Measured: a line ending at
+        COLUMNS-2 lost its last character to the host's own `…`, so usable is
+        COLUMNS-3. Every rendered row must stop short of that, or the frame's right
+        edge becomes a column of `…` — which is exactly what shipped in 0.12.0.
+        """
+        for w in (80, 131, 160, 200, 240):
+            with self.subTest(width=w):
+                for ln in _raw(_USAGE, width=w):
+                    if ln.strip():
+                        self.assertLessEqual(statusline.tui.width(ln), w - 3,
+                                             f"row reaches the host's crop zone: {ln!r}")
