@@ -98,6 +98,31 @@ class Zones(PersonaIso):
         self.assertIn("personas 2", head)
         self.assertIn("vaults", head)
 
+    def test_neither_column_header_carries_a_decorative_glyph(self):
+        """A header is the only row of its kind, so a glyph on it is exercised by
+        nothing else — and `tui.width` only knows what the Unicode tables claim.
+
+        Both mistakes shipped. `◫` on the repo header pushed the entire right-hand
+        column one space over. `◈` on the personas header sat *past* the column's
+        alignment point, so the divider and the bullets still lined up perfectly while
+        the word "personas" rendered one space right of every chip title below it —
+        bullets agreeing and titles disagreeing is the signature.
+
+        Content rows are safe because they repeat: thirteen chip rows lining up with
+        each other is what proves `◆`/`○`. A header has no sibling to expose drift, so
+        it gets a plain label.
+        """
+        rows = [ln for ln in _lines(_USAGE) if ln.find("│", 40) > 0]
+        head, content = rows[0], rows[1:]
+        elsewhere = {ch for ln in content for ch in ln}
+        for ch in head:
+            if ord(ch) < 128 or ch.isspace():
+                continue
+            self.assertIn(ch, elsewhere,
+                          f"glyph {ch!r} (U+{ord(ch):04X}) appears ONLY on the column "
+                          f"header, so no sibling row can expose a font drawing it wide: "
+                          f"{head!r}")
+
     def test_the_two_column_headers_share_one_row(self):
         ls = _lines()
         self.assertEqual([i for i, ln in enumerate(ls) if "repos" in ln],
