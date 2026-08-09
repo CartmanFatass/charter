@@ -94,7 +94,7 @@ class Zones(PersonaIso):
         rows line up with each other). Decoration belongs in the right column, past the
         alignment point.
         """
-        allowed = set("↳⑂✓✗●·⚡⛊✎◌⚠")          # already load-bearing in this column
+        allowed = set("├└│╰─↳⑂✓✗●·⚡⛊✎◌⚠")     # already load-bearing in this column
         for ln in _lines(_USAGE):
             sep = ln.find("│", 40)      # the column separator, past the tree glyphs
             if sep < 0:
@@ -268,24 +268,28 @@ class Framed(PersonaIso):
         out = _raw(_USAGE, width=24)
         self.assertTrue(any(ln.strip() for ln in out))
 
-    def test_structure_before_the_divider_is_ascii_apart_from_the_divider(self):
-        """What breaks a layout is not width but width that differs BETWEEN rows.
+    def test_the_divider_sits_in_the_same_column_on_every_row(self):
+        """The divider and frame may be box-drawing precisely because every row carries
+        exactly one of each, so a terminal that draws them wide shifts every row
+        identically and the columns stay true. (The left column's tree pipe is also
+        `│`, which is why this checks position rather than counting occurrences.)"""
+        cols = {ln.find("│", 40) for ln in _lines(_USAGE) if ln.find("│", 40) > 0}
+        self.assertEqual(len(cols), 1, f"divider wanders between columns: {sorted(cols)}")
 
-        The divider (and the frame) may be box-drawing because every row carries
-        exactly one of each: a terminal drawing them wide shifts every row identically
-        and the columns stay true. The tree markers may not, because they differ per
-        row — `|- ` on a repo, nothing on the header — so an unexpected width there
-        moves one row and not its neighbour.
-        """
+    def test_headers_indent_with_spaces_and_never_a_glyph(self):
+        """The one rule that survived every redesign, because breaking it caused the
+        original defect twice: a header's text position may not depend on how a font
+        draws anything. A `◈` doing the indenting rendered wide and pushed the title a
+        column right; removing it took the indent away and left the title two columns
+        left. Spaces only, before the first letter."""
         for ln in _lines(_USAGE):
             sep = ln.find("│", 40)
-            if sep < 0:
+            if sep < 0 or "personas" not in ln:
                 continue
-            self.assertEqual(ln[:sep].count("│"), 0, f"a second divider: {ln!r}")
-            for ch in ln[:sep]:
-                self.assertLess(ord(ch), 128,
-                                f"non-ASCII {ch!r} (U+{ord(ch):04X}) before the column "
-                                f"divider: {ln!r}")
+            for cell in (ln[:sep], ln[sep + 1:]):
+                lead = cell[:len(cell) - len(cell.lstrip())]
+                self.assertTrue(all(ch == " " for ch in lead),
+                                f"header indents with something other than spaces: {cell!r}")
 
     def test_every_persona_name_starts_in_the_same_column_as_the_header(self):
         """The defect that survived three fixes: `personas` sat at column 98 while every

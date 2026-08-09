@@ -35,13 +35,18 @@ _R, _DIM, _BOLD, _UNDER = "\033[0m", "\033[2m", "\033[1m", "\033[4m"
 _CYAN, _YELLOW, _MAGENTA, _GREEN = "\033[36m", "\033[33m", "\033[35m", "\033[32m"
 _BLUE, _RED = "\033[34m", "\033[31m"
 
-# ASCII, deliberately. Every character up to and including a row's last alignment
-# point must be one whose rendered width no font can dispute: `tui.width` trusts the
-# Unicode tables, and a terminal that draws a character wider (or narrower) shifts
-# everything after it on that row only. Box-drawing characters are East-Asian
-# *Ambiguous* — exactly the class that varies by font and locale. Decoration is fine
-# once nothing on the row still has to line up.
-_TREE_MID, _TREE_END, _TREE_PIPE = "|- ", "`- ", "|  "
+# Box-drawing, for an unbroken tree. These are East-Asian *Ambiguous* — a terminal may
+# draw them one cell or two — and unlike the frame and the divider, the count here is NOT
+# equal across rows: a repo row carries two, a padding row one, the column header none.
+# So a terminal that draws them wide moves some rows and not others, which is exactly the
+# drift this layout spent a long time chasing. Accepted deliberately, because the header's
+# position no longer depends on any glyph (it pads with `_HEAD_PAD` spaces), so the worst
+# case is a ragged tree rather than a header that disagrees with its own column.
+#
+# `_TREE_WT` must stay textually distinct from `_TREE_END`: the "tree keeps going" rewrite
+# in `render` searches backwards for the last elbow, and when the worktree row shared the
+# marker it rewrote that row instead of the repo above it.
+_TREE_MID, _TREE_END, _TREE_PIPE, _TREE_WT = "├─ ", "└─ ", "│  ", "╰─ "
 # Bounds the TOTAL rows `_repo_rows` returns — repo rows + each repo's one-line worktree
 # summary + the trailing "…(+N more)" — not merely the repo count: a repo with worktrees
 # emits 2 lines, so counting repos alone let the footer grow past its budget.
@@ -55,14 +60,14 @@ _GAP = "  "  # between repo-table cells
 # every row identically — see `_boxed` for why that is the safe case.
 _COL_SEP = f" {_DIM}│{_R} "  # divider between the repos and personas columns
 # Both column headers are indented by exactly this, in SPACES, so a header's text starts
-# in the same column as the text of the rows beneath it — `* steward` and `|- iam-service`
+# in the same column as the text of the rows beneath it — `* steward` and `├─ iam-service`
 # each put their first letter two columns in. Spaces rather than a matching glyph on
 # purpose: the point is that no font gets a vote on where a header's text begins. This
 # shipped broken both ways — a `◈` on the personas header rendered wide and pushed its
 # title a column right of the chips; removing the glyph then left the title two columns
 # LEFT of them, because the glyph had been doing the indenting.
 _HEAD_PAD = "  "
-# Visible width of the whole left/repo block: "  " + "|- " + name + gaps + branch + ci + mr.
+# Visible width of the whole left/repo block: "  " + "├─ " + name + gaps + branch + ci + mr.
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
 # Render to (COLUMNS − this). The pane gives LESS than `$COLUMNS` advertises, and the
@@ -476,9 +481,9 @@ def _repo_rows(dirs, active, cur, states, branches, gl) -> list[tui.Node]:
         # reading as a child of its repo.
         if wts and wt_budget > 0:
             wt_budget -= 1
-            lead = f"  {_DIM}{_TREE_PIPE}{_R} {_DIM}+- {_R}"
+            lead = f"  {_DIM}{_TREE_PIPE}{_R} {_DIM}{_TREE_WT}{_R}"
             pieces = tui.truncate(" · ".join(w.name for w in wts),
-                                  max(1, _LEFT_W - tui.width("  |   +- ")))
+                                  max(1, _LEFT_W - tui.width("  │   ╰─ ")))
             rows.append(tui.Text(f"{lead}{_DIM}{pieces}{_R}"))
 
     if capped:
