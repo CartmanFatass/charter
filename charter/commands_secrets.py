@@ -28,8 +28,23 @@ def cmd_vault_add(args) -> int:
     cfg: dict = {}
     if args.provider == "plain-file":
         cfg["file"] = args.file or str(config.VAULTS_DIR / f"{args.name}.json")
+    elif args.provider == "reference":
+        # A reference vault stores URIs, not values, but it still needs somewhere to
+        # keep them. Defaulting this (it used to apply only to plain-file) is why
+        # `vault add x --provider reference` registered and then warned that it had no
+        # file configured — technically correct and useless as a first experience.
+        cfg["file"] = args.file or str(config.VAULTS_DIR / f"{args.name}.json")
     elif args.file:
         cfg["file"] = args.file
+    if args.provider == "1password":
+        if not getattr(args, "op_vault", None):
+            util.err("--op-vault is required for a 1password vault: which 1Password "
+                     "vault should charter create its items in?\n"
+                     f"  charter vault add {args.name} --provider 1password --op-vault Engineering")
+            return 1
+        cfg["op-vault"] = args.op_vault
+        if getattr(args, "account", None):
+            cfg["account"] = args.account
     try:
         registry.add_vault(args.name, args.provider, cfg, persona=args.persona)
     except base.VaultError as e:
@@ -42,7 +57,15 @@ def cmd_vault_add(args) -> int:
     (util.info if ok else util.warn)(f"  {detail}")
     if not prov.available:
         util.warn(f"  provider '{args.provider}' is not implemented yet — registered for later use.")
-    elif args.provider == "plain-file":
+    elif args.provider == "1password":
+        util.info(f"  charter creates one 1Password item per secret, tagged "
+                  f"'charter:{args.name}', in vault '{cfg['op-vault']}'.")
+        util.info(f"  add secrets with: charter secret set {args.name} <key> --stdin")
+    elif args.provider == "reference":
+        util.info(f"  stores op:// or vault:// URIs; values are fetched at read time.")
+        util.info(f"  add one with: charter secret set {args.name} <key> "
+                  f"--value 'op://<vault>/<item>/<field>'")
+    else:
         util.info(f"  add secrets with: charter secret set {args.name} <key> --stdin")
     return 0
 

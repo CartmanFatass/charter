@@ -6,9 +6,9 @@ secret …`). Read this page before storing anything real in one.
 
 ## What it actually is — plainly
 
-**The vault is not a password manager, and it is not a secrets manager in the sense
-1Password or Vault are.** The built-in `plain-file` provider — the only one implemented
-today — stores secrets as **plaintext JSON on disk**, at file mode **0600** (owner
+**The default vault is not a password manager, and it is not a secrets manager in the
+sense 1Password or Vault are.** The `plain-file` provider stores secrets as **plaintext
+JSON on disk**, at file mode **0600** (owner
 read/write only). There is **no encryption at rest**. Anyone with read access to your
 user account, or a backup of your home directory, or a malicious process running as
 you, can read the file directly. `charter` does not pretend otherwise: the vault
@@ -80,6 +80,56 @@ charter persona secret exec --env TOKEN=API_TOKEN -- some-cli
 | --- | --- | --- |
 | Plain file (JSON, 0600) | `plain-file` | Implemented. Stores the value itself. |
 | Reference (`op://`, `vault://`) | `reference` | Implemented. Stores a **URI**; the value is fetched at read time. |
+| 1Password (native) | `1password` | Implemented. charter **creates and manages** the items via the `op` CLI. |
+
+If 1Password is where your credentials belong, you have two shapes to choose between,
+and the difference is who owns the item:
+
+- **`1password`** — charter owns it. `secret set` creates the item, `rm` deletes it, so
+  a credential can be provisioned for a persona without opening the 1Password UI.
+- **`reference`** — someone else owns it. charter stores only a pointer to an item that
+  already exists. Right when the credential is shared with people or systems beyond
+  charter, or when a human should stay in charge of rotating it.
+
+### Native 1Password vaults
+
+```bash
+charter vault add devops --provider 1password --op-vault Engineering --persona devops
+charter secret set devops KUBECONFIG --from-file ~/.kube/prod.yaml
+charter secret exec devops --file KUBECONFIG=KUBECONFIG -- kubectl get pods
+```
+
+Schema — **one 1Password item per secret**, not one per vault:
+
+| charter | 1Password |
+| --- | --- |
+| vault `devops`, key `KUBECONFIG` | item `charter-devops-KUBECONFIG` |
+| | tagged `charter`, `charter:devops` |
+| | value in the item's `password` field |
+
+One item per *vault* is the tidier-looking design and it is wrong here. Updating one
+field of a multi-field item means a read-modify-write through a JSON template, a
+template **replaces** the item rather than merging, and `op item get --format json`
+*conceals* values unless asked otherwise — so round-tripping would overwrite every
+sibling secret with a mask. One item per key removes the interaction: each write
+touches exactly the credential it was asked to touch.
+
+Deliberate properties:
+
+- **No secret ever reaches argv.** 1Password's own help warns that "command arguments
+  get logged in your command history, and can be visible to other processes on your
+  machine". Writes pipe a JSON template on **stdin** (`op item create -`,
+  `op item edit <item>`); only names are ever passed as arguments.
+- **charter lists only what charter created.** `secret list` filters by the
+  `charter:<vault>` tag, so a shared 1Password vault your team also fills by hand is
+  never listed — far less offered for deletion.
+- **Errors withhold `op`'s output.** Its stderr can echo what it was given, and on a
+  read path its stdout *is* the secret; failures report the exit status only.
+- **Pin the account** with `--account` when signed into more than one. Otherwise an
+  unqualified vault name resolves against whichever is default — a quiet way to write
+  a credential into the wrong company's vault.
+- **`charter doctor` and `vault list` never read a value.** They count items, so
+  routine status never triggers a 1Password re-auth prompt.
 
 ### Reference vaults — when your secrets already live somewhere else
 

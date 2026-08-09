@@ -12,6 +12,7 @@ import os
 
 from .. import config
 from .base import VaultError, VaultNotConfigured, VaultProvider
+from .onepassword import OnePasswordProvider
 from .plain_file import PlainFileProvider
 from .reference import ReferenceProvider
 
@@ -21,6 +22,7 @@ PROVIDERS: dict[str, type[VaultProvider]] = {
     for cls in (
         PlainFileProvider,
         ReferenceProvider,
+        OnePasswordProvider,
     )
 }
 

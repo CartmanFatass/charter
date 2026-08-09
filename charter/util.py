@@ -46,13 +46,19 @@ class ProcError(RuntimeError):
 
 
 def run(
-    cmd: Sequence[str], cwd=None, check: bool = True, capture: bool = True
+    cmd: Sequence[str], cwd=None, check: bool = True, capture: bool = True,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run ``cmd``. Raises :class:`ProcError` on failure when ``check``."""
+    """Run ``cmd``. Raises :class:`ProcError` on failure when ``check``.
+
+    ``input`` is written to the child's stdin. That is how a secret reaches a CLI
+    without ever appearing in argv — where `ps` and the shell's history can see it.
+    """
     proc = subprocess.run(
         list(cmd),
         cwd=cwd,
         text=True,
+        input=input,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )

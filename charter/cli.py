@@ -341,7 +341,12 @@ def _add_vault_parser(sub) -> None:
     add.add_argument("name")
     add.add_argument("--provider", default="plain-file", choices=sorted(PROVIDERS),
                      help="Vault backend (default: plain-file).")
-    add.add_argument("--file", help="File path for plain-file vaults (default: .charter/vaults/<name>.json).")
+    add.add_argument("--file", help="File path for plain-file/reference vaults "
+                                    "(default: .charter/vaults/<name>.json).")
+    add.add_argument("--op-vault", metavar="NAME",
+                     help="1Password vault charter creates its items in (provider: 1password).")
+    add.add_argument("--account", help="1Password account to pin to (provider: 1password); "
+                                       "needed when signed into more than one.")
     add.add_argument("--persona", help="Tag this vault for a persona (e.g. devops, qa).")
     add.set_defaults(func=commands_secrets.cmd_vault_add)
 
