@@ -66,7 +66,14 @@ _COL_SEP = f" {_DIM}│{_R} "  # divider between the repos and personas columns
 # shipped broken both ways — a `◈` on the personas header rendered wide and pushed its
 # title a column right of the chips; removing the glyph then left the title two columns
 # LEFT of them, because the glyph had been doing the indenting.
-_HEAD_PAD = "  "
+# Markers: a column header's, and a persona chip's. All three are East-Asian **Neutral**
+# (U+25AA ▪, U+25B8 ▸, U+25AB ▫), which is the whole point — the tables give Neutral
+# exactly one cell everywhere, so a header's marker and a chip's bullet can never
+# disagree about where the text after them begins. The previous set (`◈` header, `◆`/`○`
+# chips) was East-Asian *Ambiguous*: a font drew `◈` two cells and the personas title
+# rendered a column right of every name below it.
+_MARK_HEAD, _MARK_ACTIVE, _MARK_IDLE = "▪", "▸", "▫"
+_HEAD_PAD = f"{_MARK_HEAD} "
 # Visible width of the whole left/repo block: "  " + "├─ " + name + gaps + branch + ci + mr.
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
@@ -631,15 +638,15 @@ def _persona_chips(session: str | None = None) -> list[str]:
             dot = _vault_dot(persona.vault_of(n))
             badge = _mem_badge(_mem_count(n), _mem_count(n, ephemeral=True, session=session))
             health = _health_mark(n, known=known)
-            # ASCII marker, and always exactly two columns wide, so every persona
-            # name starts in the same column as every other AND as the column header
-            # above them. A `◆`/`○` here made the name's position depend on how the
-            # font draws a diamond; the header, having no diamond, then sat two
-            # columns off. Badges trail the name, where nothing has to line up.
+            # The marker is always exactly two columns, so every persona name starts in
+            # the same column as every other AND as the column header above them — the
+            # header carries `_MARK_HEAD` for exactly that reason. All three markers are
+            # East-Asian Neutral, so no font gets to disagree about that width. Badges
+            # trail the name, where nothing after them has to line up.
             if n == active:
-                chips.append(f"{_MAGENTA}* {_BOLD}{n}{_R}{dot}{badge}{health}")
+                chips.append(f"{_MAGENTA}{_MARK_ACTIVE} {_BOLD}{n}{_R}{dot}{badge}{health}")
             else:
-                chips.append(f"{_DIM}- {n}{_R}{dot}{badge}{health}")
+                chips.append(f"{_DIM}{_MARK_IDLE} {n}{_R}{dot}{badge}{health}")
         return chips
     except Exception:
         return []
