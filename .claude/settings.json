@@ -3,5 +3,8 @@
     "type": "command",
     "command": "charter statusline",
     "padding": 0
+  },
+  "enabledPlugins": {
+    "charter@charter": true
   }
 }
