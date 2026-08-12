@@ -219,6 +219,16 @@ def cmd_workspace_remove(args) -> int:
         )
         return 2
 
+    # Open todos are REPORTED, never guarded on — see `_work_at_risk` for why they are not
+    # in that list. Said here rather than above the guard so the count describes what is
+    # actually about to happen, and only when there is something to say: "0 open todos" on
+    # every removal is how a line stops being read at all, including on the removal where
+    # it mattered.
+    from . import todos
+    open_todos = todos.count_open(name)
+    if open_todos:
+        util.warn(f"Discarding {open_todos} open todo(s) with '{name}' — nothing else holds them.")
+
     shutil.rmtree(wd)
     util.ok(f"Removed workspace '{name}' and its clones.")
     if workspace.resolve() == name and workspace.source() in ("session", "active-file"):
@@ -270,7 +280,14 @@ def cmd_workspace_rename(args) -> int:
 
 
 def _work_at_risk(name: str) -> list[str]:
-    """Clones in the workspace with uncommitted or unpushed work."""
+    """Clones in the workspace with uncommitted or unpushed work.
+
+    Only that. Open todos are deliberately NOT here, though `remove` reports them: this
+    list is what is *unrecoverable*, and a todo is a note about the future, not work that
+    ceases to exist. A workspace whose todos were all abandoned is precisely the one worth
+    deleting, and making that case demand `--force` would teach the habit of reaching for
+    `--force` — which is how a guard stops protecting the commits it exists for.
+    """
     out = []
     for d in workspace.clones(name):
         if _git(["status", "--porcelain"], cwd=d).stdout.strip():
@@ -569,8 +586,16 @@ def cmd_workspace_note(args) -> int:
     return cmd_workspace_remember(args)
 
 
+#: The two ways a todo stops being open — `done` (finished) and `forget` (abandoned).
+#: They are safe as leading words where a `list` subcommand was not (see the docstring
+#: below) because each is followed by a SLUG: recording never has a second positional, so
+#: "did the user mean to record this?" is answered by the shape of the call, not by
+#: guessing at the word. Two states only, and neither is `in_progress` (docs/adr/0006).
+_CLOSING_VERBS = ("done", "forget")
+
+
 def cmd_workspace_todo(args) -> int:
-    """Record one **todo** — something this task still means to do — or list them.
+    """Record one **todo** — something this task still means to do — list them, or close one.
 
     Shaped like `remember`: the verb with text records, the verb bare lists. A literal
     `todo list` subcommand would be indistinguishable from recording a todo whose text is
@@ -582,7 +607,18 @@ def cmd_workspace_todo(args) -> int:
     from . import todos
     name = getattr(args, "workspace", None) or workspace.resolve()
     text = (getattr(args, "text", None) or "").strip()
+    slug = (getattr(args, "slug", None) or "").strip()
     query = getattr(args, "query", None)
+
+    if text in _CLOSING_VERBS:
+        if not slug:
+            # Falling through to the recording path here would record a todo whose text is
+            # "done" — a silent wrong action in answer to an obvious slip, and one nobody
+            # could act on later. Ask for the missing half instead.
+            util.err(f"`todo {text}` needs the slug of the todo to close.")
+            util.info(f"  The slug is the first column: charter ws todo --workspace {name}")
+            return 1
+        return _close_todo(name, slug, journal=(text == "done"))
 
     if not text:
         return _list_todos(name, query)
@@ -600,6 +636,51 @@ def cmd_workspace_todo(args) -> int:
     util.ok(f"Todo recorded in '{name}' → workspaces/{name}/todos/{p.name}")
     if not workspace.is_live(name):
         util.info(f"  '{name}' is LOCAL (private) — todos stay on disk, not committed.")
+    return 0
+
+
+def _close_todo(name: str, slug: str, *, journal: bool) -> int:
+    """Close one todo: **delete** it, leaving a journal entry (`done`) or nothing (`forget`).
+
+    Closing deletes rather than marking done because the journal is already the permanent
+    record of what happened — keeping closed todos would build a second one that every read
+    then has to filter past, and a store whose reads all begin with a filter is a store that
+    will eventually be read without it.
+
+    Which makes the journal entry the load-bearing half, not a courtesy. An agent may close
+    todos it recorded itself, so without a trace outside the list it could create and tick
+    off work unobserved and the list would always read as finished — worse than no list,
+    because it would be confidently wrong. `forget` has no trace precisely because it claims
+    nothing happened.
+
+    Journalling happens BEFORE the delete: the entry is the only surviving evidence, so it
+    is written while the todo is still there to name. Both halves resolve through the
+    workspace's own todo directory, which is what keeps one workspace from closing another's
+    work — there is no path from here to a slug that lives elsewhere.
+    """
+    from . import memstore, todos
+    d = todos.todos_dir(name)
+    p = memstore.resolve(d, slug)
+    if p is None:
+        util.err(f"no todo '{slug}' in workspace '{name}'.")
+        util.info(f"  List the real ones: charter ws todo --workspace {name}")
+        return 1
+    # Ask the store for the title rather than re-parsing the file here: `open_todos` already
+    # decides what a todo is called, and two answers to that would eventually disagree.
+    title = next((t["title"] for t in todos.open_todos(name) if t["slug"] == p.stem), p.stem)
+
+    if journal:
+        # Through the normal note path, so a LIVE workspace shares this entry exactly like
+        # every other journal entry. A trace that stays on disk while the rest of the
+        # journal is shared is a weaker trace than the argument above needs.
+        cmd_workspace_remember(SimpleNamespace(
+            workspace=name, text=f"Closed todo: {title}", title=None, no_sync=False))
+
+    memstore.forget(d, p.name)  # drops the file AND its index line — no residue either side
+    if journal:
+        util.ok(f"Closed '{title}' in '{name}' — the journal has the trace.")
+    else:
+        util.ok(f"Dropped '{title}' from '{name}' — abandoned, so nothing was journalled.")
     return 0
 
 
@@ -684,9 +765,10 @@ def cmd_workspace_vision(args) -> int:
 def cmd_workspace_fork(args) -> int:
     """Fork a workspace: create <new> pre-loaded with <src>'s context — the living
     charter (workspace.md: vision, context, glossary), the manifest (repos+branches),
-    and the task memo — so you can branch off and continue with full context. The
-    repo clones are not copied (they're reconstructible): pass --restore to clone them
-    from the manifest, or `charter clone` on demand. Starts LOCAL unless --live."""
+    the task memo, and the open todos — so you can branch off and continue with full
+    context. The repo clones are not copied (they're reconstructible): pass --restore to
+    clone them from the manifest, or `charter clone` on demand. Starts LOCAL unless --live."""
+    from . import todos
     src, new = args.src, args.new
     if not workspace.valid_name(new):
         util.err(f"invalid workspace name '{new}' (use lowercase letters, digits, . _ -)")
@@ -709,6 +791,20 @@ def cmd_workspace_fork(args) -> int:
     src_mem = workspace.memory_dir(src)
     if src_mem.exists():
         shutil.copytree(src_mem, workspace.memory_dir(new), dirs_exist_ok=True)
+    # Open todos travel with the memory, and for the same reason: a fork exists so someone
+    # can pick the task up with full context, and what is still to be done is the most
+    # actionable part of that. Inheriting everything the task LEARNED while dropping
+    # everything it still INTENDED leaves the fork re-deriving the plan — the exact problem
+    # todos were built to end.
+    #
+    # A COPY, so the two lists diverge from here: closing one in the fork must not rewrite
+    # the source's plan. Copied wholesale (files + index) rather than re-added one by one,
+    # which would restamp every todo with today's date and hide a three-week-old intent
+    # behind a fresh one — age is the only ranking this feature has. Closed todos never
+    # arise, since finishing one deletes it.
+    src_todos = todos.todos_dir(src)
+    if src_todos.exists():
+        shutil.copytree(src_todos, todos.todos_dir(new), dirs_exist_ok=True)
     m = workspace.read_manifest(src)
     repos = list(m.get("repos") or [])
     if m:
@@ -723,6 +819,12 @@ def cmd_workspace_fork(args) -> int:
         workspace.set_live(new, True)
     util.ok(f"Forked '{src}' → '{new}' — charter + context + memo copied "
             f"({'LIVE' if getattr(args, 'live', False) else 'LOCAL'}).")
+    inherited = todos.count_open(new)
+    if inherited:
+        # Said out loud because the two lists are independent from here: whoever forked
+        # needs to know they now own a second copy of this intent, not a view of the first.
+        util.info(f"Inherited {inherited} open todo(s) from '{src}' — the fork's own list "
+                  f"now: charter ws todo --workspace {new}")
     if getattr(args, "restore", False) and repos:
         util.info(f"Cloning {len(repos)} repo(s) from the inherited manifest…")
         return cmd_workspace_restore(SimpleNamespace(name=new, on_demand=False))
