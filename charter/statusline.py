@@ -380,15 +380,37 @@ def _repo_states(dirs: list[Path]) -> dict:
 
 
 def _run_state(d: Path) -> dict:
-    """One `git status --porcelain --branch` → dirty flag + ahead/behind counts."""
+    """One `git status --porcelain --branch` → dirty flags + ahead/behind counts.
+
+    TWO notions of dirt, from the one command, because two callers legitimately want
+    different ones:
+
+    * ``dirty`` — anything at all, untracked files included. What a repo row's ``*``
+      means, and right for a tree you are actually working in: a new file you have not
+      added yet is still work in progress.
+    * ``tracked_dirty`` — the same minus untracked (``??``) entries, i.e. exactly what
+      ``git status --untracked-files=no`` reports. What :func:`_plane_root_alert` uses,
+      and it is `doctor`'s `check_plane_root` that makes it necessary rather than merely
+      nicer: that check asks git the ``-uno`` question, so a plane-root warning built on
+      the wider notion would have the status line calling the root dirty every turn
+      while `doctor` called it clean — two answers to one question, which is worse than
+      either answer alone. The reason `doctor` narrowed it applies here identically:
+      memory defaults to ``share = "local"``, so ``personas/*/memory/`` accumulates
+      untracked files on any plane a few days old, and a warning that is permanently on
+      is furniture.
+
+    Computed here, in the one place that already reads git's answer, rather than by a
+    second `git status` in the caller: the plane root's state would otherwise cost a
+    subprocess on every render, since only this path is behind `_repo_states`' TTL cache.
+    """
     try:
         r = subprocess.run(
             ["git", "-C", str(d), "status", "--porcelain=v1", "--branch"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3,
         )
     except Exception:
-        return {"dirty": False, "ahead": 0, "behind": 0}
-    dirty, ahead, behind = False, 0, 0
+        return {"dirty": False, "tracked_dirty": False, "ahead": 0, "behind": 0}
+    dirty, tracked_dirty, ahead, behind = False, False, 0, 0
     for ln in r.stdout.splitlines():
         if ln.startswith("## "):
             m = re.search(r"\[([^\]]*)\]", ln)
@@ -401,7 +423,12 @@ def _run_state(d: Path) -> dict:
                         behind = _int(part[7:])
         elif ln.strip():
             dirty = True
-    return {"dirty": dirty, "ahead": ahead, "behind": behind}
+            # `??` is the only untracked form in porcelain v1 (`!!` needs --ignored,
+            # which is not asked for). Everything else — modified, staged, renamed,
+            # unmerged — is a tracked path, and is what `-uno` would have printed.
+            if not ln.startswith("??"):
+                tracked_dirty = True
+    return {"dirty": dirty, "tracked_dirty": tracked_dirty, "ahead": ahead, "behind": behind}
 
 
 def _int(s: str) -> int:
@@ -957,12 +984,18 @@ def _session_news(sid: str | None) -> list[str]:
 
 
 def _alerts(active: str) -> list[str]:
-    """Full-width alert lines — a pinned-version mismatch, workspaces needing reinit.
+    """Full-width alert lines — a pinned-version mismatch, workspaces needing reinit,
+    a nested plane, a plane root being worked in.
 
     Kept off the session strip and out of both columns: these are not telemetry but
     *actionable* problems that carry the command that fixes them, and they are about
     the control plane rather than this session's activity. They render only when real,
     so they cost no rows on a healthy control plane.
+
+    The plane-root check goes LAST because this function has ONE guard: an exception
+    anywhere below leaves the alerts already appended in `out` and drops everything
+    after it. The two above it carry commands that fix problems of their own, so the
+    newest addition is the one that pays if something here goes wrong.
     """
     out: list[str] = []
     try:
@@ -980,9 +1013,206 @@ def _alerts(active: str) -> list[str]:
             out.append(f"{_RED}⚠{_R} {_DIM}nested plane{_R} — {_DIM}memory and vault go to"
                        f"{_R} {config.ROOT.name}{_DIM}, not{_R} {outer.name}"
                        f"{_DIM} · export CHARTER_ROOT={outer}{_R}")
+        root_line = _plane_root_alert()
+        if root_line:
+            out.append(root_line)
     except Exception:
         pass
     return out
+
+
+#: Fallback names for "the branch this tree is meant to sit on", tried in order and only
+#: when the repository itself does not say. Convention, not guesswork: a name counts only
+#: when a ref by that name actually exists in this repo.
+_ROOT_DEFAULTS = ("main", "master")
+
+
+def _common_git_dir(gitdir: Path) -> Path:
+    """The git directory holding the SHARED refs behind *gitdir*.
+
+    A linked worktree's git dir (``<main>/.git/worktrees/<name>``) holds only what is
+    per-worktree — HEAD, the index — while every ref, including ``origin/HEAD`` and the
+    branches, lives in the common directory its ``commondir`` file names. ``$CHARTER_ROOT``
+    may legitimately point at a worktree (``root._plane_of`` documents that escape hatch),
+    and reading refs from the per-worktree directory there finds none of them: the plane
+    would look like a repo with no default branch rather than one being worked in.
+    """
+    try:
+        txt = (gitdir / "commondir").read_text().strip()
+    except OSError:
+        return gitdir                      # a clone's git dir IS the common dir
+    if not txt:
+        return gitdir
+    p = Path(txt)
+    return p if p.is_absolute() else (gitdir / p)
+
+
+def _ref_exists(common: Path, ref: str) -> bool:
+    """Whether *ref* (e.g. ``refs/heads/main``) exists — loose file **or** packed.
+
+    Both forms are normal and either can be the only one: a fresh ``git init`` writes
+    loose refs, while anything that has been ``gc``'d keeps them in ``packed-refs``.
+    Checking only the loose form reports an established repo as having no ``main`` at
+    all, which here would silently disable the branch half of the warning on exactly the
+    long-lived planes it is for.
+    """
+    if (common / ref).is_file():
+        return True
+    try:
+        packed = (common / "packed-refs").read_text()
+    except OSError:
+        return False
+    # `<sha> refs/heads/main`, one per line; `^<sha>` peel lines never carry a ref name.
+    return any(ln.rstrip().endswith(f" {ref}") for ln in packed.splitlines())
+
+
+def _default_branch(gitdir: Path) -> str | None:
+    """The branch this tree is meant to sit on, or ``None`` when nothing says.
+
+    ``origin/HEAD`` is the repository's own answer — ``git clone`` writes it and
+    ``git remote set-head`` maintains it — so it wins outright: a plane living on
+    ``trunk`` must never be told every turn that it is off ``main``.
+
+    ``None`` is a real answer, and it is what lets the branch half of the warning go
+    quiet. A plane with no remote and a hand-named branch has no default to be off, and a
+    warning manufactured from a guess would fire forever on a tree nobody is misusing —
+    which is precisely the furniture this element is designed not to become. Dirtiness
+    still speaks; only the branch claim is withheld.
+
+    Filesystem-only, like :func:`charter.util.branch_of`, because this runs on every
+    render: two small reads answer it exactly, where a ``git`` fork would be paid over
+    and over for the same constant.
+    """
+    common = _common_git_dir(gitdir)
+    try:
+        head = (common / "refs" / "remotes" / "origin" / "HEAD").read_text().strip()
+    except OSError:
+        head = ""
+    prefix = "ref: refs/remotes/origin/"
+    if head.startswith(prefix):
+        return head[len(prefix):].strip() or None
+    for name in _ROOT_DEFAULTS:
+        if _ref_exists(common, f"refs/heads/{name}"):
+            return name
+    return None
+
+
+def _head_detached(gitdir: Path) -> bool:
+    """True when HEAD names a commit rather than a branch.
+
+    Its own read rather than an inference from :func:`_branch`, which collapses the two:
+    a detached HEAD reads back from there as a short sha, and a short sha is not
+    distinguishable from a branch someone named after one. The distinction has to be
+    made where git makes it — HEAD is a symref (``ref: refs/heads/…``) or it is not.
+
+    Reads the gitdir it is GIVEN, never the common dir — the opposite of
+    :func:`_default_branch`. HEAD is per-worktree (that is the whole point of a linked
+    worktree), while refs are shared, so following ``commondir`` here would report the
+    main tree's branch for a worktree standing on its own.
+
+    ``False`` when HEAD cannot be read at all. "Unknown" is not "detached", and
+    manufacturing the most alarming of the three states out of a failed read is exactly
+    the false alarm this element cannot afford.
+    """
+    try:
+        txt = (gitdir / "HEAD").read_text().strip()
+    except OSError:
+        return False
+    return bool(txt) and not txt.startswith("ref:")
+
+
+def _plane_root_alert() -> str | None:
+    """One line when the **plane root** is being worked in — dirty, detached, or off its
+    default branch. ``None`` otherwise, which is the ordinary case.
+
+    The root is the directory holding ``charter.toml``: the control plane itself, and
+    since ADR 0007 not a repo row at all — a plane's `repo_trees` is its clones and
+    nothing else. That absence is exactly why this line exists (docs/adr/0008). Two
+    sessions that both sit in the root share one working tree and one HEAD and thrash
+    each other's branches, while charter reports two different workspaces and lists no
+    tree that would hint at why. **Not presenting a tree is not the same as preventing
+    work in it**, and the failure is invisible in the one surface a user would check.
+
+    An *alert* rather than a row, and deliberately: this is not a property of the active
+    workspace (the top line) nor of this session (the bottom strip), so it sits with the
+    other actionable control-plane problems, full width. Full width also costs the layout
+    nothing — the row has no right-hand neighbour, so unlike a row in the repo column it
+    cannot shear a column by being one cell wider than `tui.width` believes.
+
+    All findings share ONE line. A row is spent on every single turn, and "dirty AND off
+    main" is one situation with two symptoms.
+
+    "Dirty" here means ``tracked_dirty`` — untracked files excluded, which is exactly
+    what `doctor`'s `check_plane_root` asks git for (``--untracked-files=no``). Both the
+    reason and the agreement matter. The reason: memory defaults to ``share = "local"``,
+    written to disk and never committed for you, so ``personas/*/memory/`` fills with
+    untracked files on any plane a few days old and the wider notion would put this line
+    on screen permanently — furniture, which is the one thing this element must not
+    become. The agreement: `doctor` and the status line answer the same question about
+    the same tree, and two answers to one question is worse than either alone.
+    """
+    try:
+        if not config.HAS_CONTROL_PLANE:
+            return None                    # `charter --version` outside a plane, etc.
+        from . import util
+        root = config.ROOT
+        gitdir = util.git_dir(root)
+        if gitdir is None:
+            # Two cases, one answer. `charter init` in a fresh directory does not run
+            # `git init` (that is the README's 60-second path), and a plane created in a
+            # SUBDIRECTORY of some other repo has no `.git` of its own either. Asking git
+            # about the directory anyway would answer for the surrounding repo, and
+            # reporting a tree the user never named as "the plane root" is worse than
+            # saying nothing.
+            return None
+        # Its own `_repo_states` call rather than joining `render`'s scan list, because
+        # that list also feeds `glstate.read_for`/`maybe_spawn`: a directory in it has
+        # forge state fetched for it in the background. The root has no row, so that
+        # would be network work for something nothing can display. The TTL cache is
+        # shared, so the cost here is one `git status` per few seconds, not per render.
+        state = _repo_states([root]).get(root) or {}
+        branch = _branch(root)
+        default = _default_branch(gitdir)
+
+        bits = []
+        # `tracked_dirty`, never `dirty` — see this function's docstring and `_run_state`.
+        # `.get` defaults to False rather than to `dirty`: a cache entry written seconds
+        # ago by an older charter has no such key, and a few silent seconds is a better
+        # failure than a warning derived from the notion `doctor` disagrees with.
+        if state.get("tracked_dirty"):
+            # The word, not the repo table's `*`. A marker reads as a marker beside a
+            # column of them; this line has no siblings to be read against.
+            bits.append(f"{_YELLOW}dirty{_R}")
+        if _head_detached(gitdir):
+            # Reported on its own terms and WITHOUT a default to compare against, unlike
+            # the branch case below. Detachment is a fact about HEAD alone, it is the
+            # most alarming of these states rather than the least — a commit made here is
+            # unreachable the moment anything else is checked out — and staying silent
+            # about it on a plane whose default cannot be discovered would be the wrong
+            # way round. `doctor`'s `check_plane_root` reports it the same way and on the
+            # same terms; the words match so the two cannot be read as different findings.
+            bits.append(f"{_YELLOW}detached HEAD{_R}")
+        # `?` is `_branch`'s "HEAD unreadable" — nothing to compare, so nothing to claim.
+        # A detached HEAD never reaches here: it is already said above, and saying it
+        # again as "on 1a2b3c4, not main" would dress the worst state up as an ordinary
+        # branch you happened to be on.
+        elif default and branch not in ("?", default):
+            bits.append(f"{_DIM}on{_R} {branch}{_DIM}, not{_R} {default}")
+        if not bits:
+            return None
+
+        # Order IS truncation order, and the words that must survive a narrow pane are
+        # the ones naming what the line is about: `plane root` first, then which root.
+        # Nothing but ASCII and `⚠` — the same glyph the alerts above already use, so
+        # this adds no character whose width some font gets to disagree about.
+        sep = f"{_DIM} · {_R}"
+        return (f"{_YELLOW}⚠{_R} {_DIM}plane root{_R} {root.name}{sep}"
+                + sep.join(bits)
+                + f"{_DIM} · work belongs in a workspace clone{_R}")
+    except Exception:
+        # The status line's one hard contract. A root that cannot be read costs this
+        # line and nothing else.
+        return None
 
 
 def _nested_under() -> Path | None:
