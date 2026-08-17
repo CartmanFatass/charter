@@ -352,6 +352,10 @@ def cmd_clone(args) -> int:
         if res["status"] == "exists":
             util.info(f"{r['name']}: already cloned in '{ws}'")
         elif res["status"] == "ok":
+            # Armed the moment it exists. A clone is where sessions start, and opencode
+            # reads its plugin from the session's own directory — so a tree that gets its
+            # wiring "later" is a tree whose first session ran unguarded.
+            wire_work_tree(dest)
             util.ok(f"{r['name']} → {dest.relative_to(config.ROOT)} "
                     f"({_clone_announcement(r)} via {res['forge'].cli}, HTTPS)")
         else:
@@ -801,6 +805,32 @@ def _load_settings(root: Path) -> tuple[dict | None, Path]:
     return (doc if isinstance(doc, dict) else None), p
 
 
+def add_ask_rule(root: Path, rule: str) -> tuple[str, str]:
+    """Append *rule* to `permissions.ask` in the plane's `.claude/settings.json`.
+
+    Extracted from `cmd_guard_ask` when a second harness needed the same command: the
+    command now asks each registered harness to write its own file in its own syntax,
+    and this is Claude Code's half. Refuses a malformed file rather than repairing it,
+    and a `permissions` or `ask` of the wrong type is somebody's deliberate structure —
+    charter reports it and stops.
+    """
+    settings, path = _load_settings(root)
+    if settings is None:
+        return "malformed", str(path)
+    perms = settings.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        return "malformed", f"{path} (`permissions` is not an object)"
+    ask = perms.setdefault("ask", [])
+    if not isinstance(ask, list):
+        return "malformed", f"{path} (`permissions.ask` is not a list)"
+    if rule in ask:
+        return "present", str(path)
+    ask.append(rule)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+    return "added", str(path)
+
+
 def cmd_guard_ask(args) -> int:
     """Add a force-prompt rule to `permissions.ask` in the plane's `.claude/settings.json`.
 
@@ -820,32 +850,34 @@ def cmd_guard_ask(args) -> int:
     if not pattern:
         util.err("Nothing to add. Example: charter guard ask 'terraform apply *'")
         return 2
-    root = Path(config.ROOT)
-    settings, path = _load_settings(root)
-    if settings is None:
-        util.err(f"{path} is not valid JSON — left untouched.")
-        util.info("  Fix it by hand, then re-run. charter never repairs this file.")
-        return 1
+    from .harness import registry
 
-    rule = _as_rule(pattern)
-    perms = settings.setdefault("permissions", {})
-    if not isinstance(perms, dict):
-        util.err(f"{path}: `permissions` is not an object — left untouched.")
-        return 1
-    ask = perms.setdefault("ask", [])
-    if not isinstance(ask, list):
-        util.err(f"{path}: `permissions.ask` is not a list — left untouched.")
-        return 1
-    if rule in ask:
-        util.ok(f"already asking for {rule}.")
-        return 0
-    ask.append(rule)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-    util.ok(f"{rule} → permissions.ask")
-    util.info(f"  {path} is committed, so this applies to everyone on this repo.")
-    _warn_if_shadowing(rule)
-    return 0
+    root = Path(config.ROOT)
+    rc, wrote = 0, False
+    for h in registry.all():
+        status, detail = h.apply_ask_rule(root, pattern)
+        if status == "added":
+            util.ok(f"{h.name}: asking for {h.ask_rule(pattern)} → {detail}")
+            wrote = True
+        elif status == "present":
+            util.ok(f"{h.name}: already asking for {h.ask_rule(pattern)}.")
+            wrote = True
+        elif status == "malformed":
+            util.err(f"{h.name}: {detail} is not valid — left untouched.")
+            util.info("  Fix it by hand, then re-run. charter never repairs these files.")
+            rc = 1
+        else:
+            # Not a failure. The harness has no command-pattern permissions, so charter's
+            # own hook stays the only thing guarding this command there — which is worth
+            # saying, because silence would read as "the rule is in force everywhere".
+            util.info(f"  {h.name}: {detail} — charter's own guard still applies.")
+    if not wrote and rc == 0:
+        util.warn("  No harness took the rule.")
+    if wrote:
+        util.info("  These files are committed, so the rule applies to everyone on this "
+                  "repo — no sync step, and nothing that can drift (ADR 0014).")
+        _warn_if_shadowing(registry.get(registry.CLAUDE_CODE).ask_rule(pattern))
+    return rc
 
 
 def cmd_guard_list(args) -> int:
@@ -942,6 +974,100 @@ def _ensure_statusline(root: Path) -> tuple[str, Path | None]:
         rewritten += "\n"
     p.write_text(rewritten)
     return "created", None
+
+
+def ensure_env_var(root: Path, key: str, value: str) -> tuple[str, Path | None]:
+    """Set ``env[key]`` in ``.claude/settings.json`` IF ABSENT (ADR 0015).
+
+    Claude Code's `env` *"sets environment variables that apply to every session"*, which
+    is how a harness with no per-shell hook still names itself to charter. Public rather
+    than underscored because a harness class calls it — `settings.json` is this module's
+    territory (it already owns the status line, the guard hook and the ask rules in that
+    same file), so the plumbing stays here and the harness asks for it.
+
+    Same contract and restraint as :func:`_ensure_statusline`. An `env` that is not an
+    object, or a key someone set by hand, is left alone — reverting a deliberate choice
+    is what these writers exist not to do.
+    """
+    settings, p = _load_settings(root)
+    if settings is None:
+        return "malformed", p
+    env = settings.get("env")
+    if "env" in settings and not isinstance(env, dict):
+        return "present", p
+    if not isinstance(env, dict):
+        env = {}
+    if env.get(key):
+        return "present", p
+    env[key] = value
+    settings["env"] = env
+    raw = p.read_text() if p.exists() else ""
+    indent, separators = _json_style(raw)
+    rewritten = json.dumps(settings, indent=indent, separators=separators)
+    if raw.endswith("\n"):
+        rewritten += "\n"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(rewritten)
+    return "created", p
+
+
+def wire_work_tree(tree: Path) -> list[tuple[str, str]]:
+    """Arm every registered harness inside one clone or worktree.
+
+    Called the moment a tree comes into existence, because that is where sessions start:
+    opencode reads its plugin from the session's own directory and does not walk upwards,
+    so a plane-root-only shim is inert in every session that matters (ADR 0008 — the plane
+    root is not a work tree). Nothing here names a harness; a harness with no per-tree
+    wiring returns nothing and costs one call.
+    """
+    from .harness import registry
+
+    # Never bring the tree into being. This ran on a clone path before the clone existed
+    # and left `a/`, `r0/`… wherever the process happened to be standing — a writer that
+    # creates its own target cannot tell a real tree from a typo.
+    if not Path(tree).is_dir():
+        return []
+    out: list[tuple[str, str]] = []
+    for h in registry.all():
+        out.extend(h.wire_tree(Path(tree)))
+    return out
+
+
+def _backfill_work_trees() -> list[str]:
+    """Arm every EXISTING tree. Labels of the ones that were missing it.
+
+    `reinit`'s job: a plane cloned before this shipped — or one whose worktrees were made
+    by an older charter — has trees that look wired because `init` reported writing a
+    shim, and are not. `doctor` names them; this is the command its hint points at.
+    """
+    from . import workspace as _ws
+
+    written: list[str] = []
+    for tree in _ws.all_trees():
+        for status, label in wire_work_tree(tree):
+            if status == "created":
+                written.append(label)
+    return written
+
+
+def _wire_harnesses(root: Path) -> list[tuple[str, str]]:
+    """Write every REGISTERED harness's wiring under *root*, IF ABSENT.
+
+    Every harness, not the detected one: `init` typically runs from a plain shell where
+    no harness is detectable at all, and wiring only the runtime you happen to be sitting
+    in makes the plane you built depend on which terminal you built it from. Writing one
+    harness's wiring unconditionally while another waits to be asked is also the lock-in
+    ADR 0015 removes.
+
+    Nothing here names a harness. Adding Codex is adding a class to
+    ``harness.registry.KINDS`` — this loop, and `init`'s report, cover it that day.
+    """
+    from .harness import registry
+
+    out: list[tuple[str, str]] = []
+    for h in registry.all():
+        out.extend(h.wire(root))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1184,6 +1310,9 @@ def cmd_init(args) -> int:
     # The plane-root branch guard (#157). Wired here because #168: it shipped inert on any
     # plane not running the plugin, with `doctor` showing a green tick over it — and a
     # safety feature that ships off by default stays off.
+    for status, label in _wire_harnesses(root):
+        (created if status == "created" else present).append(label)
+
     gh_status, gh_detail = _ensure_guard_hook(root)
     if gh_status == "created":
         created.append(".claude/settings.json (plane-root guard)")
@@ -1292,6 +1421,11 @@ def cmd_reinit(args) -> int:
     elif sl_status == "malformed":
         util.warn(f"{sl_detail} is not valid JSON — left it completely untouched. Add the "
                   f"status line yourself:\n{_statusline_snippet()}")
+
+    for status, label in _wire_harnesses(config.ROOT):
+        if status == "created":
+            created.append(label)
+    created.extend(_backfill_work_trees())
 
     gh_status, gh_detail = _ensure_guard_hook(config.ROOT)
     if gh_status == "created":

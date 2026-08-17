@@ -583,6 +583,78 @@ def check_guard_wired() -> Result:
                         "install the Claude Code plugin."))
 
 
+def check_harness() -> Result:
+    """Which harness this is, and every capability it cannot carry (ADR 0015).
+
+    Charter enforces the same invariants on every harness; what differs is what it can
+    *offer*. A missing offer looks exactly like a broken install from the outside — which
+    is `check_guard_wired`'s lesson one level up — so each ceiling is named here rather
+    than left to be discovered.
+
+    Reported as OK even when the list is long. A ceiling is a fact about the harness, not
+    a fault in the plane, and a row that warns every session for something the operator
+    cannot fix teaches them to ignore the column.
+    """
+    from .harness import registry as _harness
+
+    name = "harness"
+    current = _harness.current()
+    if not current:
+        return Result(name, OK, detail="not running inside a harness")
+    if _harness.get(current) is None:
+        # An empty deficit list here would mean "charter knows of no gaps", and charter
+        # knows nothing at all about this runtime — the same sentence rendering two
+        # opposite facts. Registered harnesses are the ones whose ceilings have been
+        # checked against the binary; anything else is unverified by definition.
+        return Result(name, WARN,
+                      detail=f"{current} — charter has no record of this harness",
+                      hint=(f"Charter enforces what it can here, but nothing has verified "
+                            f"which surfaces {current} carries. Register it in "
+                            f"`charter/harness/registry.py` (KINDS) with its own deficits, "
+                            f"or unset $CHARTER_HARNESS if it was set by mistake."))
+    gaps = _harness.deficits(current)
+    if not gaps:
+        return Result(name, OK, detail=current)
+    listed = "\n".join(f"        ↳ {d.key}: {d.detail}" for d in gaps)
+    plural = "" if len(gaps) == 1 else "s"
+    return Result(name, OK, detail=f"{current} — {len(gaps)} capability ceiling{plural}\n{listed}")
+
+
+def _work_trees() -> list[Path]:
+    """Every tree a session starts in. Thin on purpose — `workspace.all_trees` is the
+    single answer, shared with the backfill that writes the wiring this row checks."""
+    from . import config as _config, workspace as _ws
+
+    return _ws.all_trees() if _config.HAS_CONTROL_PLANE else []
+
+
+def check_harness_trees() -> Result:
+    """Is every harness armed where sessions START, not just where the plane lives?
+
+    opencode reads plugins from the session's own directory and does not walk upwards —
+    checked by putting one in a parent and booting from a nested directory, where it never
+    loaded. Work happens in a clone or a worktree (ADR 0008), so a plane-root-only shim is
+    inert in every session that matters while `init` reports it as written.
+
+    That is the shape this repo keeps paying for (#177, #197), and it shipped here once
+    already — which is the argument for this check rather than for trusting the writer.
+    """
+    from .harness import registry as _harness
+
+    name = "harness trees"
+    trees = _work_trees()
+    if not trees:
+        return Result(name, OK, detail="no work trees yet")
+    bare = [t for t in trees if any(h.wire_tree_missing(t) for h in _harness.all())]
+    if not bare:
+        return Result(name, OK, detail=f"{len(trees)} tree(s) wired")
+    listed = ", ".join(t.name for t in bare[:5]) + ("…" if len(bare) > 5 else "")
+    return Result(name, WARN,
+                  detail=f"{len(bare)} of {len(trees)} tree(s) unwired: {listed}",
+                  hint="A session started there gets no charter guards — the plugin is "
+                       "read from the session's own directory. → charter reinit")
+
+
 def check_nested_plane() -> Result:
     """Is the plane charter resolved sitting inside ANOTHER plane's ``workspaces/``? (#140)
 
@@ -1347,7 +1419,7 @@ def _registered_launchers(doc: dict) -> list[tuple[str, str, list]]:
 
     Both scopes, because checking only the top level would miss most real registrations —
     project-scoped servers are the common case. Every container is type-checked on the way
-    down: `~/.claude.json` is a large host-owned file (124KB of caches and counters on the
+    down: `~/.claude.json` is a large harness-owned file (124KB of caches and counters on the
     machine that reported #197) whose shape charter does not control, and one odd value
     must not take the whole preflight down.
     """
@@ -1497,7 +1569,8 @@ def _checks():
         results.append(check_forge_cli(forge))
         results.append(check_forge_auth(forge))
     results += [check_ssh(), check_control_plane_config(), check_control_plane_schema(),
-                check_plane_root(), check_guard_wired(), check_nested_plane(),
+                check_plane_root(), check_harness(), check_harness_trees(),
+                check_guard_wired(), check_nested_plane(),
                 check_workspace_clones(),
                 check_inventory(), check_vaults(),
                 check_vault_registry_divergence(), check_version_lock(),
