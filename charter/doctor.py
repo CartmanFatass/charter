@@ -733,6 +733,105 @@ def check_ask_rules() -> Result:
                        "want — this names it so the prompts are not a mystery.")
 
 
+#: The skills the plugin ships. A constant rather than a directory listing because the CLI
+#: is installed from a wheel that contains no `skills/` — that directory belongs to the
+#: plugin artifact. A test asserts this equals the repo's `skills/`, so the two cannot part
+#: company without the suite saying so.
+SHIPPED_SKILLS = frozenset({"secrets", "working-in-a-clone", "persona", "browser"})
+
+
+def _is_charter_checkout(root) -> bool:
+    """True when *root* is a clone of charter itself.
+
+    Structural, and deliberately so: the marker is charter's own source tree sitting beside
+    a `pyproject.toml` that names the distribution. Nothing here depends on how this
+    process was installed, which is what the previous test got wrong.
+    """
+    from pathlib import Path
+
+    root = Path(root)
+    if not (root / "charter" / "docsrc.py").is_file():
+        return False
+    try:
+        return "charter-cp" in (root / "pyproject.toml").read_text()
+    except OSError:
+        return False
+
+
+def shadowed_knowledge(root) -> dict[str, list[str]]:
+    """A plane's own pages and skills that cover something charter already ships.
+
+    Returns {"skills": [...], "docs": [...]} — names only, sorted.
+
+    Empty when the plane *is* charter's own checkout. Its `docs/personas.md` is the very
+    page `docs show personas` serves; reporting that as a shadow of itself would make the
+    check noise on the one machine most likely to run it.
+
+    That test asks what the ROOT is, not where `docsrc` happened to read from. Keying it on
+    `docsrc.source()` looked equivalent and was not: `source()` prefers the packaged copy,
+    so it only matched for someone running `python3 -m charter` from the clone. Every
+    contributor also has `uv tool install charter-cp` — the README says to — and for them
+    the exemption missed and doctor reported all eight of charter's own pages as shadows of
+    themselves. Exactly the noise this paragraph promises to prevent.
+    """
+    from pathlib import Path
+
+    from . import docsrc
+
+    root = Path(root)
+    if _is_charter_checkout(root):
+        return {"skills": [], "docs": []}
+
+    skills = sorted(
+        d.name for d in (root / ".claude" / "skills").glob("*")
+        if d.is_dir() and (d / "SKILL.md").is_file() and d.name in SHIPPED_SKILLS
+    )
+    topics = set(docsrc.topics())
+    docs = sorted(
+        p.stem for p in (root / "docs").glob("*.md") if p.stem in topics
+    )
+    return {"skills": skills, "docs": docs}
+
+
+def check_shadowed_knowledge() -> Result:
+    """A plane keeping its own copy of something charter ships.
+
+    This is the failure that produced the check. A plane carried a `setup` skill telling
+    engineers to authenticate over SSH and add an SSH key — months after the rule became
+    token-only-over-HTTPS and charter's own guard began denying exactly that. Nine skills
+    there were in some stage of the same rot. Every one of them looked wired, and nothing
+    compared any of them to the CLI they described.
+
+    Drift runs both ways, which is why this reports rather than resolves: the same plane's
+    persona page had grown sections upstream never received. A copy is not automatically
+    wrong — it is automatically *unwatched*, and that is the whole finding.
+
+    So, like `check_ask_rules`, it never says delete. A plane may be deliberately overriding
+    charter's guidance with something org-specific, and that is the operator's call
+    (ADR 0013). Charter names what is being shadowed and what it costs.
+    """
+    name = "shadowed docs"
+    try:
+        hit = shadowed_knowledge(config.ROOT)
+    except Exception as e:  # noqa: BLE001 - a preflight line must never be the thing that fails
+        return Result(name, WARN, detail=f"not checked ({e})", hint=_NOT_CHECKED_HINT)
+
+    parts = []
+    if hit["skills"]:
+        parts.append("skill(s) " + ", ".join(hit["skills"]))
+    if hit["docs"]:
+        parts.append("docs/" + ", docs/".join(f"{d}.md" for d in hit["docs"]))
+    if not parts:
+        return Result(name, OK, detail="none — charter's own knowledge is not duplicated here")
+
+    return Result(name, WARN, detail=" · ".join(parts) + " duplicate what charter ships",
+                  hint="A local copy wins over charter's and is not compared to it, so it "
+                       "drifts in both directions unwatched — behind on a feature it never "
+                       "learned about, ahead with sections upstream never received. Read "
+                       "the shipped one with `charter docs show <topic>`; keep yours only "
+                       "where it says something charter's does not.")
+
+
 def check_workspace_clones() -> Result:
     """Clones that are behind their upstream — in EVERY workspace, not just the active one.
 
@@ -1403,6 +1502,7 @@ def _checks():
                 check_inventory(), check_vaults(),
                 check_vault_registry_divergence(), check_version_lock(),
                 check_memory_indexes(), check_personas(), check_ask_rules(),
+                check_shadowed_knowledge(),
                 check_mcp_launchers(), check_plugin_skew()]
     return results
 
