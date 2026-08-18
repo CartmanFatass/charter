@@ -4,9 +4,9 @@
   "repos": [
     {
       "name": "charter",
-      "branch": "main"
+      "branch": "persona-default-in-charter-toml"
     }
   ],
-  "updated_at": "2026-08-18T10:17:30+00:00",
+  "updated_at": "2026-08-18T11:13:25+00:00",
   "updated_by": "Aaron Yordanyan"
 }

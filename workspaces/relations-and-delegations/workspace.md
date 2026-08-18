@@ -155,7 +155,18 @@ as its default* — and nothing about `steward`.
 * **Undeclared level defaulting to `advise`** — puts the default back in charter's code; the
   generated template carries it instead.
 
-### Rollout — five increments, one PR each
+### Status
+
+**Increment 1 is built** — branch `persona-default-in-charter-toml` in this workspace's
+clone (0d9db69, f0f5d0e, 19a2a2d), 2430 tests green, pushed. Issues #255–#258 are filed.
+Increments 2–5 are the todos below. Point 1 (cross-workspace awareness) is still parked.
+
+One deliberate deviation from the design as settled: a dangling front-door declaration is
+`doctor` **WARN**, not FAIL. This repo reserves FAIL for "you cannot work", and a plane
+with no persona still clones and still reaches its forge. Loud was the requirement; a
+blocker was not.
+
+## Rollout — five increments, one PR each
 
 1. **ADR + `[persona] default` + per-session/per-terminal persona pointers + docs.** The ADR
    (*charter presents the roster; it never guesses the owner*) comes first — it is what stops
