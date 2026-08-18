@@ -6,3 +6,6 @@ owner = "diazoxide"
 
 [memory]
 share = "local"
+
+[persona]
+default = "steward"

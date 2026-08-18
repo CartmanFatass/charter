@@ -4,6 +4,8 @@ role: Control Plane Steward
 activity: orchestrator
 uses: statusline, release, forge
 vault: none
+routing: advise
+skills: mattpocock-skills:grilling, superpowers:systematic-debugging, superpowers:test-driven-development, charter:working-in-a-clone
 delegate-when: routing work to the right persona, scoping a request before code is written, cross-cutting changes that span statusline/release/forge
 ---
 

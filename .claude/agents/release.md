@@ -20,7 +20,10 @@ A release moves **all four together**, or the drift ships:
 1. `pyproject.toml` — `version`
 2. `charter/__init__.py` — `__version__`
 3. `.claude-plugin/plugin.json` — `version`
-4. `hooks/hooks.json` — every `--plugin-version` (six commands)
+4. `hooks/hooks.json` — **every** `--plugin-version` flag. Nine at 0.44.0, six when this
+   line was first written, and the count grows whenever a hook is added (#263 added
+   `pretooluse-edit`). Substitute globally, then re-grep for the OLD version across all
+   four files — never work from a remembered count.
 
 `tests/test_plugin.py::TestVersionsMoveInLockstep` pins all four and names them on failure.
 That test exists because they were **not** in lockstep for twelve releases: the CLI reached
