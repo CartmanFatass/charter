@@ -157,7 +157,9 @@ as its default* — and nothing about `steward`.
 
 ### Status
 
-**Increment 1 is built** — branch `persona-default-in-charter-toml` in this workspace's
+**Increments 1 and 2 are built** — PR #259 (increment 1) and PR #260 (increment 2, stacked on it).
+
+**Increment 1** — branch `persona-default-in-charter-toml` in this workspace's
 clone (0d9db69, f0f5d0e, 19a2a2d), 2430 tests green, pushed. Issues #255–#258 are filed.
 Increments 2–5 are the todos below. Point 1 (cross-workspace awareness) is still parked.
 
