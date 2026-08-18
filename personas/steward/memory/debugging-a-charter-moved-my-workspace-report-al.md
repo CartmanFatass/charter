@@ -1,0 +1,5 @@
+# Debugging a 'charter moved my workspace' report: ALWAYS check whether th
+
+_2026-08-18 22:35 · persistent_
+
+Debugging a 'charter moved my workspace' report: ALWAYS check whether the instrumentation used THIS session's id. #254 was filed after a diagnostic script hardcoded SID = another session's uuid, so every reading described a parallel session's pointer, which was correct — and both my first comment and my correction to it reached wrong conclusions from that same evidence before the harness transcript settled it. The transcript at ~/.claude/projects/<slug>/<sid>.jsonl is the authoritative record of what a session actually ran; grep it for the workspace name before theorising. Root cause of the CONFUSION (now fixed, PR #269): workspace.set_active wrote both pointer files and the session lock while recording NOTHING in the trace, though persona.set_active had always recorded persona-use. 'charter trace --session <sid>' now shows workspace-use (with scope + forced), workspace-refused (locked_to — explains an absence, where nothing changed) and workspace-seeded (the SessionStart pane copy, the only pointer write nobody types).
