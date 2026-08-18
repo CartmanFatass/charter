@@ -157,7 +157,10 @@ as its default* — and nothing about `steward`.
 
 ### Status
 
-**Increments 1 and 2 are built** — PR #259 (increment 1) and PR #260 (increment 2, stacked on it).
+**All five increments are built** — a stack of PRs, each based on the one before:
+#259 → #260 → #262 → #263 → #264. Merge in that order; GitHub retargets each as its
+base merges. 2502 tests green at the tip of the stack. Point 1 (cross-workspace
+awareness) is the only thing left in this workspace, still parked with its shape agreed.
 
 **Increment 1** — branch `persona-default-in-charter-toml` in this workspace's
 clone (0d9db69, f0f5d0e, 19a2a2d), 2430 tests green, pushed. Issues #255–#258 are filed.
