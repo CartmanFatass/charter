@@ -7,40 +7,50 @@
 
 ## Vision
 
-Two gaps in the control plane: (1) a session knows nothing about the OTHER workspaces — their recent activity and deliveries — so a change made elsewhere arrives as a surprise; give it that as read-only knowledge, never as logic. (2) delegation is advisory-only: delegate-when is prose in a generated agent file, steward is a per-developer gitignored active-file with no committed plane default, and the tally shows 3 dispatches ever (statusline/release/forge: zero) — decide what layer, if any, a consumer plane can use to CONTROL how much the front door delegates.
+DELIVERED in charter 0.44.0 — both gaps this workspace was opened for are closed, and the problem statement is kept below as the why.
+
+THE PROBLEM (as of 2026-08-18, charter 0.43.2). (1) A session knew nothing about the OTHER workspaces, so a change made elsewhere arrived as a surprise with nothing to connect it to. (2) Delegation was advisory-only: delegate-when was prose in a generated agent file, no plane could declare its front door anywhere a consumer would look, and the tally showed 3 dispatches EVER, with statusline/release/forge at zero — while 'uses:' silently granted another persona's tools, so doing their work cost less than handing it over.
+
+WHAT WAS DECIDED (grilled over five rounds, 2026-08-18). The persona is the only authority on delegation. charter learns exactly one neutral fact — which persona a plane declares as its default — and nothing about 'steward'. There is NO plane-level routing policy: the level is read from the one acting persona per session, so a floor would reach personas that never asked for it; the default a new plane wants arrives instead in a generated file the consumer owns. And charter never guesses which persona owns a prompt (ADR 0016) — it presents the roster and lets the reader route.
+
+WHAT SHIPPED. Front door in charter.toml + per-session/per-terminal persona pointers (#259) · per-persona routing: off|advise|require, routes-to:, the roster block, fired-vs-followed measurement (#260) · init --front-door and its generic template (#267) · require's tool-time ask, never a deny (#263) · borrows: splitting what uses: overloaded (#264) · the other-workspaces digest, knowledge and never instructions (#265). Three adjacent bugs found on the way: the leak guard denying writes that merely mention a guarded path (#266), doctor reading 'enabled' as 'loaded' (#268), and workspace selection leaving no trace at all (#269, out of #254 — which was NOT a defect).
+
+WHAT WAS DELIBERATELY NOT DONE. Neighbour DELIVERIES (commits, PRs) are not reported: that costs a git log per workspace on every session start to answer a question the reader can now ask themselves. No plane-level [routing] section, and no [charter] version lock on this plane.
+
+WHAT IS STILL UNKNOWN. Whether any of it works. The mechanism shipped; the verdict is a number that does not exist yet — 'charter persona stats' now prints 'routing advice fired N · M dispatches followed'. Advice that fires and is never followed means the roster block failed, not that the roster is wrong. Read it that way before adding more personas.
 
 ## Context & decisions
 
 <!-- Key facts, constraints, and design/architecture decisions found while working —
      the durable "why", not a chronological log. Grow this as you learn. -->
 
-**Point 2 (delegation) is DESIGNED, not built** — see `design-delegation.md` in this
-workspace for the settled tree, the rejected branches and the five-increment rollout.
-Grilled with the engineer 2026-08-18 over five rounds; every decision there is confirmed.
-
-Headline: **the persona is the only authority on delegation.** charter learns one neutral
-fact — which persona a plane declares as its default (`charter.toml` `[persona] default`) —
-and nothing about `steward`. No plane-level routing policy: the level is only ever read
-from the one acting persona per session, so a plane floor would reach personas that never
-asked for it. The default arrives from the *generated* front-door template instead.
-
-Load-bearing constraint: **charter never guesses which persona owns a prompt.** It injects
-the roster (name, `delegate-when`, last dispatched) and states only what it can prove;
-the model routes. A keyword matcher would have charter asserting a conclusion it cannot
-justify (ADR 0009).
+**Everything here shipped in charter 0.44.0.** This section is the durable *why* — the
+facts that were expensive to establish and the decisions that rest on them. The Vision above
+says what was delivered; the settled design tree, with its rejected branches, is below.
 
 Facts found while scouting, expensive to rediscover:
-* `charter init` seeds **zero** personas — `personas/steward/` is charter's own file.
-* A committed team-wide default already exists: `personas/.default`, written by
-  `charter persona default <name>`. **Undocumented** and unused even in this plane.
-* Persona selection is **plane-wide**, not per-session/per-terminal like workspaces.
-* `uses:` grants vault read + tool auto-approval + sub-agent delegation in one word; the
-  tool grant is what makes not-delegating the cheapest path.
-* `charter persona stats`: 3 dispatches ever, all `reddit`; statusline/release/forge zero.
+* `charter init` seeded ZERO personas — `personas/steward/` was charter's own file, never a
+  product default. (Fixed: `init --front-door` now scaffolds one generic persona.)
+* A committed team-wide default already existed — `personas/.default` — **undocumented and
+  unused even in this plane**. The gap was findability, not capability.
+* Persona selection was plane-wide, not per-session/per-terminal like workspaces, so
+  `charter persona use` in one pane changed every pane and every future session.
+* `uses:` granted vault read + tool auto-approval + delegation in one word; the tool grant
+  is what made not-delegating the cheapest path.
+* `charter persona stats` on 2026-08-18: 3 dispatches ever, all `reddit`; statusline,
+  release and forge zero — while all three linted green with correct adverts.
 
-**Point 1 (cross-workspace awareness) is PARKED with its shape agreed** — see the todo:
-a SessionStart digest of the *other* workspaces (name + `workspace.md` vision line +
-last-worked timestamp + open-todo count), read-only knowledge, never logic.
+Load-bearing constraint, recorded as ADR 0016 before the mechanism existed: **charter
+presents the roster and never guesses the owner.** A keyword matcher over `delegate-when`
+is the obvious next improvement and the one thing that would break it — charter would be
+asserting a conclusion it cannot justify, and the first confident wrong answer costs the
+block its reader. Consequence accepted: `require` can only ever say "the roster was shown
+and nothing was dispatched", never name a culprit.
+
+One deviation from the design as settled: a dangling front-door declaration is `doctor`
+**WARN**, not FAIL. This repo reserves FAIL for "you cannot work", and a plane with no
+persona still clones and still reaches its forge. Loud was the requirement; a blocker was
+not.
 
 ## Settled design — delegation control
 
@@ -50,7 +60,7 @@ separate file on purpose: `workspace._live_block` un-ignores only `workspace.jso
 `workspace.md`, `memory/**` and `todos/**`, so a stray `.md` beside them never travels —
 not even when the workspace is LIVE.
 
-## The question
+### The question
 
 Should charter hardcode steward-shaped routing, or should each persona declare its own
 delegation strategy?
@@ -155,39 +165,43 @@ as its default* — and nothing about `steward`.
 * **Undeclared level defaulting to `advise`** — puts the default back in charter's code; the
   generated template carries it instead.
 
-### Status
+### Status — shipped
 
-**All five increments are built** — a stack of PRs, each based on the one before:
-#259 → #260 → #262 → #263 → #264. Merge in that order; GitHub retargets each as its
-base merges. 2502 tests green at the tip of the stack. Point 1 (cross-workspace awareness) is built too — PR #265, based on the tail of the
-stack. Both halves of this workspace's remit are now delivered; nothing is parked.
+All of it is on `main` and published in **charter 0.44.0** (tag `v0.44.0`, PyPI 200,
+2550 tests green). Merged in this order:
 
-**Increment 1** — branch `persona-default-in-charter-toml` in this workspace's
-clone (0d9db69, f0f5d0e, 19a2a2d), 2430 tests green, pushed. Issues #255–#258 are filed.
-Increments 2–5 are the todos below. Point 1 (cross-workspace awareness) is still parked.
+| PR | What |
+| --- | --- |
+| #259 | `[persona] default`, per-session/per-terminal persona pointers, ADR 0016 |
+| #260 | `routing:` levels, `routes-to:`, the roster block, fired-vs-followed |
+| #267 | `init --front-door` and the generic template |
+| #263 | `require`'s tool-time ask |
+| #264 | `borrows:` splits `uses:` |
+| #265 | the other-workspaces digest |
+| #266 · #268 · #269 | the three adjacent bugs found on the way |
+| #270 | the 0.44.0 release |
 
-One deliberate deviation from the design as settled: a dangling front-door declaration is
-`doctor` **WARN**, not FAIL. This repo reserves FAIL for "you cannot work", and a plane
-with no persona still clones and still reaches its forge. Loud was the requirement; a
-blocker was not.
+Issues closed: #254 (not a defect), #255, #256, #257, #258, #261.
 
-## Rollout — five increments, one PR each
+## What the rollout actually taught
 
-1. **ADR + `[persona] default` + per-session/per-terminal persona pointers + docs.** The ADR
-   (*charter presents the roster; it never guesses the owner*) comes first — it is what stops
-   increment 2 from quietly regrowing a keyword matcher later. Docs must cover
-   `personas/.default`, which was never documented.
-2. **`routing:` levels + the roster section inside the existing gate + tally event + `stats`
-   line.**
-3. **`init --front-door <name>` and the generic template** carrying `routing: advise`.
-4. **`require` + the tool-time ask** (sub-agent exclusion verified by running it, not by
-   reasoning about it).
-5. **`borrows:`.**
+The five increments were planned as one PR each, and that held. Three things did not, and
+they are worth carrying to the next stacked change:
 
-Method for each: `superpowers:test-driven-development`, then
-`superpowers:verification-before-completion`. Implementation happens in a **clone**
-(`charter clone charter --workspace relations-and-delegations`) — ADR 0008, the plane root
-is not a work tree.
+* **Branch BEFORE committing the next increment.** Increment 2 was committed onto the
+  increment-1 branch and pushed, which silently put work into PR #259 that its body did not
+  describe. Fixed with a branch plus a `--force-with-lease` reset.
+* **A squash merge rewrites the parent's commits**, so every child in a stack must be
+  rebased with `git rebase --onto origin/main <old-parent-tip>`. A plain rebase re-applies
+  them and conflicts.
+* **Never delete a merged branch while an open PR still targets it.** GitHub closes that PR
+  and it cannot be reopened once the base ref is gone — #262 died that way and had to be
+  refiled as #267. Retarget the whole chain to `main` up front.
+
+Method used throughout, and worth repeating: `superpowers:test-driven-development` (every
+test written first and watched fail for the right reason), then
+`superpowers:verification-before-completion` — each increment driven against a real scratch
+plane, not only the suite. Implementation in a **clone**, never the plane root (ADR 0008).
 
 ## Glossary
 
@@ -200,12 +214,13 @@ is not a work tree.
   different words.
 * **`routing:`** — per-persona level, `off | advise | require`. Absent means `off`.
 * **`routes-to:`** — personas this one considers first. Priority, never restriction.
-* **`borrows:`** — opt-in tool/vault borrowing, splitting today's overloaded `uses:`.
-  `borrows: none` borrows nothing.
+* **`borrows:`** — opt-in tool/vault borrowing, splitting what `uses:` overloaded.
+  `borrows: none` borrows nothing; absent keeps the legacy grant.
 * **roster block** — the prompt-time list of personas + their adverts, injected into the
   existing commitment-point gate. Facts only; no owner is named.
-* **fired-vs-followed** — routing advice shown vs dispatches that followed. The number
-  that can falsify this whole design.
+* **fired-vs-followed** — routing advice shown vs dispatches that followed, printed by
+  `charter persona stats`. The number that can falsify this whole design, and the one
+  thing here that is still unknown.
 
 ## Log
 
