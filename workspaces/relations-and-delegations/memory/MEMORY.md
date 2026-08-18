@@ -14,3 +14,4 @@ merge-conflict on. Files are timestamp-prefixed, so this index (and the director
 - [Closed todo: Increment 4 — 'require' level: tool-time ASK (never deny) o](20260818-195958-closed-todo-increment-4-require-level-tool-time-.md)
 - [Closed todo: Increment 5 — 'borrows:' splits 'uses:' per persona: declar](20260818-195958-closed-todo-increment-5-borrows-splits-uses-per-.md)
 - [Everything this workspace set out to do is MERGED to main (8 squash comm](20260818-200008-everything-this-workspace-set-out-to-do-is-merge.md)
+- [#254 closed as NOT a defect: the reporter's diagnostic hardcoded another](20260818-223526-254-closed-as-not-a-defect-the-reporter-s-diagno.md)
