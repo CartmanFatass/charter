@@ -1,0 +1,5 @@
+# 'uses:' is the reason delegation does not happen, not a missing reminder
+
+_2026-08-18 14:00 · persistent_
+
+'uses:' is the reason delegation does not happen, not a missing reminder. One word grants three things (persona.uses_of / effective_tools): read that persona's vault, RUN ITS TOOLS WITH AUTO-APPROVAL via the toolgate, and delegate to its sub-agent. So a front door declaring 'uses: statusline, release, forge' can do all three personas' work with all three personas' tools and never pay a permission prompt — delegating is strictly more expensive than not delegating. Evidence it bites: 'charter persona stats' on 2026-08-18 showed 3 dispatches EVER (all to reddit); statusline, release and forge had never been dispatched once despite linting green with correct delegate-when adverts. Design conclusion (grilled + confirmed): split it per-persona — a persona that declares 'borrows:' takes tools from borrows only and 'uses:' becomes a routing edge for THAT persona; declaring nothing keeps today's behaviour; 'borrows: none' borrows nothing. Never a plane-wide flag: one persona's opt-in must not change another's tool permissions.

@@ -18,3 +18,6 @@ Written by the persona as it learns; committed and shared.
 - [Verifying an opencode integration costs ZERO model tokens, and its publi](verifying-an-opencode-integration-costs-zero-mod.md)
 - [Codex CLI 0.147.0's hook system is Claude Code's contract near-verbatim](codex-cli-0-147-0-s-hook-system-is-claude-code-s.md)
 - [Bun's shell ($ in an opencode plugin) has NO .stdin() method — stdin goe](bun-s-shell-in-an-opencode-plugin-has-no-stdin-m.md)
+- [Default-persona resolution has FOUR layers, and the committed one is a s](default-persona-resolution-has-four-layers-and-t.md)
+- ['uses:' is the reason delegation does not happen, not a missing reminder](uses-is-the-reason-delegation-does-not-happen-no.md)
+- [charter's per-session workspace lock is NOT actually immutable: this ses](charter-s-per-session-workspace-lock-is-not-actu.md)
