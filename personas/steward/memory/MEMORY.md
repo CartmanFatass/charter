@@ -21,3 +21,4 @@ Written by the persona as it learns; committed and shared.
 - [Default-persona resolution has FOUR layers, and the committed one is a s](default-persona-resolution-has-four-layers-and-t.md)
 - ['uses:' is the reason delegation does not happen, not a missing reminder](uses-is-the-reason-delegation-does-not-happen-no.md)
 - [charter's per-session workspace lock is NOT actually immutable: this ses](charter-s-per-session-workspace-lock-is-not-actu.md)
+- [charter's secret-leak guard (hooks._leak_reason) had a false-positive cl](charter-s-secret-leak-guard-hooks-leak-reason-ha.md)
