@@ -3,6 +3,7 @@ name: steward
 role: Control Plane Steward
 activity: orchestrator
 uses: statusline, release, forge
+borrows: none
 vault: none
 routing: advise
 skills: mattpocock-skills:grilling, superpowers:systematic-debugging, superpowers:test-driven-development, charter:working-in-a-clone
