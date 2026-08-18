@@ -1,0 +1,12 @@
+{
+  "name": "relations-and-delegations",
+  "description": "",
+  "repos": [
+    {
+      "name": "charter",
+      "branch": "main"
+    }
+  ],
+  "updated_at": "2026-08-18T10:17:30+00:00",
+  "updated_by": "Aaron Yordanyan"
+}
