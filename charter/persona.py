@@ -309,48 +309,144 @@ def default_persona() -> str | None:
     return val if val and def_path(val).exists() else None
 
 
-def resolve_active(explicit: str | None = None) -> str | None:
-    """Active persona by precedence: ``--persona`` → ``$CHARTER_PERSONA`` → local
-    ``.charter/active-persona`` (``charter persona use``) → committed ``personas/.default`` → none."""
+def declared_default() -> str | None:
+    """The front door this control plane DECLARES — ``charter.toml``'s ``[persona] default``.
+
+    Outranks the legacy ``personas/.default`` dotfile, which keeps resolving so no plane
+    that adopted it breaks. The move is about findability, not capability: the dotfile is
+    invisible to ``ls``, appears in no documentation page, and was used by nobody —
+    including this repo, whose own front door resolved through a gitignored local file
+    instead (#255). ``charter.toml`` is the file a consumer already opens to understand
+    their plane, and ``[workspace] default`` is already in it.
+
+    Validated against what exists, exactly like :func:`default_persona`: a declaration
+    naming a persona that was renamed or deleted resolves to *nothing* rather than to a
+    broken identity. Saying so out loud is `doctor`'s job — silence here is the fail-toward-
+    no-change half, not the whole answer.
+
+    Never raises. A malformed or too-new ``charter.toml`` is a real error, and every actual
+    command surfaces it through :func:`instance.load`; but this rung is read by hooks on
+    every session start and every status-line paint, where the rule is that a hook may cost
+    a session its briefing and never its turn.
+    """
+    from . import instance as _instance
+    try:
+        val = _instance.default_persona_of(_instance.load(config.ROOT))
+    except Exception:
+        return None
+    return val if val and def_path(val).exists() else None
+
+
+def _pointer_files() -> tuple[Path | None, Path | None]:
+    """``(session pointer, terminal pointer)`` for right now — either may be ``None``.
+
+    Mirrors workspaces exactly (``.charter/sessions/<id>.workspace`` and
+    ``.charter/terminals/<id>.workspace``), because the failure it prevents is the same
+    one, one noun over: a single plane-wide file meant `charter persona use forge` in one
+    pane changed the persona in every other pane and every future session, which is the
+    opposite of what a fleet of parallel personas is for (#255).
+    """
+    from . import session as _session
+    sid = _session.current()
+    tid = _session.terminal()
+    return (config.SESSIONS_DIR / f"{sid}.persona" if sid else None,
+            config.TERMINALS_DIR / f"{tid}.persona" if tid else None)
+
+
+def _read_pointer(f: Path | None) -> str | None:
+    if f is None:
+        return None
+    try:
+        return f.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _resolved(explicit: str | None = None) -> tuple[str | None, str]:
+    """``(persona, where it came from)`` — the whole precedence, decided ONCE.
+
+    :func:`resolve_active` and :func:`source` are two questions about a single decision,
+    and they used to walk the rungs separately. Two ladders answering one question is the
+    shape this repo's own convention warns about: adding a rung to one and forgetting the
+    other yields a session that adopts a persona while reporting it came from nowhere.
+    """
     if explicit:
-        return explicit
+        return explicit, "--persona"
     env = os.environ.get("CHARTER_PERSONA")
     if env:
-        return env.strip()
+        return env.strip(), "$CHARTER_PERSONA"
+    sf, tf = _pointer_files()
+    val = _read_pointer(sf)
+    if val:
+        return val, "session"
+    val = _read_pointer(tf)
+    if val:
+        return val, "terminal"
     f = config.ACTIVE_PERSONA_FILE
     if f.exists():
         val = f.read_text().strip()
         if val:
-            return val
-    return default_persona()
+            return val, "active-file"
+    declared = declared_default()
+    if declared:
+        return declared, "charter.toml"
+    committed = default_persona()
+    if committed:
+        return committed, "committed-default"
+    return None, "none"
+
+
+def resolve_active(explicit: str | None = None) -> str | None:
+    """Active persona by precedence: ``--persona`` → ``$CHARTER_PERSONA`` → local
+    ``.charter/active-persona`` (``charter persona use``) → declared ``charter.toml``
+    ``[persona] default`` → committed ``personas/.default`` → none."""
+    return _resolved(explicit)[0]
 
 
 def source(explicit: str | None = None) -> str:
-    if explicit:
-        return "--persona"
-    if os.environ.get("CHARTER_PERSONA"):
-        return "$CHARTER_PERSONA"
-    f = config.ACTIVE_PERSONA_FILE
-    if f.exists() and f.read_text().strip():
-        return "active-file"
-    if default_persona():
-        return "committed-default"
-    return "none"
+    return _resolved(explicit)[1]
 
 
-def set_active(name: str) -> None:
+def set_active(name: str) -> str:
+    """Select *name* for this session and this pane. Returns the reach of what was written
+    (``session`` | ``terminal`` | ``plane``) so a caller can say how long it will last.
+
+    The plane-wide file is written only when there is neither a session id nor a pane id —
+    a bare shell with nothing to key on. That is the one case where it is still the right
+    answer, and it is why the file is kept rather than removed.
+    """
     config.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    config.ACTIVE_PERSONA_FILE.write_text((name or "") + "\n")
+    sf, tf = _pointer_files()
+    for f in (sf, tf):
+        if f is not None:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text((name or "") + "\n")
+    if sf is None and tf is None:
+        config.ACTIVE_PERSONA_FILE.write_text((name or "") + "\n")
     try:
         from . import trace
         trace.record("persona-use", persona=name)
     except Exception:
         pass
+    # The terminal pointer outlives the session one, so it names the longest-lived thing
+    # that actually landed — the same reasoning `workspace.use` records for its own return.
+    return "terminal" if tf is not None else "session" if sf is not None else "plane"
 
 
 def clear_active() -> None:
-    if config.ACTIVE_PERSONA_FILE.exists():
-        config.ACTIVE_PERSONA_FILE.unlink()
+    """Drop this session's and this pane's selection, and the plane-wide file with them.
+
+    All three, because they are rungs of one ladder: clearing only the top rung would hand
+    the session straight back to a lower one, and "cleared" would be a lie the very next
+    command exposes.
+    """
+    sf, tf = _pointer_files()
+    for f in (sf, tf, config.ACTIVE_PERSONA_FILE):
+        try:
+            if f is not None and f.exists():
+                f.unlink()
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
