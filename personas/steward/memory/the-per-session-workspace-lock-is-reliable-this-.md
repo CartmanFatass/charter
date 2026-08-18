@@ -1,0 +1,5 @@
+# The per-session workspace lock IS reliable — this corrects a memory reco
+
+_2026-08-18 23:12 · persistent_
+
+The per-session workspace lock IS reliable — this corrects a memory recorded 2026-08-18 14:05 (now deleted) claiming it was not. Issue #254 was investigated to root cause and closed as NOT a defect: the diagnostic script that 'proved' the lock had moved hardcoded SID = another session's uuid, so every reading described a parallel session's pointer, which was correct. workspace.set_active() genuinely refuses a mid-session switch (returns 'locked', writes nothing) unless force=True, and cmd_workspace_create routes through it. TWO investigations reached confident wrong conclusions from pointer files before a harness transcript settled it — the lesson is the method, not the lock: when a workspace looks wrong, (a) check the instrumentation is using THIS session's id, (b) read ~/.claude/projects/<slug>/<sid>.jsonl, which is the authoritative record of what a session actually ran, and (c) since 0.44.0 just run 'charter trace --session <sid>', which now shows workspace-use (with scope + forced), workspace-refused (locked_to) and workspace-seeded.

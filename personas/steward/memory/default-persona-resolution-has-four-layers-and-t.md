@@ -1,5 +1,0 @@
-# Default-persona resolution has FOUR layers, and the committed one is a s
-
-_2026-08-18 14:00 · persistent_
-
-Default-persona resolution has FOUR layers, and the committed one is a secret nobody uses: --persona flag → $CHARTER_PERSONA → the local gitignored active-persona file (charter persona use) → personas/.default (committed, team-wide, written by 'charter persona default <name>') → none. personas/.default is documented NOWHERE (absent from README.md and docs/personas.md) and does not exist in charter's own plane — so 'a plane cannot commit its front door' is FALSE, it just cannot discover the feature. Two related traps: (a) the local active-persona file is ONE file for the whole plane, unlike workspaces which key per-session AND per-terminal, so 'charter persona use forge' in one pane silently changes every pane and every future session; (b) default_persona() returns None for a name that no longer exists, with no message anywhere, so renaming a persona silently leaves the plane with no identity at all. Also: 'charter init' seeds ZERO personas — personas/steward/ is this repo's own file, not a product default.

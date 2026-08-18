@@ -1,0 +1,5 @@
+# Stacked-PR mechanics, learned the hard way merging 7 chained PRs on 2026
+
+_2026-08-18 23:14 · persistent_
+
+Stacked-PR mechanics, learned the hard way merging 7 chained PRs on 2026-08-18: (1) BRANCH before committing the next increment — I committed increment 2 onto the increment-1 branch and pushed, silently putting work into a PR whose body did not describe it (fixed with a branch + force-with-lease reset). (2) A SQUASH merge rewrites the parent's commits, so every child must be rebased with 'git rebase --onto origin/main <old-parent-tip>' — a plain rebase re-applies them and conflicts. (3) NEVER delete a merged branch while an open PR still targets it: GitHub CLOSES that PR and it CANNOT be reopened once the base ref is gone (PR #262 died that way and had to be refiled as #267, losing its number and its review thread). Correct order per link: retarget the child to main FIRST, then merge, then delete the parent branch — or simplest, retarget the whole chain to main up front before merging anything. Also: 'gh pr view <n> --json mergeable' returns UNKNOWN for a few seconds after a merge; poll it rather than trusting the first answer.
