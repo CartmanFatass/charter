@@ -660,6 +660,30 @@ class TestSubagentHooksAndStatusline(unittest.TestCase):
         news = statusline._session_news(sid)
         self.assertTrue(any("subagent" in item for item in news))
 
+    def test_statusline_dashboard_scheme_a_and_b(self):
+        sessions_dir = self.tmp / "sessions"
+        now_ts = datetime.now(timezone.utc).timestamp()
+        root = "dash-root-1"
+        child = "dash-child-2"
+        write_test_rollout(sessions_dir, root, parent_id=None, nickname="MainCoordinator", mtime=now_ts)
+        write_test_rollout(sessions_dir, child, parent_id=root, nickname="WorkerAgent", mtime=now_ts)
 
+        with mock.patch.dict(os.environ, {"CODEX_SESSIONS_PATH": str(sessions_dir)}):
+            # 1. Scheme A: Standard width (80 columns) -> Stacked Subagents section
+            with mock.patch("charter.tui.term_width", return_value=80):
+                out_80 = statusline.render({"session_id": root})
+                self.assertIn("subagents", out_80)
+                self.assertIn("WorkerAgent", out_80)
+
+            # 2. Scheme B: Wide screen (160 columns) -> 3-Column Layout
+            with mock.patch("charter.tui.term_width", return_value=160):
+                out_160 = statusline.render({"session_id": root})
+                self.assertIn("subagents", out_160)
+                self.assertIn("WorkerAgent", out_160)
+
+            # 3. Clean classic layout when no subagents
+            with mock.patch("charter.tui.term_width", return_value=80):
+                out_clean = statusline.render({"session_id": "empty-sess-id"})
+                self.assertNotIn("subagents", out_clean)
 if __name__ == "__main__":
     unittest.main()

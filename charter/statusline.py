@@ -100,7 +100,8 @@ _HEAD_PAD = f"{_MARK_HEAD} "
 # Visible width of the whole left/repo block: "  " + "├─ " + name + gaps + branch + ci + mr.
 _LEFT_W = 2 + 3 + _NAME_W + 2 + _BRANCH_W + 2 + _CI_W + 2 + _MR_W
 _RIGHT_MIN_W = 36  # a persona column narrower than this is not worth showing
-# Render to (COLUMNS − this). The pane gives LESS than `$COLUMNS` advertises, and the
+_SUBAGENT_MIN_W = 36  # min width for subagent column in 3-column layout
+_SUBAGENT_COL_W = 44  # target width for subagent column
 # amount was measured rather than guessed: at 2, a line ending exactly at COLUMNS−2 lost
 # its final character to the host's own `…` crop (the brand rendered `⬢ charter 0.10…`),
 # so the usable width is COLUMNS−3. 4 leaves one spare column.
@@ -1610,26 +1611,17 @@ def _boxed(body: str, width: int) -> str:
 
 
 def _zone_rules(body: str, has_strip: bool) -> str:
-    """Insert the zone dividers: one under the workspace line, one above the strip.
-
-    Applied to the finished body rather than threaded through the layout branches, which
-    works because every branch lays out the same two anchors — the workspace summary is
-    always the first line, and the session strip, when there is one, is always the last.
-    Splicing here keeps a divider out of `_columns`, where it would be padded and
-    truncated as though it were content.
-
-    No divider above a strip that does not exist: an empty session (or one just past
-    `/compact`) renders no strip, and a rule there would separate the tree from nothing
-    but the bottom border.
-    """
+    """Insert the zone dividers: one under the workspace line, one above the strip."""
     lines = body.split("\n")
     if len(lines) < 2:
-        return body                     # nothing to divide
-    out = [lines[0], _RULE_LINE, *lines[1:]]
-    if has_strip:
+        return body
+    out = [lines[0]]
+    if lines[1] != _RULE_LINE:
+        out.append(_RULE_LINE)
+    out.extend(lines[1:])
+    if has_strip and out[-1] != _RULE_LINE and (len(out) < 2 or out[-2] != _RULE_LINE):
         out.insert(len(out) - 1, _RULE_LINE)
     return "\n".join(out)
-
 
 def _with_brand(body: str, width: int) -> str:
     """Right-align the brand on the last line, if it fits without crowding.
@@ -1664,7 +1656,74 @@ def _with_brand(body: str, width: int) -> str:
         return body
 
 
-def render(payload: dict | None = None) -> str:
+def _subagent_section(
+    sid: str | None = None,
+    tick: int = 0,
+) -> tuple[str | None, list[str]]:
+    """Gather subagent tree lines and header for the dashboard.
+
+    Returns:
+        (sub_head, subagent_lines) or (None, []) when no subagents exist.
+    """
+    try:
+        from . import subagent
+        effective_sid = subagent.find_root_session_id(sid) if sid else ""
+        if not effective_sid:
+            recent = subagent.find_most_recent_rollout(max_days_back=1)
+            if recent:
+                effective_sid = subagent.find_root_session_id(recent[1], max_days_back=1)
+
+        tree = subagent.build_subagent_tree(effective_sid or "", max_days_back=1)
+        if not tree or tree.total_count == 0:
+            return None, []
+
+        exchanges = (
+            subagent.extract_subagent_exchanges(session_id=effective_sid, max_days_back=1)
+            if effective_sid
+            else []
+        )
+        exchanges_by_node = {}
+        for ex in exchanges:
+            if ex.sender_id:
+                exchanges_by_node[ex.sender_id] = ex
+            if ex.receiver_id:
+                exchanges_by_node[ex.receiver_id] = ex
+
+        all_nodes = subagent.flatten_subagent_tree(tree.nodes)
+        running_n = sum(1 for n in all_nodes if n.status in ("running", "starting"))
+        active_tag = f" {_DIM}({_R}{_CYAN}{running_n} active{_R}{_DIM}){_R}" if running_n > 0 else ""
+        sub_head = f"{_DIM}{_HEAD_PAD}subagents{_R} {tree.total_count}{active_tag}"
+
+        lines = subagent.render_directory_tree(
+            tree.nodes,
+            prefix="  ",
+            parent_id=tree.root_id,
+            color=True,
+            tick=tick,
+            exchanges_by_node=exchanges_by_node,
+            verbose=False,
+        )
+        return sub_head, lines
+    except Exception:
+        return None, []
+
+
+def _3columns(
+    left_lines: list[str],
+    mid_lines: list[str],
+    right_lines: list[str],
+    width: int,
+) -> str:
+    """Compose three columns (repos, subagents, personas) clamped to width."""
+    node: tui.Node = tui.Columns([
+        (list(left_lines), _LEFT_W),
+        (list(mid_lines), _SUBAGENT_COL_W),
+        (list(right_lines), None),
+    ], gap=_COL_SEP)
+    return "\n".join(node.render(width))
+
+
+def render(payload: dict | None = None, tick: int = 0) -> str:
     """FINDING M9: the module docstring promises this NEVER crashes — that guarantee
     lives entirely in this function's two `try/except` blocks, so EVERY step that can
     fail must sit inside one of them. Before this, `_repo_rows`/`_persona_chips` (and
@@ -1701,41 +1760,7 @@ def render(payload: dict | None = None) -> str:
         glstate.maybe_spawn(scan, active)
 
         pin = f"{_YELLOW}*{_R}" if src == "$CHARTER_WORKSPACE" else ""
-        # Reinit tip sits right after the name so it survives truncation on narrow panes.
-        # Nothing informational goes in front of it: it is the one item on this row that
-        # reports something BROKEN, and it carries the command that fixes it. A pane with
-        # room for one item and not two must spend that room on the problem.
         reinit = f"{_YELLOW}⚠ reinit: {_BOLD}charter ws reinit{_R}" if _stale_structure(active) else None
-        # Zone 1 — WHERE I am. Identity and navigation only: which workspace is active,
-        # what it still means to do, and how many others exist to switch to. Everything
-        # that used to ride along here (repo count, vault count, ctx/⚡) described
-        # something else and now sits with the thing it describes.
-        #
-        # Open todos are a property of the ACTIVE WORKSPACE, so the layout's one rule —
-        # a count lives next to what it counts — puts them here rather than on the
-        # session strip (they outlive the session; that is the point of the store) or in
-        # the repo column (they are not about a repo). Beside the name rather than on a
-        # row of its own, because a row is spent on every single turn and what it would
-        # carry is usually one digit.
-        #
-        # It follows the reinit tip rather than preceding it. This row's order IS its
-        # truncation order, and a warning outranks information: on a pane wide enough
-        # for the tip or the count but not both, the item naming a broken structure has
-        # to be the one that survives. The count pays nothing for that in practice —
-        # reinit renders only when the on-disk layout is actually stale, so essentially
-        # every turn reads `⬢ <name> · todo N · ws M`, with the count still against the
-        # name whose todos it counts.
-        #
-        # Zero renders NOTHING, the same discipline `_session_news` keeps: a `todo 0`
-        # present every turn is furniture within a day, and then a real `todo 7` in that
-        # spot draws no more attention than the zero did. Presence is the signal.
-        #
-        # A plain word, no glyph. `tui.width` only knows what the Unicode tables claim,
-        # and this layout has twice paid for a character a font drew wider than that
-        # (see the header comments below) — a decoration here could only cost columns,
-        # since the label already reads. `todo` singular because it is exactly the
-        # subcommand that shows them, `charter ws todo`, so the label doubles as the way
-        # to read the detail — the same thing `ws N` does for `charter ws`.
         ntodo = _todo_count(active)
         summary = f"{_DIM} · {_R}".join(filter(None, [
             f"{_CYAN}⬢{_R} {_BOLD}{active}{_R}{pin}",
@@ -1754,33 +1779,8 @@ def render(payload: dict | None = None) -> str:
         return f"{_CYAN}⬢{_R} charter"
 
     try:
-        # Zone 2 — one header row, one head per column, each stating what its own
-        # column holds. `repos N/M` used to sit in the top line and `personas`/`vaults`
-        # in the right column, so two structurally identical facts rendered in two
-        # different places; a count now always sits next to what it counts.
         shared_badge = _mem_badge(_mem_count("_", shared=True),
                                   _mem_count("_", shared=True, ephemeral=True, session=sid))
-        # NEITHER header carries a decorative glyph, deliberately, and the reason is the
-        # same for both: a header is the only row of its kind, so a glyph on it is
-        # exercised by nothing else. `tui.width` trusts the Unicode tables; a font that
-        # draws a character wider than its table claims shifts everything after it on
-        # that row — and a header's row is the one row with no neighbour to reveal the
-        # drift. Content rows are safe by contrast precisely because they repeat: the
-        # thirteen chip rows line up with each other, which is what proves `◆`/`○`, and
-        # the repo rows prove `├ ─ │ ⑂ ✓ ✗ ·`.
-        #
-        # Both mistakes shipped. A `◫` on this line pushed the whole right-hand column
-        # one space over. Then a `◈` on the personas header — past the column's own
-        # alignment point, so the divider and bullets still lined up perfectly — pushed
-        # the *word* "personas" one space right of every chip title below it, which is
-        # the tell: the bullets agreed and the titles did not.
-        #
-        # So: labels only up here. Decoration lives on the content rows, where a
-        # sibling would expose it.
-        # `/<avail>` is "of this many in the inventory", so it is only printed when there
-        # IS an inventory. A monorepo plane never runs `discover` — its one repo is
-        # already here — and rendering `repos 1/0` there states the opposite of the truth.
-        # A fleet plane before its first `discover` gets the same honest bare count.
         left_head = f"{_DIM}{_HEAD_PAD}repos{_R} {len(dirs)}" + (
             f"{_DIM}/{avail}{_R}" if avail else "")
         header = f"{_DIM}{_HEAD_PAD}personas{_R} {len(chips)}" + (
@@ -1788,24 +1788,43 @@ def render(payload: dict | None = None) -> str:
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")
         strip = _session_strip(payload, sid)
         alerts = _alerts(active)
-        # `left_head` means the left column is never empty, so two columns no longer
-        # require a cloned repo — a fresh workspace still gets the grouped layout with
-        # an honest `◫ repos 0/38`.
-        if chips and width >= _LEFT_W + _RIGHT_MIN_W:
-            # Summary on its own full-width line; below it, two columns — repos left,
-            # personas right. The header sits beside a full repo row (pairing it with
-            # the short summary row misaligned it on some terminals), so it lines up
-            # with the chips. When personas outnumber repos, continue the repo tree
-            # with │ so no row is blank on the left (Claude Code collapses those to col 0).
-            # News goes in the rows the repo tree already leaves blank — free
-            # vertically, so it costs no width and works at 80 columns.
+
+        # Gather subagents for dashboard integration
+        sub_head, sub_lines = _subagent_section(sid, tick=tick)
+        has_subagents = bool(sub_head and sub_lines)
+
+        # Scheme B: Wide Screen 3-Column Layout (repos | subagents | personas)
+        if has_subagents and chips and width >= _LEFT_W + _SUBAGENT_MIN_W + _RIGHT_MIN_W:
+            left = [left_head, *repo_lines]
+            mid = [sub_head, *sub_lines]
+            right = [header, *chips]
+            max_h = max(len(left), len(mid), len(right))
+            if len(left) < max_h:
+                for i in range(len(left) - 1, -1, -1):
+                    if _TREE_END in left[i]:
+                        left[i] = left[i].replace(_TREE_END, _TREE_MID, 1)
+                        break
+                while len(left) < max_h:
+                    left.append(f"  {_DIM}{_TREE_PIPE}{_R}")
+            if len(mid) < max_h:
+                for i in range(len(mid) - 1, -1, -1):
+                    if "└" in mid[i]:
+                        mid[i] = mid[i].replace("└", "├", 1)
+                        break
+                while len(mid) < max_h:
+                    mid.append(f"  {_DIM}{_TREE_PIPE}{_R}")
+
+            rows = [tui.truncate(summary, width), _3columns(left, mid, right, width)]
+            rows += [tui.truncate(a, width) for a in alerts]
+            if strip:
+                rows.append(tui.truncate(strip, width))
+            body = "\n".join(rows)
+
+        # Scheme A: Standard Width 2-Column + Dedicated Subagents Section
+        elif chips and width >= _LEFT_W + _RIGHT_MIN_W:
             left = [left_head, *repo_lines]
             right = [header, *chips]
             if len(right) > len(left):
-                # The tree keeps going below the last repo, so its `└─` must become
-                # `├─`. Find the row that actually carries the elbow — `left[-1]` is
-                # not it whenever the last repo emitted a worktree summary line
-                # underneath, which left a `└─` sitting above a column of `│`.
                 for i in range(len(left) - 1, -1, -1):
                     if _TREE_END in left[i]:
                         left[i] = left[i].replace(_TREE_END, _TREE_MID, 1)
@@ -1813,28 +1832,40 @@ def render(payload: dict | None = None) -> str:
                 while len(left) < len(right):
                     left.append(f"  {_DIM}{_TREE_PIPE}{_R}")
             rows = [tui.truncate(summary, width), _columns(left, right, width)]
+            if has_subagents:
+                rows.append(_RULE_LINE)
+                sub_block = [tui.truncate(ln, width) for ln in [sub_head, *sub_lines]]
+                rows.append("\n".join(sub_block))
             rows += [tui.truncate(a, width) for a in alerts]
             if strip:
                 rows.append(tui.truncate(strip, width))
             body = "\n".join(rows)
+
+        # Narrow Screen Stack
         elif chips:
-            body = _columns([summary, left_head, *repo_lines, header, *chips,
-                             *alerts, *([strip] if strip else [])], None, width)
+            items = [summary, left_head, *repo_lines]
+            if has_subagents:
+                items.extend([_RULE_LINE, sub_head, *sub_lines, _RULE_LINE])
+            items.extend([header, *chips, *alerts, *([strip] if strip else [])])
+            body = _columns(items, None, width)
         else:
-            body = _columns([summary, left_head, *repo_lines,
-                             *alerts, *([strip] if strip else [])], None, width)
-        # After layout, before the frame: the dividers are furniture, and letting them
-        # through `_columns` would have them padded and cropped as content.
+            items = [summary, left_head, *repo_lines]
+            if has_subagents:
+                items.extend([_RULE_LINE, sub_head, *sub_lines])
+            items.extend([*alerts, *([strip] if strip else [])])
+            body = _columns(items, None, width)
+
+        # After layout, before the frame
         body = _zone_rules(body, has_strip=bool(strip))
     except Exception:
-        # Never crash the status line if layout fails — plain truncated stack.
         plain = [summary, *repo_lines]
+        if has_subagents and sub_head:
+            plain.extend([sub_head, *sub_lines])
         p = _persona_line()
         if p:
             plain.append(p)
         body = "\n".join(tui.truncate(ln, width) for ln in plain)
 
-    # Brand first (it right-aligns against the content width), then the frame around it.
     return _boxed(_with_brand(body, width), frame_w) + "\n"
 
 
@@ -1848,7 +1879,6 @@ def _columns(left_lines: list[str], right_lines: list[str] | None, width: int) -
         node = tui.Stack(*left_lines)
     return "\n".join(node.render(width))
 
-
 #: How often the ambient render repaints. The same cadence charter writes into Claude
 #: Code's `statusLine.refreshInterval`, so the plane state ages at one rate whichever
 #: harness you are looking at it through.
@@ -1859,42 +1889,39 @@ _HIDE_CURSOR, _SHOW_CURSOR = "\033[?25l", "\033[?25h"
 
 
 def watch(interval: float = WATCH_INTERVAL) -> int:
-    """Repaint the plane state in place until Ctrl-C. ``charter statusline --watch``.
-
-    The remedy for a harness with no status bar (ADR 0015). Claude Code renders the line
-    every turn because it has a socket for one; opencode has none, and Codex's
-    `tui.status_line` takes built-in segments rather than a command. This needs neither —
-    a spare terminal, no multiplexer, and the same render on every harness.
-
-    **What it cannot show, and says so.** There is no session payload here, so the token
-    and context columns are blank. A render that looks like the real thing while silently
-    omitting a column teaches the reader to trust a number that is not on the screen.
-
-    The cursor is hidden while painting and restored on the way out, including on Ctrl-C:
-    an ambient display that leaves the operator's terminal broken is a worse failure than
-    the one it set out to fix. A render that raises is drawn as a single line rather than
-    ending the loop, for the same reason `main` guards it — this process is meant to sit
-    there for hours.
-    """
+    """Repaint the plane state in place until Ctrl-C. ``charter statusline --watch``."""
     out = sys.stdout
     out.write(_HIDE_CURSOR)
+    tick = 0
+    watcher = None
+    try:
+        from . import subagent
+        watcher = subagent.SubagentEventWatcher(max_days_back=1)
+    except Exception:
+        pass
+
+    last_repaint = 0.0
     try:
         while True:
-            try:
-                body = render({})
-            except Exception:
-                body = f"{_CYAN}⬢{_R} charter — render failed; still watching"
-            out.write(f"{_HOME_CLEAR}{body}\n")
-            out.write(f"{_DIM}no session attached — token and context columns are blank; "
-                      f"this is the plane, not the session. Ctrl-C to stop.{_R}\n")
-            out.flush()
-            time.sleep(interval)
+            now_time = time.time()
+            has_event = watcher.check_for_changes() if watcher else False
+            if has_event or (now_time - last_repaint >= interval) or tick == 0:
+                try:
+                    body = render({}, tick=tick)
+                except Exception:
+                    body = f"{_CYAN}⬢{_R} charter — render failed; still watching"
+                out.write(f"{_HOME_CLEAR}{body}\n")
+                out.write(f"{_DIM}no session attached — token and context columns are blank; "
+                          f"this is the plane, not the session. Ctrl-C to stop.{_R}\n")
+                out.flush()
+                last_repaint = now_time
+                tick += 1
+            time.sleep(0.2 if watcher else interval)
     except KeyboardInterrupt:
         return 0
     finally:
         out.write(_SHOW_CURSOR)
         out.flush()
-
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="charter statusline", add_help=True)
