@@ -808,11 +808,20 @@ def build_subagent_tree(
     try:
         from . import inflight
         candidate_roots = {lid for lid, l in links.items() if not l.parent_id}
+        tree_scope: set[str] = set()
+        scope_stack = [root_id]
+        while scope_stack:
+            curr = scope_stack.pop()
+            if curr not in tree_scope:
+                tree_scope.add(curr)
+                for cid in children.get(curr, []):
+                    scope_stack.append(cid)
+
         for rec in inflight.live_records():
             rec_sid = rec.get("session_id")
             rec_pid = rec.get("parent_id")
             if rec_sid is not None:
-                if rec_sid != root_id and rec_pid != root_id and rec_sid not in links:
+                if rec_sid not in tree_scope and rec_pid not in tree_scope:
                     continue
             else:
                 if len(candidate_roots) > 1:

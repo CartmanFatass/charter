@@ -37,8 +37,29 @@ ObservationKind = Literal[
     "workflow_declared",
 ]
 
+_KIND_PRIORITY: dict[str, int] = {
+    "session_seen": 0,
+    "actor_spawned": 10,
+    "dispatch_sent": 20,
+    "workflow_declared": 25,
+    "actor_started": 30,
+    "message_sent": 40,
+    "tool_started": 50,
+    "tool_finished": 60,
+    "incident_seen": 70,
+    "actor_returned": 80,
+    "actor_stopped": 90,
+}
+
 _MAX_DECLARATION_BLOCK_BYTES = 4096
-_CHARTER_OBSERVE_FENCE_RE = re.compile(r"```charter-observe[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
+
+# Exact line-anchored fenced block: requires ```charter-observe on its own line and ``` on its own line.
+# Rejects lines wrapped by 4 or more backticks.
+_CHARTER_OBSERVE_FENCE_RE = re.compile(
+    r"(?m)^[ \t]*```charter-observe[ \t]*\r?\n(.*?)\r?\n[ \t]*```[ \t]*$",
+    re.DOTALL,
+)
+
 _ALLOWED_DECLARATION_FIELDS = {
     "schema",
     "event",
@@ -105,7 +126,7 @@ class SessionObservation:
 
 @dataclass(frozen=True)
 class ObservedEvent:
-    """An immutable observed event with machine-readable evidence basis."""
+    """An immutable observed event with machine-readable evidence basis and causal ordinal."""
 
     id: str
     root_id: str
@@ -116,9 +137,11 @@ class ObservedEvent:
     actor_name: str | None = None
     peer_id: str | None = None
     peer_name: str | None = None
+    author_actor_id: str | None = None
     summary: str = ""
     attributes: Mapping[str, Any] = field(default_factory=dict)
     evidence: tuple[EvidenceRef, ...] = ()
+    ordinal: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,9 +154,11 @@ class ObservedEvent:
             "actor_name": self.actor_name,
             "peer_id": self.peer_id,
             "peer_name": self.peer_name,
+            "author_actor_id": self.author_actor_id,
             "summary": self.summary,
             "attributes": dict(self.attributes),
             "evidence": [e.to_dict() for e in self.evidence],
+            "ordinal": self.ordinal,
         }
 
 
@@ -234,6 +259,14 @@ def parse_workflow_declarations(
     if not text or "```charter-observe" not in text:
         return ()
 
+    # Check for four-backtick blocks that might enclose three backticks
+    if "````" in text:
+        # If it's an outer 4-backtick block, ignore internal 3-backtick pseudo matches
+        clean_text = re.sub(r"(?m)^[ \t]*````+.*?\r?\n.*?\r?\n[ \t]*````+[ \t]*$", "", text, flags=re.DOTALL)
+        if "```charter-observe" not in clean_text:
+            return ()
+        text = clean_text
+
     blocks = _CHARTER_OBSERVE_FENCE_RE.findall(text)
     if not blocks:
         return ()
@@ -270,16 +303,26 @@ def parse_workflow_declarations(
         return ()
 
     schema_val = data.get("schema")
-    if schema_val != 1:
+    # Strict integer 1 check: reject True (bool) and 1.0 (float)
+    if type(schema_val) is not int or schema_val != 1:
         if warnings is not None:
-            warnings.append(f"Unsupported schema version: {schema_val} (expected 1)")
+            warnings.append(f"Unsupported schema version: {schema_val} (expected integer 1)")
         return ()
 
     event_val = data.get("event")
-    if event_val not in _ALLOWED_EVENTS:
+    if not isinstance(event_val, str) or event_val not in _ALLOWED_EVENTS:
         if warnings is not None:
-            warnings.append(f"Unsupported event type: '{event_val}'")
+            warnings.append(f"Unsupported or non-string event type: '{event_val}'")
         return ()
+
+    # Validate string fields (reject list, dict, bool, int passed into string fields)
+    for str_field in ("work_id", "title", "direction", "actor_role", "owner_role", "actor_id", "related_actor_id"):
+        if str_field in data:
+            val = data[str_field]
+            if val is not None and not isinstance(val, str):
+                if warnings is not None:
+                    warnings.append(f"Field '{str_field}' must be a string, got {type(val).__name__}")
+                return ()
 
     work_id_val = data.get("work_id")
     if event_val in ("intake", "resolve") and not work_id_val:
@@ -288,10 +331,11 @@ def parse_workflow_declarations(
         return ()
 
     relation_val = data.get("relation")
-    if relation_val is not None and relation_val not in _ALLOWED_RELATIONS:
-        if warnings is not None:
-            warnings.append(f"Unsupported relation kind: '{relation_val}'")
-        return ()
+    if relation_val is not None:
+        if not isinstance(relation_val, str) or relation_val not in _ALLOWED_RELATIONS:
+            if warnings is not None:
+                warnings.append(f"Unsupported relation kind: '{relation_val}'")
+            return ()
 
     decl = WorkflowDeclaration(
         schema=1,
@@ -306,6 +350,7 @@ def parse_workflow_declarations(
         related_actor_id=str(data.get("related_actor_id")).strip() if data.get("related_actor_id") else None,
     )
     return (decl,)
+
 
 def _ensure_utc(dt: datetime | None) -> datetime:
     if dt is None:
@@ -337,7 +382,6 @@ def collect_observation_snapshot(
     s_dir = sessions_dir or subagent.get_sessions_dir()
     index = subagent.build_session_index(max_days_back=max_days_back, sessions_dir=s_dir)
     effective_root = root_id
-    # If root_id is a child, resolve root
     if root_id in index.links and index.links[root_id].parent_id:
         effective_root = subagent.find_root_session_id(root_id, max_days_back=max_days_back, sessions_dir=s_dir)
 
@@ -348,8 +392,8 @@ def collect_observation_snapshot(
     warnings: list[str] = []
     sessions_obs: dict[str, SessionObservation] = {}
     events: list[ObservedEvent] = []
+    ordinal_counter = 0
 
-    # Map of (work_id, actor_id, event, schema) -> existing declared event to deduplicate mirrored prompt/user_msg
     seen_declarations: dict[tuple[Any, ...], ObservedEvent] = {}
 
     for sid in descendants:
@@ -372,7 +416,7 @@ def collect_observation_snapshot(
 
         sess_name = link.name if link else sid[:8]
         sess_parent = link.parent_id if link else None
-        sess_start = link.started_at if link else None
+        sess_start = _ensure_utc(link.started_at) if link and link.started_at else None
         sess_cwd = link.cwd if link else None
 
         sessions_obs[sid] = SessionObservation(
@@ -388,8 +432,8 @@ def collect_observation_snapshot(
         if not rollout_file or not rollout_file.is_file():
             continue
 
-        # Iterate records in the rollout file
         for rec in subagent.iter_rollout_records(rollout_file):
+            ordinal_counter += 1
             ts = _ensure_utc(rec.timestamp) if rec.timestamp else cap_time
             ev_ref = EvidenceRef(
                 source="rollout_meta" if rec.entry_type == "session_meta" else "rollout_event",
@@ -400,8 +444,8 @@ def collect_observation_snapshot(
                 file_path=file_path_str,
                 line_number=rec.line_number,
             )
+
             if rec.entry_type == "session_meta":
-                # If this session has a parent, record actor_started
                 if sess_parent:
                     ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid, actor_id=sid)
                     events.append(ObservedEvent(
@@ -414,8 +458,10 @@ def collect_observation_snapshot(
                         actor_name=sess_name,
                         peer_id=sess_parent,
                         peer_name=index.links[sess_parent].name if sess_parent in index.links else None,
+                        author_actor_id=sid,
                         summary=f"Subagent {sess_name} started",
                         evidence=(ev_ref,),
+                        ordinal=ordinal_counter,
                     ))
                 else:
                     ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid)
@@ -425,118 +471,136 @@ def collect_observation_snapshot(
                         session_id=sid,
                         kind="session_seen",
                         observed_at=ts,
+                        author_actor_id=sid,
                         summary=f"Session {sess_name} seen",
                         evidence=(ev_ref,),
+                        ordinal=ordinal_counter,
                     ))
 
-            elif rec.entry_type == "event_msg" and isinstance(rec.payload, dict):
-                p_type = rec.payload.get("type")
-                if p_type == "item_completed":
-                    item = rec.payload.get("item")
+            elif rec.entry_type in ("event_msg", "response_item") and isinstance(rec.payload, dict):
+                p_type = rec.payload.get("type") or rec.entry_type
+                if p_type == "item_completed" or rec.entry_type == "response_item":
+                    item = rec.payload.get("item") if p_type == "item_completed" else rec.payload
                     if isinstance(item, dict):
-                        item_type = item.get("type")
-                        if item_type == "CollabAgentToolCall" and item.get("tool") == "spawn_agent":
-                            receivers = item.get("receiver_agents") or []
-                            prompt = str(item.get("prompt") or "")
+                        item_type = item.get("type") or item.get("tool")
+                        if item_type == "CollabAgentToolCall" or item.get("tool") in ("spawn_agent", "wait", "close_agent"):
+                            tool_name = item.get("tool")
                             states = item.get("agents_states") or {}
 
-                            decls = parse_workflow_declarations(prompt, warnings=warnings)
-                            for rx in receivers:
-                                rx_id = rx.get("thread_id") or ""
-                                rx_name = rx.get("agent_nickname") or rx_id[:8] or "subagent"
+                            if tool_name == "spawn_agent":
+                                receivers = item.get("receiver_agents") or []
+                                if not receivers and item.get("receiver_thread_ids"):
+                                    receivers = [
+                                        {"thread_id": tid, "agent_nickname": str(tid)[:8]}
+                                        for tid in item["receiver_thread_ids"] if tid
+                                    ]
+                                prompt = str(item.get("prompt") or "")
 
-                                if rx_id and rx_id not in sessions_obs:
-                                    sessions_obs[rx_id] = SessionObservation(
-                                        id=rx_id,
-                                        parent_id=sid,
-                                        name=rx_name,
-                                        started_at=ts,
-                                        cwd=sess_cwd,
-                                        rollout_file=None,
-                                        basis=(ev_ref,),
-                                    )
+                                decls = parse_workflow_declarations(prompt, warnings=warnings)
+                                for rx in receivers:
+                                    rx_id = rx.get("thread_id") or ""
+                                    rx_name = rx.get("agent_nickname") or rx_id[:8] or "subagent"
 
-                                ev_spawn_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="spawn")
-                                events.append(ObservedEvent(
-                                    id=ev_spawn_id,
-                                    root_id=effective_root,
-                                    session_id=sid,
-                                    kind="actor_spawned",
-                                    observed_at=ts,
-                                    actor_id=rx_id,
-                                    actor_name=rx_name,
-                                    peer_id=sid,
-                                    peer_name=sess_name,
-                                    summary=f"Spawned subagent {rx_name}",
-                                    evidence=(ev_ref,),
-                                ))
+                                    if rx_id and rx_id not in sessions_obs:
+                                        sessions_obs[rx_id] = SessionObservation(
+                                            id=rx_id,
+                                            parent_id=sid,
+                                            name=rx_name,
+                                            started_at=ts,
+                                            cwd=sess_cwd,
+                                            rollout_file=None,
+                                            basis=(ev_ref,),
+                                        )
 
-                                disp_attrs: dict[str, Any] = {"prompt": prompt}
-                                if decls:
-                                    disp_attrs["declaration"] = decls[0].to_dict()
-
-                                ev_disp_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="dispatch")
-                                events.append(ObservedEvent(
-                                    id=ev_disp_id,
-                                    root_id=effective_root,
-                                    session_id=sid,
-                                    kind="dispatch_sent",
-                                    observed_at=ts,
-                                    actor_id=rx_id,
-                                    actor_name=rx_name,
-                                    peer_id=sid,
-                                    peer_name=sess_name,
-                                    summary=f"Dispatch sent to {rx_name}",
-                                    attributes=disp_attrs,
-                                    evidence=(ev_ref,),
-                                ))
-
-                                # Check exact declarations in spawn prompt
-                                for d in decls:
-                                    decl_key = (d.schema, d.event, d.work_id, rx_id or d.actor_id)
-                                    decl_ev_ref = EvidenceRef(
-                                        source="rollout_event",
-                                        source_id=f"{sid}:{rec.line_number}:decl",
-                                        raw_kind="workflow_declared",
-                                        observed_at=ts,
-                                        evidence_class="declared",
-                                        file_path=file_path_str,
-                                        line_number=rec.line_number,
-                                    )
-                                    decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=rx_id, discriminator="decl")
-                                    decl_event = ObservedEvent(
-                                        id=decl_ev_id,
+                                    ev_spawn_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="spawn")
+                                    events.append(ObservedEvent(
+                                        id=ev_spawn_id,
                                         root_id=effective_root,
                                         session_id=sid,
-                                        kind="workflow_declared",
+                                        kind="actor_spawned",
                                         observed_at=ts,
                                         actor_id=rx_id,
                                         actor_name=rx_name,
                                         peer_id=sid,
                                         peer_name=sess_name,
-                                        summary=f"Workflow declared: {d.event} ({d.work_id or d.title or ''})",
-                                        attributes={"declaration": d.to_dict()},
-                                        evidence=(decl_ev_ref,),
-                                    )
-                                    seen_declarations[decl_key] = decl_event
-                                    events.append(decl_event)
+                                        author_actor_id=sid,
+                                        summary=f"Spawned subagent {rx_name}",
+                                        evidence=(ev_ref,),
+                                        ordinal=ordinal_counter,
+                                    ))
 
-                                # Check typed incident in agents_states
-                                st_entry = states.get(rx_id)
-                                if isinstance(st_entry, dict) and (st_entry.get("error") or st_entry.get("failed")):
-                                    inc_id = make_event_id("rollout_event", file_path_str, rec.line_number, "incident", sid, actor_id=rx_id)
-                                    err_detail = str(st_entry.get("error") or st_entry.get("failed") or "Agent error state")
+                                    disp_attrs: dict[str, Any] = {"prompt": prompt}
+                                    if decls:
+                                        disp_attrs["declaration"] = decls[0].to_dict()
+
+                                    ev_disp_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="dispatch")
+                                    events.append(ObservedEvent(
+                                        id=ev_disp_id,
+                                        root_id=effective_root,
+                                        session_id=sid,
+                                        kind="dispatch_sent",
+                                        observed_at=ts,
+                                        actor_id=rx_id,
+                                        actor_name=rx_name,
+                                        peer_id=sid,
+                                        peer_name=sess_name,
+                                        author_actor_id=sid,
+                                        summary=f"Dispatch sent to {rx_name}",
+                                        attributes=disp_attrs,
+                                        evidence=(ev_ref,),
+                                        ordinal=ordinal_counter,
+                                    ))
+
+                                    # Check exact declarations in spawn prompt
+                                    for d in decls:
+                                        decl_key = (d.schema, d.event, d.work_id, rx_id or d.actor_id)
+                                        decl_ev_ref = EvidenceRef(
+                                            source="rollout_event",
+                                            source_id=f"{sid}:{rec.line_number}:decl",
+                                            raw_kind="workflow_declared",
+                                            observed_at=ts,
+                                            evidence_class="declared",
+                                            file_path=file_path_str,
+                                            line_number=rec.line_number,
+                                        )
+                                        decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=rx_id, discriminator="decl")
+                                        decl_event = ObservedEvent(
+                                            id=decl_ev_id,
+                                            root_id=effective_root,
+                                            session_id=sid,
+                                            kind="workflow_declared",
+                                            observed_at=ts,
+                                            actor_id=rx_id,
+                                            actor_name=rx_name,
+                                            peer_id=sid,
+                                            peer_name=sess_name,
+                                            author_actor_id=sid,
+                                            summary=f"Workflow declared: {d.event} ({d.work_id or d.title or ''})",
+                                            attributes={"declaration": d.to_dict()},
+                                            evidence=(decl_ev_ref,),
+                                            ordinal=ordinal_counter,
+                                        )
+                                        seen_declarations[decl_key] = decl_event
+                                        events.append(decl_event)
+
+                            # Check typed incidents in agents_states on ANY collab tool call
+                            for aid, astate in states.items():
+                                if isinstance(astate, dict) and (astate.get("error") or astate.get("failed")):
+                                    inc_err = str(astate.get("error") or astate.get("failed") or "Agent error state")
+                                    inc_id = make_event_id("rollout_event", file_path_str, rec.line_number, "incident", sid, actor_id=aid)
                                     events.append(ObservedEvent(
                                         id=inc_id,
                                         root_id=effective_root,
                                         session_id=sid,
                                         kind="incident_seen",
                                         observed_at=ts,
-                                        actor_id=rx_id,
-                                        actor_name=rx_name,
-                                        summary=f"Agent error observed: {err_detail}",
-                                        attributes={"error": err_detail},
+                                        actor_id=aid,
+                                        actor_name=index.links[aid].name if aid in index.links else str(aid)[:8],
+                                        author_actor_id=sid,
+                                        summary=f"Agent error observed: {inc_err}",
+                                        attributes={"error": inc_err},
                                         evidence=(ev_ref,),
+                                        ordinal=ordinal_counter,
                                     ))
 
                         elif include_tool_calls and item_type in ("function_call", "custom_tool_call"):
@@ -550,9 +614,26 @@ def collect_observation_snapshot(
                                 observed_at=ts,
                                 actor_id=sid,
                                 actor_name=sess_name,
+                                author_actor_id=sid,
                                 summary=f"Tool call: {t_name}",
                                 attributes={"tool_name": t_name},
                                 evidence=(ev_ref,),
+                                ordinal=ordinal_counter,
+                            ))
+                        elif include_tool_calls and item_type in ("function_call_output", "custom_tool_call_output"):
+                            ev_tf_id = make_event_id("rollout_event", file_path_str, rec.line_number, "tool_finished", sid)
+                            events.append(ObservedEvent(
+                                id=ev_tf_id,
+                                root_id=effective_root,
+                                session_id=sid,
+                                kind="tool_finished",
+                                observed_at=ts,
+                                actor_id=sid,
+                                actor_name=sess_name,
+                                author_actor_id=sid,
+                                summary="Tool finished",
+                                evidence=(ev_ref,),
+                                ordinal=ordinal_counter,
                             ))
 
                 elif p_type == "user_message":
@@ -566,12 +647,14 @@ def collect_observation_snapshot(
                         observed_at=ts,
                         actor_id=sess_parent,
                         peer_id=sid,
+                        author_actor_id=sess_parent,
                         summary="Parent message sent",
                         attributes={"content": msg_text},
                         evidence=(ev_ref,),
+                        ordinal=ordinal_counter,
                     ))
 
-                    # Check mirrored declarations
+                    # Check mirrored declarations in user_message
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
                     for d in decls:
                         decl_key = (d.schema, d.event, d.work_id, sid or d.actor_id)
@@ -585,25 +668,28 @@ def collect_observation_snapshot(
                             line_number=rec.line_number,
                         )
                         if decl_key in seen_declarations:
-                            # Merge evidence reference into existing declaration event
                             orig_event = seen_declarations[decl_key]
-                            idx = events.index(orig_event)
-                            updated_event = ObservedEvent(
-                                id=orig_event.id,
-                                root_id=orig_event.root_id,
-                                session_id=orig_event.session_id,
-                                kind=orig_event.kind,
-                                observed_at=orig_event.observed_at,
-                                actor_id=orig_event.actor_id,
-                                actor_name=orig_event.actor_name,
-                                peer_id=orig_event.peer_id,
-                                peer_name=orig_event.peer_name,
-                                summary=orig_event.summary,
-                                attributes=orig_event.attributes,
-                                evidence=orig_event.evidence + (decl_ev_ref,),
-                            )
-                            events[idx] = updated_event
-                            seen_declarations[decl_key] = updated_event
+                            for e_idx, ev_item in enumerate(events):
+                                if ev_item.id == orig_event.id:
+                                    updated_event = ObservedEvent(
+                                        id=orig_event.id,
+                                        root_id=orig_event.root_id,
+                                        session_id=orig_event.session_id,
+                                        kind=orig_event.kind,
+                                        observed_at=orig_event.observed_at,
+                                        actor_id=orig_event.actor_id,
+                                        actor_name=orig_event.actor_name,
+                                        peer_id=orig_event.peer_id,
+                                        peer_name=orig_event.peer_name,
+                                        author_actor_id=orig_event.author_actor_id,
+                                        summary=orig_event.summary,
+                                        attributes=orig_event.attributes,
+                                        evidence=orig_event.evidence + (decl_ev_ref,),
+                                        ordinal=orig_event.ordinal,
+                                    )
+                                    events[e_idx] = updated_event
+                                    seen_declarations[decl_key] = updated_event
+                                    break
                         else:
                             decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator="decl")
                             decl_event = ObservedEvent(
@@ -614,9 +700,11 @@ def collect_observation_snapshot(
                                 observed_at=ts,
                                 actor_id=sid,
                                 actor_name=sess_name,
+                                author_actor_id=sess_parent,
                                 summary=f"Workflow declared: {d.event} ({d.work_id or d.title or ''})",
                                 attributes={"declaration": d.to_dict()},
                                 evidence=(decl_ev_ref,),
+                                ordinal=ordinal_counter,
                             )
                             seen_declarations[decl_key] = decl_event
                             events.append(decl_event)
@@ -633,12 +721,14 @@ def collect_observation_snapshot(
                         actor_id=sid,
                         actor_name=sess_name,
                         peer_id=sess_parent,
+                        author_actor_id=sid,
                         summary="Agent message sent",
                         attributes={"content": msg_text},
                         evidence=(ev_ref,),
+                        ordinal=ordinal_counter,
                     ))
 
-                    # Check declarations in agent messages
+                    # Check declarations in agent messages (author is child sid)
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
                     for d in decls:
                         decl_key = (d.schema, d.event, d.work_id, sid or d.actor_id)
@@ -660,12 +750,15 @@ def collect_observation_snapshot(
                             observed_at=ts,
                             actor_id=sid,
                             actor_name=sess_name,
+                            author_actor_id=sid,
                             summary=f"Workflow declared: {d.event} ({d.work_id or d.title or ''})",
                             attributes={"declaration": d.to_dict()},
                             evidence=(decl_ev_ref,),
+                            ordinal=ordinal_counter,
                         )
                         seen_declarations[decl_key] = decl_event
                         events.append(decl_event)
+
                 elif p_type == "task_complete":
                     sum_text = str(rec.payload.get("summary") or "Task complete")
                     ev_ret_id = make_event_id("rollout_event", file_path_str, rec.line_number, "task_complete", sid)
@@ -678,25 +771,27 @@ def collect_observation_snapshot(
                         actor_id=sid,
                         actor_name=sess_name,
                         peer_id=sess_parent,
+                        author_actor_id=sid,
                         summary=f"Task returned: {sum_text}",
                         attributes={"summary": sum_text},
                         evidence=(ev_ref,),
+                        ordinal=ordinal_counter,
                     ))
 
-    # Read hook traces for descendant sessions
+    # Read hook traces for known sessions
     try:
         from . import trace
         for sid in list(sessions_obs.keys()):
             trace_events = trace.read(sid)
             for idx, tev in enumerate(trace_events, 1):
+                ordinal_counter += 1
                 tev_type = tev.get("event")
                 ts_str = tev.get("ts")
-                ts = subagent.parse_datetime(ts_str) or cap_time
+                ts = _ensure_utc(subagent.parse_datetime(ts_str)) if ts_str else cap_time
                 agent_label = tev.get("agent") or tev.get("persona") or sid[:8]
                 t_file = trace._file(sid)
                 t_file_str = str(t_file) if t_file else None
 
-                ts = _ensure_utc(subagent.parse_datetime(ts_str)) if ts_str else cap_time
                 t_ref = EvidenceRef(
                     source="hook_trace",
                     source_id=f"{sid}:{idx}",
@@ -706,6 +801,7 @@ def collect_observation_snapshot(
                     file_path=t_file_str,
                     line_number=idx,
                 )
+
                 if tev_type == "subagent_start":
                     t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_start", sid, actor_id=sid)
                     events.append(ObservedEvent(
@@ -716,8 +812,10 @@ def collect_observation_snapshot(
                         observed_at=ts,
                         actor_id=sid,
                         actor_name=agent_label,
+                        author_actor_id=sid,
                         summary=f"Hook observed subagent_start: {agent_label}",
                         evidence=(t_ref,),
+                        ordinal=ordinal_counter,
                     ))
                 elif tev_type == "subagent_stop":
                     t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_stop", sid, actor_id=sid)
@@ -729,18 +827,21 @@ def collect_observation_snapshot(
                         observed_at=ts,
                         actor_id=sid,
                         actor_name=agent_label,
+                        author_actor_id=sid,
                         summary=f"Hook observed subagent_stop: {agent_label}",
                         evidence=(t_ref,),
+                        ordinal=ordinal_counter,
                     ))
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:
+        warnings.append(f"Failed to read trace file: {exc}")
 
-    # Read inflight records for descendant sessions
+    # Read inflight records strictly read-only
     try:
         from . import inflight
         for sid in list(sessions_obs.keys()):
-            in_recs = inflight.live_records(session_id=sid)
+            in_recs = inflight.read_records(session_id=sid, prune=False)
             for irec in in_recs:
+                ordinal_counter += 1
                 start_dt = _ensure_utc(datetime.fromtimestamp(irec["ts"], tz=timezone.utc))
                 token = irec["token"]
                 agent_name = irec["agent"]
@@ -751,6 +852,15 @@ def collect_observation_snapshot(
                     observed_at=start_dt,
                     evidence_class="mechanical",
                 )
+                in_ev_id = make_event_id(
+                    "inflight",
+                    None,
+                    None,
+                    "inflight_record",
+                    sid,
+                    actor_id=irec.get("agent_id") or token,
+                    discriminator=token,
+                )
                 events.append(ObservedEvent(
                     id=in_ev_id,
                     root_id=effective_root,
@@ -759,14 +869,20 @@ def collect_observation_snapshot(
                     observed_at=start_dt,
                     actor_id=irec.get("agent_id") or f"inflight-{token}",
                     actor_name=agent_name,
+                    author_actor_id=sid,
                     summary=f"Inflight subagent active: {agent_name}",
                     evidence=(in_ref,),
+                    ordinal=ordinal_counter,
                 ))
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:
+        warnings.append(f"Failed to read inflight records: {exc}")
 
-    # Sort events deterministically by observed_at and stable ID
-    events.sort(key=lambda e: (e.observed_at, e.id))
+    # Sort events by observed_at, then kind causal priority, then source ordinal, then stable ID
+    def event_sort_key(e: ObservedEvent) -> tuple[datetime, int, int, str]:
+        prio = _KIND_PRIORITY.get(e.kind, 50)
+        return (e.observed_at, prio, e.ordinal, e.id)
+
+    events.sort(key=event_sort_key)
 
     return ObservationSnapshot(
         root_id=effective_root,

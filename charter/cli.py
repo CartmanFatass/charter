@@ -277,9 +277,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_subagent_parser(sub)
     _add_observe_parser(sub)
     _add_vault_parser(sub)
+    _add_secret_parser(sub)
     _add_persona_parser(sub)
     _add_report_parser(sub)
-
     return p
 
 def _add_subagent_parser(sub) -> None:

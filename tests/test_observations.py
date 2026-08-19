@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from charter import subagent
 from tests.test_subagent import write_test_rollout
@@ -223,6 +224,36 @@ class TestInflightSessionScoping(unittest.TestCase):
         self.assertEqual(len(recs_after), 1)
         self.assertEqual(recs_after[0]["session_id"], root_b)
         self.assertEqual(recs_after[0]["agent_id"], "worker-b")
+    def test_read_records_is_strictly_read_only_and_does_not_delete_stale(self):
+        from charter import inflight
+
+        d = inflight._dir()
+        d.mkdir(parents=True, exist_ok=True)
+        stale_file = d / "StaleWorker.99999.json"
+        stale_file.write_text(json.dumps({"agent": "StaleWorker", "ts": 100.0}), encoding="utf-8")
+        os.utime(stale_file, (100.0, 100.0))
+
+        # live_records() must NOT delete stale files on disk
+        recs = inflight.live_records()
+        self.assertEqual(len(recs), 0)
+        self.assertTrue(stale_file.exists(), "live_records() deleted a stale file on disk, violating read-only invariant!")
+
+    def test_inflight_cross_root_unscoped_isolation(self):
+        from charter import inflight
+
+        root_a = "root-iso-a"
+        root_b = "root-iso-b"
+        write_test_rollout(self.sessions_dir, root_a, timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(self.sessions_dir, root_b, timestamp="2026-08-19T10:00:00Z")
+
+        # Real Hook path: start(agent, session_id=sid) without parent_id
+        inflight.start("WorkerA", session_id=root_a)
+        inflight.start("WorkerB", session_id=root_b)
+
+        tree_a = subagent.build_subagent_tree(root_a, sessions_dir=self.sessions_dir)
+        names_a = [n.name for n in tree_a.nodes]
+        self.assertIn("WorkerA", names_a)
+        self.assertNotIn("WorkerB", names_a)
 
 
 class TestObservationSnapshotCollection(unittest.TestCase):
@@ -361,6 +392,64 @@ class TestObservationSnapshotCollection(unittest.TestCase):
         msgs = [e for e in snap.events if e.kind == "message_sent"]
         self.assertEqual(len(msgs), 1)
         self.assertIn("error and blocked timeout", msgs[0].attributes["content"])
+    def test_causal_source_ordering_with_identical_timestamps(self):
+        from charter import observations
+
+        root = "root-causal-test"
+        child = "child-causal-test"
+        t_same = "2026-08-19T10:00:00Z"
+
+        # Spawn, start, and return all with the exact same timestamp
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": t_same,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"CAUSAL-1\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "CausalWorker"}],
+                },
+            },
+        }
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": t_same,
+            "payload": {"type": "task_complete", "summary": "Done"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp=t_same, collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="CausalWorker", timestamp=t_same, collab_events=[ret_ev])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        kinds = [e.kind for e in snap.events]
+
+        # dispatch_sent must precede actor_started which must precede actor_returned
+        self.assertIn("dispatch_sent", kinds)
+        self.assertIn("actor_started", kinds)
+        self.assertIn("actor_returned", kinds)
+        disp_idx = kinds.index("dispatch_sent")
+        start_idx = kinds.index("actor_started")
+        ret_idx = kinds.index("actor_returned")
+
+        self.assertLess(disp_idx, start_idx)
+        self.assertLess(start_idx, ret_idx)
+
+    def test_inflight_observation_events_are_present(self):
+        from charter import observations, inflight, config
+
+        root = "root-inflight-obs"
+        state_tmp = self.tmp / "state"
+        with mock.patch.object(config, "STATE_DIR", state_tmp):
+            write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z")
+            inflight.start("ActiveWorker", session_id=root)
+
+            snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+            inflight_events = [e for e in snap.events if e.evidence and e.evidence[0].source == "inflight"]
+            self.assertEqual(len(inflight_events), 1)
+            self.assertEqual(inflight_events[0].actor_name, "ActiveWorker")
+            self.assertTrue(inflight_events[0].id)
 
 
 class TestWorkflowDeclarationParsing(unittest.TestCase):
@@ -443,6 +532,48 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
         self.assertEqual(d8, ())
         self.assertTrue(len(warns8) > 0)
 
+    def test_strict_schema_types(self):
+        from charter import observations
+
+        # Boolean schema True must be rejected
+        warns_bool: list[str] = []
+        d_bool = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": true, \"event\": \"dispatch\"}\n```", warnings=warns_bool)
+        self.assertEqual(d_bool, ())
+        self.assertTrue(len(warns_bool) > 0)
+
+        # Float schema 1.0 must be rejected
+        warns_float: list[str] = []
+        d_float = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1.0, \"event\": \"dispatch\"}\n```", warnings=warns_float)
+        self.assertEqual(d_float, ())
+        self.assertTrue(len(warns_float) > 0)
+
+    def test_unhashable_and_invalid_field_types(self):
+        from charter import observations
+
+        # List as event (must not crash with unhashable type)
+        warns_list: list[str] = []
+        d_list = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1, \"event\": [\"dispatch\"]}\n```", warnings=warns_list)
+        self.assertEqual(d_list, ())
+        self.assertTrue(len(warns_list) > 0)
+
+        # Dict as work_id (must be rejected, not coerced to str)
+        warns_dict: list[str] = []
+        d_dict = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1, \"event\": \"dispatch\", \"work_id\": {\"bad\": \"type\"}}\n```", warnings=warns_dict)
+        self.assertEqual(d_dict, ())
+        self.assertTrue(len(warns_dict) > 0)
+
+    def test_four_backticks_and_unanchored_fence_rejection(self):
+        from charter import observations
+
+        # 4 backticks outer wrapper (code block example)
+        four_ticks = (
+            "````markdown\n"
+            "```charter-observe\n"
+            "{\"schema\": 1, \"event\": \"dispatch\", \"work_id\": \"W1\"}\n"
+            "```\n"
+            "````"
+        )
+        self.assertEqual(observations.parse_workflow_declarations(four_ticks), ())
     def test_ordinary_prose_is_ignored(self):
         from charter import observations
 

@@ -160,7 +160,7 @@ class ActorProjection:
 
 @dataclass(frozen=True)
 class RelationProjection:
-    """A relationship between actors (runtime spawn parent or declared peer/report)."""
+    """A relationship between actors (runtime spawn parent or declared peer/reports_to/owner)."""
 
     id: str
     source_actor_id: str
@@ -268,6 +268,27 @@ class _MutableWorkItem:
         )
 
 
+def _mark_unbound(ev: ObservedEvent, reason: str) -> ObservedEvent:
+    attrs = dict(ev.attributes)
+    attrs["unbound_reason"] = reason
+    return ObservedEvent(
+        id=ev.id,
+        root_id=ev.root_id,
+        session_id=ev.session_id,
+        kind=ev.kind,
+        observed_at=ev.observed_at,
+        actor_id=ev.actor_id,
+        actor_name=ev.actor_name,
+        peer_id=ev.peer_id,
+        peer_name=ev.peer_name,
+        author_actor_id=ev.author_actor_id,
+        summary=ev.summary,
+        attributes=attrs,
+        evidence=ev.evidence,
+        ordinal=ev.ordinal,
+    )
+
+
 def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
     """Project an immutable ObservationSnapshot into deterministic WorkflowProjection views."""
     root_id = snapshot.root_id
@@ -304,10 +325,10 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 basis=s_obs.basis,
             ))
 
-    # Pre-index declared metadata by work_id and actor_id
+    # Pre-index declared metadata
     declarations_by_work_id: dict[str, WorkflowDeclaration] = {}
     declarations_by_actor: dict[str, WorkflowDeclaration] = {}
-    peer_relations_declared: list[tuple[WorkflowDeclaration, ObservedEvent]] = []
+    declared_relations: list[tuple[WorkflowDeclaration, ObservedEvent]] = []
 
     for ev in snapshot.events:
         if ev.kind == "workflow_declared":
@@ -318,20 +339,21 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                     declarations_by_work_id[decl.work_id] = decl
                 if decl.actor_id:
                     declarations_by_actor[decl.actor_id] = decl
-                if decl.event == "relation" and decl.relation == "peer":
-                    peer_relations_declared.append((decl, ev))
+                if decl.event == "relation":
+                    declared_relations.append((decl, ev))
 
-    # Process declared peer relations
-    for decl, ev in peer_relations_declared:
-        src = decl.actor_id or ev.session_id
+    # Process all declared relations (peer, reports_to, owner)
+    for decl, ev in declared_relations:
+        src = decl.actor_id or ev.author_actor_id or ev.session_id
         tgt = decl.related_actor_id
+        rel_kind: RelationKind = decl.relation or "peer"
         if src and tgt:
-            rel_id = f"rel:{src}:{tgt}:peer"
+            rel_id = f"rel:{src}:{tgt}:{rel_kind}"
             relations_list.append(RelationProjection(
                 id=rel_id,
                 source_actor_id=src,
                 target_actor_id=tgt,
-                kind="peer",
+                kind=rel_kind,
                 declared=True,
                 basis=ev.evidence,
             ))
@@ -341,13 +363,12 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
         ts = ev.observed_at
 
         if ev.kind == "actor_spawned":
-            # Managed via dispatch_sent
             pass
 
         elif ev.kind == "dispatch_sent":
             rx_id = ev.actor_id or ""
             rx_name = ev.actor_name or (snapshot.sessions[rx_id].name if rx_id in snapshot.sessions else rx_id[:8])
-            coord_id = ev.peer_id or ev.session_id
+            coord_id = ev.author_actor_id or ev.peer_id or ev.session_id
             coord_name = snapshot.sessions[coord_id].name if coord_id in snapshot.sessions else (coord_id[:8] if coord_id else "Operational Root")
 
             ev_hash = ev.id[:16]
@@ -366,6 +387,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 p_decls = parse_workflow_declarations(str(ev.attributes["prompt"]))
                 if p_decls:
                     decl = p_decls[0]
+
             ext_id = decl.work_id if decl else None
             title = (decl.title if decl else None) or ev.summary or f"Dispatch to {rx_name}"
             direction = decl.direction if decl else None
@@ -427,7 +449,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             work_items_map[internal_work_id] = m_item
             child_dispatches.setdefault(rx_id, []).append(internal_work_id)
 
-        elif ev.kind == "actor_started" or ev.kind == "tool_started" or ev.kind == "tool_finished":
+        elif ev.kind in ("actor_started", "tool_started", "tool_finished"):
             target_actor = ev.actor_id or ev.session_id
             if target_actor in actors_map:
                 actors_map[target_actor]["runtime_state"] = "running"
@@ -448,7 +470,6 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 actors_map[target_actor]["runtime_state"] = "stopped"
                 actors_map[target_actor]["basis"].extend(ev.evidence)
 
-            # Stopped without return: phase remains active/dispatched, return_observed stays False
             for wid in child_dispatches.get(target_actor, []):
                 wi = work_items_map[wid]
                 if wi.phase in ("dispatched", "active"):
@@ -463,7 +484,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 actors_map[target_child]["runtime_state"] = "stopped"
                 actors_map[target_child]["basis"].extend(ev.evidence)
 
-            # Bind to newest unmatched dispatch to this child session
+            # Bind to newest unmatched dispatch to this child session in dispatched or active phase
             candidate_ids = [
                 wid for wid in child_dispatches.get(target_child, [])
                 if work_items_map[wid].phase in ("dispatched", "active")
@@ -508,17 +529,20 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 )
                 wi.obligations.append(intake_obl)
             elif len(candidate_ids) > 1:
-                # Multiple candidates -> ambiguous return binding, preserve as unbound
-                unbound_events.append(ev)
+                unbound_events.append(_mark_unbound(ev, "ambiguous_multiple_candidate_dispatches"))
             else:
-                # 0 candidates
-                unbound_events.append(ev)
+                unbound_events.append(_mark_unbound(ev, "no_matching_active_dispatch_for_child"))
 
         elif ev.kind == "incident_seen":
             bound_wid: str | None = None
             target_actor = ev.actor_id or ev.session_id
-            if target_actor in child_dispatches and child_dispatches[target_actor]:
-                bound_wid = child_dispatches[target_actor][-1]
+            if target_actor in child_dispatches:
+                # Find active work item for this actor
+                for cand_wid in reversed(child_dispatches[target_actor]):
+                    cand_wi = work_items_map[cand_wid]
+                    if cand_wi.phase in ("dispatched", "active") or cand_wi.last_observed_at <= ts:
+                        bound_wid = cand_wid
+                        break
 
             inc_id = f"inc:{ev.id[:16]}"
             inc_proj = IncidentProjection(
@@ -538,48 +562,56 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             decl_dict = ev.attributes.get("declaration")
             if isinstance(decl_dict, dict):
                 decl = WorkflowDeclaration(**decl_dict)
+                author = ev.author_actor_id or ev.session_id
+
                 if decl.event == "intake":
                     # Match work item by external_id or internal id
-                    matched_item: _MutableWorkItem | None = None
-                    for wi in work_items_map.values():
-                        if (decl.work_id and wi.external_id == decl.work_id) or (decl.work_id and wi.id == decl.work_id):
-                            matched_item = wi
-                            break
+                    matched_items = [
+                        wi for wi in work_items_map.values()
+                        if (decl.work_id and wi.external_id == decl.work_id) or (decl.work_id and wi.id == decl.work_id)
+                    ]
 
-                    if matched_item:
-                        # Must be authored by the mechanically observed dispatching coordinator
-                        author_sid = ev.session_id
-                        coord_sid = matched_item.coordinator_actor_id
-                        if author_sid == coord_sid or author_sid == root_id:
+                    if len(matched_items) == 1:
+                        matched_item = matched_items[0]
+                        # Authority check: author must be the mechanically observed dispatching coordinator
+                        # Phase check: work item must be in 'returned' phase!
+                        is_coordinator = author == matched_item.coordinator_actor_id
+                        if is_coordinator and matched_item.phase == "returned":
                             matched_item.phase = "intaken"
                             matched_item.last_observed_at = ts
                             matched_item.basis.extend(ev.evidence)
-                            # Close intake_required obligation
                             matched_item.obligations = [o for o in matched_item.obligations if o.kind != "intake_required"]
+                        elif not is_coordinator:
+                            unbound_events.append(_mark_unbound(ev, f"author_not_dispatching_coordinator: author '{author}' != coordinator '{matched_item.coordinator_actor_id}'"))
                         else:
-                            unbound_events.append(ev)
+                            unbound_events.append(_mark_unbound(ev, f"invalid_phase_for_intake: work phase is '{matched_item.phase}', expected 'returned'"))
+                    elif len(matched_items) > 1:
+                        unbound_events.append(_mark_unbound(ev, f"ambiguous_duplicate_work_id: '{decl.work_id}' matches {len(matched_items)} items"))
                     else:
-                        unbound_events.append(ev)
+                        unbound_events.append(_mark_unbound(ev, f"work_item_not_found: '{decl.work_id}'"))
 
                 elif decl.event == "resolve":
-                    matched_item = None
-                    for wi in work_items_map.values():
-                        if (decl.work_id and wi.external_id == decl.work_id) or (decl.work_id and wi.id == decl.work_id):
-                            matched_item = wi
-                            break
+                    matched_items = [
+                        wi for wi in work_items_map.values()
+                        if (decl.work_id and wi.external_id == decl.work_id) or (decl.work_id and wi.id == decl.work_id)
+                    ]
 
-                    if matched_item:
-                        author_sid = ev.session_id
-                        coord_sid = matched_item.coordinator_actor_id
+                    if len(matched_items) == 1:
+                        matched_item = matched_items[0]
+                        is_coordinator = author == matched_item.coordinator_actor_id
                         # Only coordinator can resolve, and only after intake!
-                        if (author_sid == coord_sid or author_sid == root_id) and matched_item.phase == "intaken":
+                        if is_coordinator and matched_item.phase == "intaken":
                             matched_item.phase = "resolved"
                             matched_item.last_observed_at = ts
                             matched_item.basis.extend(ev.evidence)
+                        elif not is_coordinator:
+                            unbound_events.append(_mark_unbound(ev, f"author_not_dispatching_coordinator: author '{author}' != coordinator '{matched_item.coordinator_actor_id}'"))
                         else:
-                            unbound_events.append(ev)
+                            unbound_events.append(_mark_unbound(ev, f"invalid_phase_for_resolve: work phase is '{matched_item.phase}', expected 'intaken'"))
+                    elif len(matched_items) > 1:
+                        unbound_events.append(_mark_unbound(ev, f"ambiguous_duplicate_work_id: '{decl.work_id}' matches {len(matched_items)} items"))
                     else:
-                        unbound_events.append(ev)
+                        unbound_events.append(_mark_unbound(ev, f"work_item_not_found: '{decl.work_id}'"))
 
     # Freeze actors
     frozen_actors = tuple(
@@ -650,7 +682,7 @@ def explain_projection(
     projection: WorkflowProjection,
     projection_id: str,
 ) -> dict[str, Any] | None:
-    """Explain a projection item (work item, actor, obligation, or incident) with full evidence trail."""
+    """Explain a projection item (work item, actor, obligation, incident, or relation) with full evidence trail."""
     target_id = projection_id.strip()
 
     # 1. Check work items
@@ -699,7 +731,20 @@ def explain_projection(
                 "evidence": [b.to_dict() for b in inc.basis],
             }
 
-    # 4. Check actors
+    # 4. Check relations
+    for r in projection.relations:
+        if r.id == target_id or target_id in (r.id, f"{r.source_actor_id}:{r.target_actor_id}"):
+            return {
+                "type": "relation",
+                "id": r.id,
+                "kind": r.kind,
+                "source": r.source_actor_id,
+                "target": r.target_actor_id,
+                "declared": r.declared,
+                "evidence": [b.to_dict() for b in r.basis],
+            }
+
+    # 5. Check actors
     for a in projection.actors:
         if a.id == target_id or a.name.lower() == target_id.lower():
             return {
@@ -715,10 +760,6 @@ def explain_projection(
 
     return None
 
-
-# --------------------------------------------------------------------------
-# Pure Render Helpers (Task 6)
-# --------------------------------------------------------------------------
 
 def _format_age(dt: datetime, now_dt: datetime) -> str:
     sec = max(0.0, (now_dt - dt).total_seconds())
@@ -745,7 +786,6 @@ def render_position_table(
     if not projection.work_items:
         return ["  (no workflow assignments observed)"]
 
-    # Header
     hdr = f"{'DIRECTION':<10} {'WORK':<16} {'ACTOR/ROLE':<16} {'RUNTIME':<9} {'PHASE':<10} {'NEXT OBLIGATION':<26} {'AGE':>5}"
     lines = [tui.truncate(hdr, width)]
 
@@ -759,7 +799,6 @@ def render_position_table(
         rt_str = w.runtime_state
         phase_str = w.phase
 
-        # Next obligation
         next_str = "—"
         if w.obligations:
             top_obl = w.obligations[0]
@@ -775,7 +814,6 @@ def render_position_table(
         row = f"{dir_str:<10} {work_str:<16} {actor_str:<16} {rt_str:<9} {phase_str:<10} {next_str:<26} {age_str:>5}"
         lines.append(tui.truncate(row, width))
 
-        # Stopped without return annotation
         if w.runtime_state == "stopped" and not w.return_observed and w.phase in ("dispatched", "active"):
             sub_note = " " * 44 + "↳ return not observed"
             lines.append(tui.truncate(sub_note, width))
@@ -805,7 +843,6 @@ def render_obligations(
         else:
             owes = f"return to {o.counterparty_label}"
         work_label = o.work_id
-        # Try to resolve external_id if possible
         for wi in projection.work_items:
             if wi.id == o.work_id:
                 work_label = wi.display_label
@@ -826,53 +863,86 @@ def render_actor_view(
     *,
     width: int = 120,
     color: bool = False,
+    runtime_tree_only: bool = False,
+    declared_relations_only: bool = False,
 ) -> list[str]:
     """Render actors: declared workflow structure side-by-side with runtime topology."""
+    actors_by_id = {a.id: a for a in projection.actors}
+
+    # Build runtime tree lines
+    runtime_lines = ["RUNTIME TOPOLOGY", f"Root session ({projection.root_id[:8]})"]
+    children_map: dict[str, list[str]] = {}
+    for r in projection.relations:
+        if not r.declared and r.kind == "spawn_parent":
+            children_map.setdefault(r.source_actor_id, []).append(r.target_actor_id)
+
+    def walk_rt(actor_id: str, prefix: str) -> None:
+        cids = children_map.get(actor_id, [])
+        for idx, cid in enumerate(cids):
+            is_last = idx == len(cids) - 1
+            branch = "└─ " if is_last else "├─ "
+            child_prefix = prefix + ("   " if is_last else "│  ")
+            name = actors_by_id[cid].name if cid in actors_by_id else cid[:8]
+            runtime_lines.append(f"{prefix}{branch}{name}")
+            walk_rt(cid, child_prefix)
+
+    walk_rt(projection.root_id, "")
+
+    if runtime_tree_only:
+        return [tui.truncate(ln, width) for ln in runtime_lines]
+
     has_declarations = any(a.declared_role or a.declared_direction for a in projection.actors) or any(r.declared for r in projection.relations)
+    if not has_declarations and not declared_relations_only:
+        return [tui.truncate(ln, width) for ln in runtime_lines]
 
-    if not has_declarations:
-        # Show runtime topology only
-        lines = ["RUNTIME TOPOLOGY", f"Root session ({projection.root_id[:8]})"]
-        # Build children map
-        children_map: dict[str, list[str]] = {}
-        for r in projection.relations:
-            if not r.declared and r.kind == "spawn_parent":
-                children_map.setdefault(r.source_actor_id, []).append(r.target_actor_id)
-
-        actors_by_id = {a.id: a for a in projection.actors}
-
-        def walk(actor_id: str, prefix: str) -> None:
-            cids = children_map.get(actor_id, [])
-            for idx, cid in enumerate(cids):
-                is_last = idx == len(cids) - 1
-                branch = "└─ " if is_last else "├─ "
-                child_prefix = prefix + ("   " if is_last else "│  ")
-                name = actors_by_id[cid].name if cid in actors_by_id else cid[:8]
-                lines.append(f"{prefix}{branch}{name}")
-                walk(cid, child_prefix)
-
-        walk(projection.root_id, "")
-        return [tui.truncate(ln, width) for ln in lines]
-
-    # When declarations exist:
-    lines = [
-        f"{'DECLARED WORKFLOW':<40} {'RUNTIME TOPOLOGY':<40}",
-        f"{'Portfolio':<40} {'Root session (' + projection.root_id[:8] + ')':<40}",
-    ]
-
-    # Declared side
+    # Build declared workflow lines
+    declared_lines = ["DECLARED WORKFLOW", "Portfolio", "└─ Operational Root"]
     declared_by_dir: dict[str, list[ActorProjection]] = {}
     for a in projection.actors:
-        d = a.declared_direction or "Unspecified"
+        d = a.declared_direction or "Direct"
         declared_by_dir.setdefault(d, []).append(a)
 
-    for d, d_actors in declared_by_dir.items():
-        lines.append(f"└─ {d}")
-        for act in d_actors:
-            role_str = f" / {act.declared_role}" if act.declared_role else ""
-            lines.append(f"   ├─ {act.name}{role_str}")
+    peer_pairs = [
+        (r.source_actor_id, r.target_actor_id)
+        for r in projection.relations
+        if r.declared and r.kind == "peer"
+    ]
 
-    return [tui.truncate(ln, width) for ln in lines]
+    for d, d_actors in declared_by_dir.items():
+        declared_lines.append(f"   ├─ {d}")
+        for act in d_actors:
+            role_prefix = f"{act.declared_role} " if act.declared_role else ""
+            peer_partner = None
+            for s, t in peer_pairs:
+                if s == act.id:
+                    peer_partner = actors_by_id[t].name if t in actors_by_id else t[:8]
+                    break
+                elif t == act.id:
+                    peer_partner = actors_by_id[s].name if s in actors_by_id else s[:8]
+                    break
+            if peer_partner:
+                declared_lines.append(f"   │  ├─ {role_prefix}{act.name} ── peer ── {peer_partner}")
+            else:
+                declared_lines.append(f"   │  ├─ {role_prefix}{act.name}")
+
+    if declared_relations_only:
+        return [tui.truncate(ln, width) for ln in declared_lines]
+
+    # Side by side composition
+    half_w = max(30, int((width - 4) / 2))
+    max_h = max(len(declared_lines), len(runtime_lines))
+    while len(declared_lines) < max_h:
+        declared_lines.append("")
+    while len(runtime_lines) < max_h:
+        runtime_lines.append("")
+
+    combined = []
+    for dl, rl in zip(declared_lines, runtime_lines):
+        d_pad = dl.ljust(half_w)[:half_w]
+        r_pad = rl[:half_w]
+        combined.append(f"{d_pad}  {r_pad}")
+
+    return [tui.truncate(ln, width) for ln in combined]
 
 
 def render_observation_timeline(
@@ -882,13 +952,42 @@ def render_observation_timeline(
     width: int = 120,
     color: bool = False,
     include_content: bool = False,
+    work_filter: str | None = None,
+    actor_filter: str | None = None,
 ) -> list[str]:
-    """Render observation timeline."""
-    if not snapshot.events:
-        return ["  (no observed events)"]
+    """Render observation timeline with optional work/actor filters."""
+    events = list(snapshot.events)
 
-    lines: list[str] = [f"OBSERVATION TIMELINE ({len(snapshot.events)} events)"]
-    for ev in snapshot.events:
+    if actor_filter:
+        act_lower = actor_filter.lower()
+        events = [
+            e for e in events
+            if (e.actor_id and act_lower in e.actor_id.lower())
+            or (e.actor_name and act_lower in e.actor_name.lower())
+            or (e.author_actor_id and act_lower in e.author_actor_id.lower())
+        ]
+
+    if work_filter:
+        wf_lower = work_filter.lower()
+        matched_event_ids: set[str] = set()
+        for w in projection.work_items:
+            if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
+                for b in w.basis:
+                    matched_event_ids.add(b.source_id)
+
+        events = [
+            e for e in events
+            if e.id in matched_event_ids
+            or f"{e.session_id}" in matched_event_ids
+            or (e.attributes.get("declaration", {}).get("work_id") and wf_lower in str(e.attributes.get("declaration", {}).get("work_id")).lower())
+            or (wf_lower in e.summary.lower())
+        ]
+
+    if not events:
+        return ["  (no matching observed events)"]
+
+    lines: list[str] = [f"OBSERVATION TIMELINE ({len(events)} events)"]
+    for ev in events:
         ts_str = ev.observed_at.strftime("%H:%M:%S")
         kind_str = ev.kind
         summary = ev.summary

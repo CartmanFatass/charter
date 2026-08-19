@@ -29,17 +29,14 @@ def _resolve_session_root_id(
         root_id = subagent.find_root_session_id(session_id, max_days_back=days)
         if root_id:
             return root_id, False
-        # If explicitly passed ID is not found in rollouts, return it as root_id
         return session_id, False
 
-    # Try charter current session
     sid = session.current()
     if sid:
         root_id = subagent.find_root_session_id(sid, max_days_back=days)
         if root_id:
             return root_id, False
 
-    # Look up most recent rollout for target cwd
     recent = subagent.find_most_recent_rollout(max_days_back=days, target_cwd=target_cwd)
     if recent:
         matched_id = recent[1]
@@ -99,51 +96,57 @@ def cmd_observe_position(args) -> int:
             active_only=active_only,
         )
 
-    root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
-    if not root_id:
-        if as_json:
-            _emit_json("position", "", [])
+    try:
+        root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
+        if not root_id:
+            if as_json:
+                _emit_json("position", "", [])
+                return 0
+            util.info("No active or recent Codex session found.")
             return 0
-        util.info("No active or recent Codex session found.")
-        return 0
 
-    snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
-    projection = workflow_view.project_workflow(snapshot)
+        snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
+        projection = workflow_view.project_workflow(snapshot)
 
-    # Apply filters
-    work_items = list(projection.work_items)
-    if direction_filter:
-        work_items = [w for w in work_items if w.direction and w.direction.lower() == direction_filter.lower()]
-    if role_filter:
-        work_items = [w for w in work_items if w.actor_role and w.actor_role.lower() == role_filter.lower()]
-    if active_only:
-        work_items = [w for w in work_items if w.phase in ("dispatched", "active", "returned")]
+        work_items = list(projection.work_items)
+        if direction_filter:
+            work_items = [w for w in work_items if w.direction and w.direction.lower() == direction_filter.lower()]
+        if role_filter:
+            work_items = [w for w in work_items if w.actor_role and w.actor_role.lower() == role_filter.lower()]
+        if active_only:
+            work_items = [w for w in work_items if w.phase in ("dispatched", "active", "returned")]
 
-    filtered_projection = workflow_view.WorkflowProjection(
-        root_id=projection.root_id,
-        captured_at=projection.captured_at,
-        actors=projection.actors,
-        relations=projection.relations,
-        work_items=tuple(work_items),
-        open_obligations=projection.open_obligations,
-        incidents=projection.incidents,
-        unbound_events=projection.unbound_events,
-    )
-
-    if as_json:
-        _emit_json(
-            view="position",
-            root_id=root_id,
-            data=[w.to_dict() for w in filtered_projection.work_items],
-            warnings=snapshot.warnings,
-            captured_at=snapshot.captured_at.isoformat(),
+        filtered_projection = workflow_view.WorkflowProjection(
+            root_id=projection.root_id,
+            captured_at=projection.captured_at,
+            actors=projection.actors,
+            relations=projection.relations,
+            work_items=tuple(work_items),
+            open_obligations=projection.open_obligations,
+            incidents=projection.incidents,
+            unbound_events=projection.unbound_events,
         )
-        return 0
 
-    width = tui.term_width() if not plain else 120
-    lines = workflow_view.render_position_table(filtered_projection, width=width, color=not plain)
-    print("\n".join(lines))
-    return 0
+        if as_json:
+            _emit_json(
+                view="position",
+                root_id=root_id,
+                data=[w.to_dict() for w in filtered_projection.work_items],
+                warnings=snapshot.warnings,
+                captured_at=snapshot.captured_at.isoformat(),
+            )
+            return 0
+
+        width = tui.term_width() if not plain else 120
+        lines = workflow_view.render_position_table(filtered_projection, width=width, color=not plain)
+        print("\n".join(lines))
+        return 0
+    except Exception as exc:
+        if as_json:
+            _emit_json("position", session_id or "", [], warnings=[f"Observation error: {exc}"])
+            return 0
+        util.info(f"Observation temporarily unavailable: {exc}")
+        return 0
 
 
 def cmd_observe_obligations(args) -> int:
@@ -171,48 +174,55 @@ def cmd_observe_obligations(args) -> int:
             kind=kind_filter,
         )
 
-    root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
-    if not root_id:
-        if as_json:
-            _emit_json("obligations", "", [])
+    try:
+        root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
+        if not root_id:
+            if as_json:
+                _emit_json("obligations", "", [])
+                return 0
+            util.info("No active or recent Codex session found.")
             return 0
-        util.info("No active or recent Codex session found.")
-        return 0
 
-    snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
-    projection = workflow_view.project_workflow(snapshot)
+        snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
+        projection = workflow_view.project_workflow(snapshot)
 
-    obls = list(projection.open_obligations)
-    if owner_filter:
-        obls = [o for o in obls if owner_filter.lower() in o.owner_label.lower()]
-    if kind_filter:
-        obls = [o for o in obls if o.kind == kind_filter]
+        obls = list(projection.open_obligations)
+        if owner_filter:
+            obls = [o for o in obls if owner_filter.lower() in o.owner_label.lower()]
+        if kind_filter:
+            obls = [o for o in obls if o.kind == kind_filter]
 
-    filtered_projection = workflow_view.WorkflowProjection(
-        root_id=projection.root_id,
-        captured_at=projection.captured_at,
-        actors=projection.actors,
-        relations=projection.relations,
-        work_items=projection.work_items,
-        open_obligations=tuple(obls),
-        incidents=projection.incidents,
-        unbound_events=projection.unbound_events,
-    )
-
-    if as_json:
-        _emit_json(
-            view="obligations",
-            root_id=root_id,
-            data=[o.to_dict() for o in filtered_projection.open_obligations],
-            warnings=snapshot.warnings,
-            captured_at=snapshot.captured_at.isoformat(),
+        filtered_projection = workflow_view.WorkflowProjection(
+            root_id=projection.root_id,
+            captured_at=projection.captured_at,
+            actors=projection.actors,
+            relations=projection.relations,
+            work_items=projection.work_items,
+            open_obligations=tuple(obls),
+            incidents=projection.incidents,
+            unbound_events=projection.unbound_events,
         )
-        return 0
 
-    width = tui.term_width() if not plain else 120
-    lines = workflow_view.render_obligations(filtered_projection, width=width, color=not plain)
-    print("\n".join(lines))
-    return 0
+        if as_json:
+            _emit_json(
+                view="obligations",
+                root_id=root_id,
+                data=[o.to_dict() for o in filtered_projection.open_obligations],
+                warnings=snapshot.warnings,
+                captured_at=snapshot.captured_at.isoformat(),
+            )
+            return 0
+
+        width = tui.term_width() if not plain else 120
+        lines = workflow_view.render_obligations(filtered_projection, width=width, color=not plain)
+        print("\n".join(lines))
+        return 0
+    except Exception as exc:
+        if as_json:
+            _emit_json("obligations", session_id or "", [], warnings=[f"Observation error: {exc}"])
+            return 0
+        util.info(f"Observation temporarily unavailable: {exc}")
+        return 0
 
 
 def cmd_observe_actors(args) -> int:
@@ -224,6 +234,8 @@ def cmd_observe_actors(args) -> int:
     plain = getattr(args, "plain", False)
     watch_mode = getattr(args, "watch", False)
     interval = getattr(args, "interval", 10.0)
+    runtime_tree = getattr(args, "runtime_tree", False)
+    declared_relations = getattr(args, "declared_relations", False)
 
     if watch_mode:
         return watch_workflow_view(
@@ -233,36 +245,51 @@ def cmd_observe_actors(args) -> int:
             interval=interval,
             max_days_back=days,
             plain=plain,
+            runtime_tree=runtime_tree,
+            declared_relations=declared_relations,
         )
 
-    root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
-    if not root_id:
-        if as_json:
-            _emit_json("actors", "", {"actors": [], "relations": []})
+    try:
+        root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
+        if not root_id:
+            if as_json:
+                _emit_json("actors", "", {"actors": [], "relations": []})
+                return 0
+            util.info("No active or recent Codex session found.")
             return 0
-        util.info("No active or recent Codex session found.")
-        return 0
 
-    snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
-    projection = workflow_view.project_workflow(snapshot)
+        snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days)
+        projection = workflow_view.project_workflow(snapshot)
 
-    if as_json:
-        _emit_json(
-            view="actors",
-            root_id=root_id,
-            data={
-                "actors": [a.to_dict() for a in projection.actors],
-                "relations": [r.to_dict() for r in projection.relations],
-            },
-            warnings=snapshot.warnings,
-            captured_at=snapshot.captured_at.isoformat(),
+        if as_json:
+            _emit_json(
+                view="actors",
+                root_id=root_id,
+                data={
+                    "actors": [a.to_dict() for a in projection.actors],
+                    "relations": [r.to_dict() for r in projection.relations],
+                },
+                warnings=snapshot.warnings,
+                captured_at=snapshot.captured_at.isoformat(),
+            )
+            return 0
+
+        width = tui.term_width() if not plain else 120
+        lines = workflow_view.render_actor_view(
+            projection,
+            width=width,
+            color=not plain,
+            runtime_tree_only=runtime_tree,
+            declared_relations_only=declared_relations,
         )
+        print("\n".join(lines))
         return 0
-
-    width = tui.term_width() if not plain else 120
-    lines = workflow_view.render_actor_view(projection, width=width, color=not plain)
-    print("\n".join(lines))
-    return 0
+    except Exception as exc:
+        if as_json:
+            _emit_json("actors", session_id or "", {"actors": [], "relations": []}, warnings=[f"Observation error: {exc}"])
+            return 0
+        util.info(f"Observation temporarily unavailable: {exc}")
+        return 0
 
 
 def cmd_observe_timeline(args) -> int:
@@ -294,66 +321,82 @@ def cmd_observe_timeline(args) -> int:
             include_content=include_content,
         )
 
-    root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
-    if not root_id:
-        if as_json:
-            _emit_json("timeline", "", [])
+    try:
+        root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
+        if not root_id:
+            if as_json:
+                _emit_json("timeline", "", [])
+                return 0
+            util.info("No active or recent Codex session found.")
             return 0
-        util.info("No active or recent Codex session found.")
-        return 0
 
-    snapshot = observations.collect_observation_snapshot(
-        root_id,
-        max_days_back=days,
-        include_tool_calls=include_tool_calls,
-    )
-    projection = workflow_view.project_workflow(snapshot)
-
-    # Filter events if requested
-    filtered_events = list(snapshot.events)
-    if actor_filter:
-        filtered_events = [
-            e for e in filtered_events
-            if (e.actor_id and actor_filter.lower() in e.actor_id.lower())
-            or (e.actor_name and actor_filter.lower() in e.actor_name.lower())
-        ]
-
-    filtered_snapshot = observations.ObservationSnapshot(
-        root_id=snapshot.root_id,
-        captured_at=snapshot.captured_at,
-        sessions=snapshot.sessions,
-        events=tuple(filtered_events),
-        warnings=snapshot.warnings,
-    )
-
-    if as_json:
-        # Respect safe-by-default content behavior
-        raw_events = []
-        for e in filtered_snapshot.events:
-            ed = e.to_dict()
-            if not include_content and "attributes" in ed and "content" in ed["attributes"]:
-                ed["attributes"]["content"] = "[elided; pass --include-content to view]"
-            raw_events.append(ed)
-
-        _emit_json(
-            view="timeline",
-            root_id=root_id,
-            data=raw_events,
-            warnings=snapshot.warnings,
-            captured_at=snapshot.captured_at.isoformat(),
+        snapshot = observations.collect_observation_snapshot(
+            root_id,
+            max_days_back=days,
+            include_tool_calls=include_tool_calls,
         )
-        return 0
+        projection = workflow_view.project_workflow(snapshot)
 
-    width = tui.term_width() if not plain else 120
-    lines = workflow_view.render_observation_timeline(
-        filtered_snapshot,
-        projection,
-        width=width,
-        color=not plain,
-        include_content=include_content,
-    )
-    print("\n".join(lines))
-    return 0
+        if as_json:
+            # Respect safe-by-default content behavior and filters
+            filtered_events = list(snapshot.events)
+            if actor_filter:
+                act_lower = actor_filter.lower()
+                filtered_events = [
+                    e for e in filtered_events
+                    if (e.actor_id and act_lower in e.actor_id.lower())
+                    or (e.actor_name and act_lower in e.actor_name.lower())
+                    or (e.author_actor_id and act_lower in e.author_actor_id.lower())
+                ]
+            if work_filter:
+                wf_lower = work_filter.lower()
+                matched_event_ids: set[str] = set()
+                for w in projection.work_items:
+                    if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
+                        for b in w.basis:
+                            matched_event_ids.add(b.source_id)
+                filtered_events = [
+                    e for e in filtered_events
+                    if e.id in matched_event_ids
+                    or f"{e.session_id}" in matched_event_ids
+                    or (e.attributes.get("declaration", {}).get("work_id") and wf_lower in str(e.attributes.get("declaration", {}).get("work_id")).lower())
+                    or (wf_lower in e.summary.lower())
+                ]
+
+            raw_events = []
+            for e in filtered_events:
+                ed = e.to_dict()
+                if not include_content and "attributes" in ed and "content" in ed["attributes"]:
+                    ed["attributes"]["content"] = "[elided; pass --include-content to view]"
+                raw_events.append(ed)
+
+            _emit_json(
+                view="timeline",
+                root_id=root_id,
+                data=raw_events,
+                warnings=snapshot.warnings,
+                captured_at=snapshot.captured_at.isoformat(),
+            )
+            return 0
+
+        width = tui.term_width() if not plain else 120
+        lines = workflow_view.render_observation_timeline(
+            snapshot,
+            projection,
+            width=width,
+            color=not plain,
+            include_content=include_content,
+            work_filter=work_filter,
+            actor_filter=actor_filter,
+        )
+        print("\n".join(lines))
+        return 0
+    except Exception as exc:
+        if as_json:
+            _emit_json("timeline", session_id or "", [], warnings=[f"Observation error: {exc}"])
+            return 0
+        util.info(f"Observation temporarily unavailable: {exc}")
+        return 0
 
 
 def cmd_observe_explain(args) -> int:
@@ -372,53 +415,59 @@ def cmd_observe_explain(args) -> int:
         util.fail("No projection ID supplied to explain.")
         return 1
 
-    root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
-    if not root_id:
-        if as_json:
-            _emit_json("explain", "", None, warnings=["No active or recent session found"])
+    try:
+        root_id, not_found = _resolve_session_root_id(session_id=session_id, cwd=cwd, days=days)
+        if not root_id:
+            if as_json:
+                _emit_json("explain", "", None, warnings=["No active or recent session found"])
+                return 1
+            util.fail("No active or recent session found.")
             return 1
-        util.fail("No active or recent session found.")
-        return 1
 
-    snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days, include_tool_calls=True)
-    projection = workflow_view.project_workflow(snapshot)
+        snapshot = observations.collect_observation_snapshot(root_id, max_days_back=days, include_tool_calls=True)
+        projection = workflow_view.project_workflow(snapshot)
 
-    explanation = workflow_view.explain_projection(projection, target_id)
-    if not explanation:
-        if as_json:
-            _emit_json("explain", root_id, None, warnings=[f"Item '{target_id}' not found in workflow projection"])
+        explanation = workflow_view.explain_projection(projection, target_id)
+        if not explanation:
+            if as_json:
+                _emit_json("explain", root_id, None, warnings=[f"Item '{target_id}' not found in workflow projection"])
+                return 1
+            util.fail(f"Item '{target_id}' not found in workflow projection for session {root_id[:8]}.")
             return 1
-        util.fail(f"Item '{target_id}' not found in workflow projection for session {root_id[:8]}.")
-        return 1
 
-    if as_json:
-        _emit_json(
-            view="explain",
-            root_id=root_id,
-            data=explanation,
-            warnings=snapshot.warnings,
-            captured_at=snapshot.captured_at.isoformat(),
-        )
+        if as_json:
+            _emit_json(
+                view="explain",
+                root_id=root_id,
+                data=explanation,
+                warnings=snapshot.warnings,
+                captured_at=snapshot.captured_at.isoformat(),
+            )
+            return 0
+
+        print(f"EXPLANATION: {explanation.get('type', 'item').upper()} '{target_id}'")
+        print(f"  Root Session: {root_id}")
+        for k, v in explanation.items():
+            if k in ("evidence", "type"):
+                continue
+            if v is not None:
+                print(f"  {k:<16}: {v}")
+
+        ev_list = explanation.get("evidence", [])
+        if ev_list:
+            print(f"\n  EVIDENCE BASIS ({len(ev_list)} references):")
+            for ev in ev_list:
+                cls_badge = f"[{ev.get('evidence_class', 'mechanical').upper()[:4]}]"
+                loc = f"{ev.get('file_path') or 'state'}:{ev.get('line_number') or '-'}"
+                print(f"    • {cls_badge} {ev.get('source', '')} / {ev.get('raw_kind', '')} at {loc} ({ev.get('observed_at', '')})")
+
         return 0
-
-    # Text rendering of explanation
-    print(f"EXPLANATION: {explanation.get('type', 'item').upper()} '{target_id}'")
-    print(f"  Root Session: {root_id}")
-    for k, v in explanation.items():
-        if k in ("evidence", "type"):
-            continue
-        if v is not None:
-            print(f"  {k:<16}: {v}")
-
-    ev_list = explanation.get("evidence", [])
-    if ev_list:
-        print(f"\n  EVIDENCE BASIS ({len(ev_list)} references):")
-        for ev in ev_list:
-            cls_badge = f"[{ev.get('evidence_class', 'mechanical').upper()[:4]}]"
-            loc = f"{ev.get('file_path') or 'state'}:{ev.get('line_number') or '-'}"
-            print(f"    • {cls_badge} {ev.get('source', '')} / {ev.get('raw_kind', '')} at {loc} ({ev.get('observed_at', '')})")
-
-    return 0
+    except Exception as exc:
+        if as_json:
+            _emit_json("explain", session_id or "", None, warnings=[f"Observation error: {exc}"])
+            return 1
+        util.fail(f"Observation error: {exc}")
+        return 1
 
 
 def watch_workflow_view(
@@ -438,6 +487,8 @@ def watch_workflow_view(
     actor: str | None = None,
     tool_calls: bool = False,
     include_content: bool = False,
+    runtime_tree: bool = False,
+    declared_relations: bool = False,
 ) -> int:
     """Watch workflow view, re-rendering only when source data changes or on heartbeat."""
     from . import trace, inflight
@@ -446,7 +497,6 @@ def watch_workflow_view(
     s_dir = subagent.get_sessions_dir()
     watcher = subagent.SubagentEventWatcher(sessions_dir=s_dir, max_days_back=max_days_back)
 
-    # Add trace and inflight extra paths to event watcher
     try:
         inflight_dir = inflight._dir()
         if inflight_dir.exists():
@@ -464,7 +514,6 @@ def watch_workflow_view(
     last_snapshot: observations.ObservationSnapshot | None = None
 
     try:
-        # Hide cursor
         if not plain:
             sys.stdout.write("\033[?25l")
             sys.stdout.flush()
@@ -525,7 +574,13 @@ def watch_workflow_view(
                     )
                     lines = workflow_view.render_obligations(sub_proj, width=width, color=not plain)
                 elif view == "actors":
-                    lines = workflow_view.render_actor_view(last_projection, width=width, color=not plain)
+                    lines = workflow_view.render_actor_view(
+                        last_projection,
+                        width=width,
+                        color=not plain,
+                        runtime_tree_only=runtime_tree,
+                        declared_relations_only=declared_relations,
+                    )
                 elif view == "timeline":
                     lines = workflow_view.render_observation_timeline(
                         last_snapshot,
@@ -533,6 +588,8 @@ def watch_workflow_view(
                         width=width,
                         color=not plain,
                         include_content=include_content,
+                        work_filter=work,
+                        actor_filter=actor,
                     )
                 else:
                     lines = ["(unknown view)"]

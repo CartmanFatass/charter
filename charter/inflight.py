@@ -41,8 +41,8 @@ def _safe_name(agent: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in agent)[:64]
 
 
-def live(exclude_token: str | None = None) -> list[str]:
-    """Agent names currently in flight, stale entries pruned.
+def live(exclude_token: str | None = None, *, prune: bool = True) -> list[str]:
+    """Agent names currently in flight, stale entries optionally pruned.
 
     ``exclude_token`` drops one specific record — the caller's own, so a dispatch
     never reports itself as a concurrent peer.
@@ -53,8 +53,10 @@ def live(exclude_token: str | None = None) -> list[str]:
     out, now = [], time.time()
     for p in d.glob("*.json"):
         try:
-            if now - p.stat().st_mtime > TTL_SECONDS:
-                p.unlink(missing_ok=True)      # dead: killed process, or no PostToolUse
+            st = p.stat()
+            if now - st.st_mtime > TTL_SECONDS:
+                if prune:
+                    p.unlink(missing_ok=True)
                 continue
             if exclude_token and p.stem == exclude_token:
                 continue
@@ -65,12 +67,16 @@ def live(exclude_token: str | None = None) -> list[str]:
     return sorted(out)
 
 
-def live_records(
+def read_records(
     exclude_token: str | None = None,
     *,
     session_id: str | None = None,
+    prune: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return structured records of agent dispatches currently in flight."""
+    """Return structured records of agent dispatches currently in flight.
+
+    prune: False by default (strictly read-only). Only Hook/maintenance paths pass prune=True.
+    """
     d = _dir()
     if not d.exists():
         return []
@@ -79,11 +85,15 @@ def live_records(
     for p in d.glob("*.json"):
         try:
             st = p.stat()
-            if now - st.st_mtime > TTL_SECONDS:
-                p.unlink(missing_ok=True)
+            is_stale = (now - st.st_mtime) > TTL_SECONDS
+            if is_stale:
+                if prune:
+                    p.unlink(missing_ok=True)
                 continue
+
             if exclude_token and p.stem == exclude_token:
                 continue
+
             data = json.loads(p.read_text(encoding="utf-8"))
             agent_name = data.get("agent") or p.stem.split(".")[0]
             start_ts = data.get("ts") or st.st_mtime
@@ -93,7 +103,7 @@ def live_records(
             rec_schema = data.get("schema", 1)
 
             if session_id is not None:
-                if rec_session_id is not None and rec_session_id != session_id:
+                if rec_session_id != session_id:
                     continue
 
             out.append({
@@ -108,6 +118,32 @@ def live_records(
         except (OSError, ValueError):
             continue
     return sorted(out, key=lambda r: r["ts"])
+
+
+def live_records(
+    exclude_token: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Strictly read-only query of live records without modifying disk."""
+    return read_records(exclude_token=exclude_token, session_id=session_id, prune=False)
+
+
+def prune_stale_records() -> int:
+    """Explicitly prune stale inflight records exceeding TTL (maintenance/Hook path only)."""
+    d = _dir()
+    if not d.exists():
+        return 0
+    pruned = 0
+    now = time.time()
+    for p in d.glob("*.json"):
+        try:
+            if (now - p.stat().st_mtime) > TTL_SECONDS:
+                p.unlink(missing_ok=True)
+                pruned += 1
+        except OSError:
+            pass
+    return pruned
 
 
 def start(

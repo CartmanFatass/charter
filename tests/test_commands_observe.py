@@ -30,6 +30,19 @@ class TestObserveCLI(unittest.TestCase):
         args = parser.parse_args(["observe"])
         self.assertEqual(args.func.__name__, "cmd_observe_position")
 
+    def test_top_level_command_set_integrity(self):
+        parser = cli.build_parser()
+        subparser_action = next(a for a in parser._actions if isinstance(a, cli.argparse._SubParsersAction))
+        choices = set(subparser_action.choices.keys())
+        expected = {
+            "init", "doctor", "reinit", "discover", "clone", "sync", "status",
+            "browser", "docs", "save", "recall", "git-policy", "statusline",
+            "guard", "hook", "trace", "harness", "workspace", "worktree",
+            "subagent", "observe", "vault", "secret", "persona", "report"
+        }
+        for cmd in expected:
+            self.assertIn(cmd, choices, f"Expected top-level CLI command '{cmd}' missing from parser")
+
     def test_observe_position_json_schema(self):
         root = "root-obs-cli-01"
         child = "child-obs-cli-01"

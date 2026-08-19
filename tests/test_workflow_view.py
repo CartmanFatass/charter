@@ -357,6 +357,292 @@ class TestWorkflowProjectionReducer(unittest.TestCase):
         self.assertTrue(peer_rels[0].declared)
         self.assertEqual(peer_rels[0].source_actor_id, gauss)
         self.assertEqual(peer_rels[0].target_actor_id, curie)
+    def test_root_cannot_bypass_nested_coordinator_intake_authority(self):
+        root = "root-multi-tier"
+        coord = "coord-tier-a"
+        worker = "worker-tier-b"
+
+        # 1. Root spawns Coordinator
+        spawn_coord = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": coord, "agent_nickname": "CoordA"}],
+                },
+            },
+        }
+        # 2. Coordinator spawns Worker for work NESTED-1
+        spawn_worker = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"NESTED-1\"}\n```\nExecute nested slice.",
+                    "receiver_agents": [{"thread_id": worker, "agent_nickname": "WorkerB"}],
+                },
+            },
+        }
+        # 3. Worker returns task_complete
+        ret_worker = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Nested work complete"},
+        }
+        # 4. Root attempts unauthorized intake
+        root_unauth_intake = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"NESTED-1\"}\n```\nRoot attempts bypass intake.",
+            },
+        }
+        # 5. Coordinator performs authorized intake
+        coord_auth_intake = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:07:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"NESTED-1\"}\n```\nCoordA intakes work.",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_coord, root_unauth_intake])
+        write_test_rollout(self.sessions_dir, coord, parent_id=root, nickname="CoordA", timestamp="2026-08-19T10:00:10Z", collab_events=[spawn_worker])
+        write_test_rollout(self.sessions_dir, worker, parent_id=coord, nickname="WorkerB", timestamp="2026-08-19T10:01:05Z", collab_events=[ret_worker, coord_auth_intake])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Find NESTED-1 work item
+        nested_wi = next(w for w in proj.work_items if w.external_id == "NESTED-1")
+        self.assertEqual(nested_wi.coordinator_actor_id, coord)
+        # Proves root's attempt was rejected (in unbound_events) and only coord's intake was accepted
+        self.assertEqual(nested_wi.phase, "intaken")
+        unbound_reasons = [e.attributes.get("unbound_reason", "") for e in proj.unbound_events]
+        self.assertTrue(any("author_not_dispatching_coordinator" in r for r in unbound_reasons))
+
+    def test_intake_before_return_rejected(self):
+        root = "root-intake-early"
+        child = "child-ie-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"EARLY-1\"}\n```\nExecute slice.",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "WorkerEarly"}],
+                },
+            },
+        }
+        intake_early = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:02:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"EARLY-1\"}\n```\nEarly intake before task_complete.",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev, intake_early])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="WorkerEarly", timestamp="2026-08-19T10:00:10Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        wi = proj.work_items[0]
+        # Intake must be rejected because phase is dispatched/active (not returned)
+        self.assertIn(wi.phase, ("dispatched", "active"))
+        self.assertNotEqual(wi.phase, "intaken")
+        unbound_reasons = [e.attributes.get("unbound_reason", "") for e in proj.unbound_events]
+        self.assertTrue(any("invalid_phase_for_intake" in r for r in unbound_reasons))
+
+    def test_reports_to_and_owner_relations_and_explain(self):
+        root = "root-rel-test"
+        lead = "lead-agent-01"
+        dev = "dev-agent-02"
+
+        spawn_lead = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": lead, "agent_nickname": "Lead"}],
+                },
+            },
+        }
+        spawn_dev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": dev, "agent_nickname": "Dev"}],
+                },
+            },
+        }
+        rel_reports = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": f"```charter-observe\n{{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"{dev}\",\"relation\":\"reports_to\",\"related_actor_id\":\"{lead}\"}}\n```",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_lead, spawn_dev, rel_reports])
+        write_test_rollout(self.sessions_dir, lead, parent_id=root, nickname="Lead", timestamp="2026-08-19T10:00:15Z")
+        write_test_rollout(self.sessions_dir, dev, parent_id=root, nickname="Dev", timestamp="2026-08-19T10:00:20Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        reports_rels = [r for r in proj.relations if r.kind == "reports_to"]
+        self.assertEqual(len(reports_rels), 1)
+        rel = reports_rels[0]
+        self.assertEqual(rel.source_actor_id, dev)
+        self.assertEqual(rel.target_actor_id, lead)
+
+        # Explain relation
+        exp = workflow_view.explain_projection(proj, rel.id)
+        self.assertIsNotNone(exp)
+        self.assertEqual(exp["type"], "relation")
+        self.assertEqual(exp["kind"], "reports_to")
+        self.assertEqual(exp["source"], dev)
+        self.assertEqual(exp["target"], lead)
+
+    def test_actor_view_side_by_side_and_flags(self):
+        root = "root-actor-view"
+        gauss = "child-gauss-act"
+        curie = "child-curie-act"
+
+        spawn_gauss = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"W-G\",\"direction\":\"SCDMP\",\"actor_role\":\"EM\"}\n```",
+                    "receiver_agents": [{"thread_id": gauss, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_curie = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"W-C\",\"direction\":\"SCDMP\",\"actor_role\":\"CM\"}\n```",
+                    "receiver_agents": [{"thread_id": curie, "agent_nickname": "Curie"}],
+                },
+            },
+        }
+        peer_decl = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": f"```charter-observe\n{{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"{gauss}\",\"relation\":\"peer\",\"related_actor_id\":\"{curie}\"}}\n```",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_gauss, spawn_curie, peer_decl])
+        write_test_rollout(self.sessions_dir, gauss, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:15Z")
+        write_test_rollout(self.sessions_dir, curie, parent_id=root, nickname="Curie", timestamp="2026-08-19T10:00:20Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # 1. Side by side (default)
+        lines_sbs = workflow_view.render_actor_view(proj, width=120)
+        text_sbs = "\n".join(lines_sbs)
+        self.assertIn("DECLARED WORKFLOW", text_sbs)
+        self.assertIn("RUNTIME TOPOLOGY", text_sbs)
+        self.assertIn("Gauss ── peer ── Curie", text_sbs)
+
+        # 2. Runtime tree only
+        lines_rt = workflow_view.render_actor_view(proj, width=120, runtime_tree_only=True)
+        text_rt = "\n".join(lines_rt)
+        self.assertNotIn("DECLARED WORKFLOW", text_rt)
+        self.assertIn("RUNTIME TOPOLOGY", text_rt)
+
+        # 3. Declared relations only
+        lines_decl = workflow_view.render_actor_view(proj, width=120, declared_relations_only=True)
+        text_decl = "\n".join(lines_decl)
+        self.assertIn("DECLARED WORKFLOW", text_decl)
+        self.assertNotIn("RUNTIME TOPOLOGY", text_decl)
+
+    def test_timeline_work_and_actor_filtering(self):
+        root = "root-timeline-filter"
+        child1 = "child-tl-gauss"
+        child2 = "child-tl-euler"
+
+        spawn_g = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-G\"}\n```",
+                    "receiver_agents": [{"thread_id": child1, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_e = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-E\"}\n```",
+                    "receiver_agents": [{"thread_id": child2, "agent_nickname": "Euler"}],
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_g, spawn_e])
+        write_test_rollout(self.sessions_dir, child1, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:15Z")
+        write_test_rollout(self.sessions_dir, child2, parent_id=root, nickname="Euler", timestamp="2026-08-19T10:00:20Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Filter by work WORK-G
+        lines_g = workflow_view.render_observation_timeline(snap, proj, width=120, work_filter="WORK-G")
+        text_g = "\n".join(lines_g)
+        self.assertIn("Gauss", text_g)
+        self.assertNotIn("Euler", text_g)
+
+        # Filter by actor Euler
+        lines_e = workflow_view.render_observation_timeline(snap, proj, width=120, actor_filter="Euler")
+        text_e = "\n".join(lines_e)
+        self.assertIn("Euler", text_e)
+        self.assertNotIn("Gauss", text_e)
 
 
 class TestWorkflowRenderersAndExplain(unittest.TestCase):
