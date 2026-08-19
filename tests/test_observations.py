@@ -341,13 +341,12 @@ class TestObservationSnapshotCollection(unittest.TestCase):
         write_test_rollout(self.sessions_dir, root, parent_id=None, timestamp="2026-08-19T10:00:00Z", collab_events=events)
         snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
 
-        for i in range(len(snap.events) - 1):
-            e1 = snap.events[i]
-            e2 = snap.events[i + 1]
-            self.assertTrue(
-                (e1.observed_at < e2.observed_at) or (e1.observed_at == e2.observed_at and e1.id <= e2.id)
-            )
-
+        # In single source stream, intra-source sequence is strictly preserved (line 1 before line 2)
+        msg_events = [e for e in snap.events if e.kind == "message_sent"]
+        self.assertEqual(len(msg_events), 2)
+        self.assertEqual(msg_events[0].attributes.get("content"), "Later msg")
+        self.assertEqual(msg_events[1].attributes.get("content"), "Earlier msg")
+        self.assertLess(msg_events[0].ordinal, msg_events[1].ordinal)
     def test_source_path_and_line_number_survive_in_evidence(self):
         from charter import observations
 
@@ -884,5 +883,113 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
         self.assertEqual(len(proj.unbound_events), 1)
         self.assertIn("invalid_phase_for_resolve", proj.unbound_events[0].attributes.get("unbound_reason", ""))
 
+    def test_distinct_relation_actor_ids_not_deduplicated(self):
+        from charter import observations, workflow_view
+        root = "root-multi-rel"
+        ts = "2026-08-19T10:00:00Z"
+        rel_a = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"EM-A\",\"relation\":\"reports_to\",\"related_actor_id\":\"ROOT\"}\n```",
+            },
+        }
+        rel_b = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"CM-B\",\"relation\":\"reports_to\",\"related_actor_id\":\"ROOT\"}\n```",
+            },
+        }
+        tmp = Path(tempfile.mkdtemp(prefix="test-multi-rel-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[rel_a, rel_b])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        decl_events = [e for e in snap.events if e.kind == "workflow_declared"]
+        # Two distinct relations with different actor_ids must produce 2 distinct events!
+        self.assertEqual(len(decl_events), 2)
+        proj = workflow_view.project_workflow(snap)
+        self.assertEqual(len(proj.relations), 2)
+        rel_sources = {r.source_actor_id for r in proj.relations}
+        self.assertEqual(rel_sources, {"EM-A", "CM-B"})
+
+    def test_causal_topological_sort_prior_resolve_and_new_dispatch(self):
+        from charter import observations, workflow_view
+        root = "root-coord-sort"
+        child1 = "child-old"
+        child2 = "child-new"
+        ts = "2026-08-19T10:00:00Z"
+
+        # Coordinator resolves OLD-WORK, then dispatches NEW-WORK to child2 at same second
+        resolve_old = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"WORK-OLD\"}\n```",
+            },
+        }
+        spawn_new = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-NEW\",\"title\":\"New Task\"}\n```",
+                    "receiver_agents": [{"thread_id": child2, "agent_nickname": "Euler"}],
+                },
+            },
+        }
+        tmp = Path(tempfile.mkdtemp(prefix="test-toposort-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[resolve_old, spawn_new])
+        write_test_rollout(sdir, child2, parent_id=root, nickname="Euler", timestamp=ts)
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Verify event order: dispatch_sent for child2 must precede Euler's actor_started
+        disp_idx = next(i for i, e in enumerate(snap.events) if e.kind == "dispatch_sent" and e.actor_id == child2)
+        start_idx = next(i for i, e in enumerate(snap.events) if e.kind == "actor_started" and e.session_id == child2)
+        self.assertLess(disp_idx, start_idx, "dispatch_sent must causally precede child actor_started")
+
+        # Verify WORK-NEW is active/running (not stuck in dispatched)
+        new_w = next(w for w in proj.work_items if w.external_id == "WORK-NEW")
+        self.assertEqual(new_w.phase, "active")
+        self.assertEqual(new_w.runtime_state, "running")
+
+    def test_inflight_event_id_immutability_on_record_removal(self):
+        from charter import inflight, observations, config
+        tmp = Path(tempfile.mkdtemp(prefix="test-inflight-immut-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        orig_state = config.STATE_DIR
+        config.STATE_DIR = tmp
+        self.addCleanup(setattr, config, "STATE_DIR", orig_state)
+
+        # Create 2 inflight records
+        tok_a = inflight.start("AgentAlpha", session_id="sess-immut-1", agent_id="alpha-1")
+        tok_b = inflight.start("AgentBeta", session_id="sess-immut-1", agent_id="beta-1")
+
+        # Snapshot 1
+        snap1 = observations.collect_observation_snapshot("sess-immut-1", sessions_dir=tmp / "sessions")
+        ev_beta_1 = next(e for e in snap1.events if e.actor_name == "AgentBeta")
+
+        # Remove Record A (AgentAlpha finishes)
+        inflight.finish("AgentAlpha", session_id="sess-immut-1", agent_id="alpha-1")
+
+        # Snapshot 2
+        snap2 = observations.collect_observation_snapshot("sess-immut-1", sessions_dir=tmp / "sessions")
+        ev_beta_2 = next(e for e in snap2.events if e.actor_name == "AgentBeta")
+
+        # Assert Event ID for Beta is 100% immutable and identical!
+        self.assertEqual(ev_beta_1.id, ev_beta_2.id, "Inflight event ID must remain immutable when other records are removed")
 if __name__ == "__main__":
     unittest.main()

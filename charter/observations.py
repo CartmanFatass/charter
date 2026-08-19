@@ -7,6 +7,7 @@ recording exact declarations and evidence references without making supervisor d
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import re
 from dataclasses import dataclass, field
@@ -71,6 +72,123 @@ def _event_priority(e: ObservedEvent) -> int:
             return 25
         return 25
     return _KIND_PRIORITY.get(e.kind, 50)
+
+def _topological_causal_sort(
+    events: list[ObservedEvent],
+    warnings: list[str],
+) -> list[ObservedEvent]:
+    """Perform deterministic topological causal sort preserving intra-source stream order."""
+    if not events:
+        return []
+
+    n = len(events)
+    in_degree: list[int] = [0] * n
+    adj: list[list[int]] = [[] for _ in range(n)]
+
+    # 1. Intra-source stream edges (strictly preserve file/stream order)
+    streams: dict[tuple[Any, ...], list[int]] = {}
+    for idx, ev in enumerate(events):
+        src = ev.evidence[0].source if ev.evidence else "unknown"
+        fpath = ev.evidence[0].file_path if ev.evidence else None
+        stream_key = (ev.session_id, src, fpath)
+        streams.setdefault(stream_key, []).append(idx)
+
+    for stream_indices in streams.values():
+        for i in range(len(stream_indices) - 1):
+            u = stream_indices[i]
+            v = stream_indices[i + 1]
+            adj[u].append(v)
+            in_degree[v] += 1
+
+    # 2. Cross-session causal dependencies:
+    # A) dispatch_sent in parent -> child session activity
+    dispatch_to_child: dict[str, int] = {}
+    for idx, ev in enumerate(events):
+        if ev.kind in ("dispatch_sent", "actor_spawned") and ev.actor_id:
+            if ev.actor_id not in dispatch_to_child:
+                dispatch_to_child[ev.actor_id] = idx
+
+    for child_sid, disp_idx in dispatch_to_child.items():
+        child_indices = [
+            i for i, ev in enumerate(events)
+            if ev.session_id == child_sid and i != disp_idx
+        ]
+        if child_indices:
+            child_first = child_indices[0]
+            if child_first != disp_idx and child_first not in adj[disp_idx]:
+                adj[disp_idx].append(child_first)
+                in_degree[child_first] += 1
+
+    # B) Child actor_returned -> Coordinator intake
+    child_returns: dict[str, list[int]] = {}
+    for idx, ev in enumerate(events):
+        if ev.kind == "actor_returned":
+            if ev.session_id:
+                child_returns.setdefault(ev.session_id, []).append(idx)
+            if ev.actor_id:
+                child_returns.setdefault(ev.actor_id, []).append(idx)
+
+    for idx, ev in enumerate(events):
+        if ev.kind == "workflow_declared":
+            decl_dict = ev.attributes.get("declaration")
+            if isinstance(decl_dict, dict) and decl_dict.get("event") == "intake":
+                w_id = decl_dict.get("work_id")
+                matched_returns: list[int] = []
+                if w_id:
+                    for d_ev_idx in range(len(events)):
+                        d_ev = events[d_ev_idx]
+                        if d_ev.kind == "dispatch_sent":
+                            d_decl = d_ev.attributes.get("declaration")
+                            if isinstance(d_decl, dict) and d_decl.get("work_id") == w_id:
+                                if d_ev.actor_id in child_returns:
+                                    matched_returns.extend(child_returns[d_ev.actor_id])
+                for ret_idx in matched_returns:
+                    if ret_idx != idx and idx not in adj[ret_idx]:
+                        if events[ret_idx].session_id != ev.session_id:
+                            adj[ret_idx].append(idx)
+                            in_degree[idx] += 1
+
+    # Min-heap priority queue: (observed_at, priority, ordinal, id, node_index)
+    heap: list[tuple[datetime, int, int, str, int]] = []
+    for idx in range(n):
+        if in_degree[idx] == 0:
+            ev = events[idx]
+            heapq.heappush(
+                heap,
+                (ev.observed_at, _event_priority(ev), ev.ordinal, ev.id, idx),
+            )
+
+    sorted_events: list[ObservedEvent] = []
+    visited = [False] * n
+
+    while heap:
+        _, _, _, _, u = heapq.heappop(heap)
+        if visited[u]:
+            continue
+        visited[u] = True
+        sorted_events.append(events[u])
+
+        for v in adj[u]:
+            in_degree[v] -= 1
+            if in_degree[v] == 0 and not visited[v]:
+                ev_v = events[v]
+                heapq.heappush(
+                    heap,
+                    (ev_v.observed_at, _event_priority(ev_v), ev_v.ordinal, ev_v.id, v),
+                )
+
+    if len(sorted_events) < n:
+        warnings.append("Causal ordering cycle detected; falling back to source ordinal for remaining events")
+        remaining = [
+            (events[i].observed_at, events[i].ordinal, events[i].id, i)
+            for i in range(n)
+            if not visited[i]
+        ]
+        remaining.sort()
+        for _, _, _, i in remaining:
+            sorted_events.append(events[i])
+
+    return sorted_events
 
 _MAX_DECLARATION_BLOCK_BYTES = 4096
 
@@ -620,7 +738,8 @@ def collect_observation_snapshot(
                                             d.schema,
                                             d.event,
                                             d.work_id,
-                                            rx_id or d.actor_id,
+                                            d.actor_id,
+                                            rx_id,
                                             d.relation,
                                             d.related_actor_id,
                                             d.title,
@@ -735,7 +854,8 @@ def collect_observation_snapshot(
                             d.schema,
                             d.event,
                             d.work_id,
-                            sid or d.actor_id,
+                            d.actor_id,
+                            sid,
                             d.relation,
                             d.related_actor_id,
                             d.title,
@@ -820,7 +940,8 @@ def collect_observation_snapshot(
                             d.schema,
                             d.event,
                             d.work_id,
-                            sid or d.actor_id,
+                            d.actor_id,
+                            sid,
                             d.relation,
                             d.related_actor_id,
                             d.title,
@@ -956,7 +1077,7 @@ def collect_observation_snapshot(
                     sid,
                     actor_id=irec.get("agent_id") or token,
                     discriminator=token,
-                    ordinal=irec_idx,
+                    ordinal=0,
                 )
                 events.append(ObservedEvent(
                     id=in_ev_id,
@@ -974,24 +1095,7 @@ def collect_observation_snapshot(
     except (OSError, ValueError) as exc:
         warnings.append(f"Failed to read inflight records: {exc}")
 
-    # Assign monotonic effective priority per session to preserve intra-source sequence
-    # while applying cross-session causal priorities (e.g. child return before parent intake).
-    session_eff_prio: dict[str, int] = {}
-    events_with_prio: list[tuple[ObservedEvent, int]] = []
-    for ev in events:
-        s_key = ev.session_id or ""
-        base_prio = _event_priority(ev)
-        prev_prio = session_eff_prio.get(s_key, 0)
-        curr_eff_prio = max(prev_prio, base_prio)
-        session_eff_prio[s_key] = curr_eff_prio
-        events_with_prio.append((ev, curr_eff_prio))
-
-    def event_sort_key(item: tuple[ObservedEvent, int]) -> tuple[datetime, int, str, int, str]:
-        ev, eff_prio = item
-        return (ev.observed_at, eff_prio, ev.session_id or "", ev.ordinal, ev.id)
-
-    events_with_prio.sort(key=event_sort_key)
-    events = [ev for ev, _ in events_with_prio]
+    events = _topological_causal_sort(events, warnings)
     return ObservationSnapshot(
         root_id=effective_root,
         captured_at=cap_time,

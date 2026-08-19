@@ -763,6 +763,7 @@ def build_subagent_tree(
     max_days_back: int = 3,
     now_ts: float | datetime | None = None,
     sessions_dir: Path | None = None,
+    index: SessionIndex | None = None,
 ) -> SubagentTree:
     """Build a multi-level subagent tree from rollout session_meta parent links.
 
@@ -782,14 +783,16 @@ def build_subagent_tree(
     known_map = {agent.id: agent for agent in (known_subagents or [])}
     links: dict[str, SessionLink] = {}
 
-    for file_path, _, _, modified_at in find_rollouts_in_days(max_days_back, sessions_dir=sessions_dir):
-        link = peek_session_link(file_path, modified_at=modified_at)
-        if not link:
-            continue
-        existing = links.get(link.id)
-        if not existing or link.modified_at > existing.modified_at:
-            links[link.id] = link
-
+    if index is not None:
+        links = dict(index.links)
+    else:
+        for file_path, _, _, modified_at in find_rollouts_in_days(max_days_back, sessions_dir=sessions_dir):
+            link = peek_session_link(file_path, modified_at=modified_at)
+            if not link:
+                continue
+            existing = links.get(link.id)
+            if not existing or link.modified_at > existing.modified_at:
+                links[link.id] = link
     children: dict[str, list[str]] = {}
     for link in links.values():
         if not link.parent_id:
@@ -1280,24 +1283,28 @@ def extract_subagent_exchanges(
     max_days_back: int = DEFAULT_LOOKBACK_DAYS,
     include_tool_calls: bool = False,
     sessions_dir: Path | None = None,
+    index: SessionIndex | None = None,
 ) -> list[SubagentExchange]:
     """Extract communication history between session and subagents, or among subagents."""
-    s_dir = sessions_dir or get_sessions_dir()
-    rollouts = find_rollouts_in_days(max_days_back, sessions_dir=s_dir)
-    if not rollouts:
-        return []
-
     links: dict[str, SessionLink] = {}
     rollout_files: dict[str, Path] = {}
-    for file_path, sid, _, mod_time in rollouts:
-        link = peek_session_link(file_path, modified_at=mod_time)
-        if link:
-            existing = links.get(link.id)
-            if not existing or link.modified_at > existing.modified_at:
-                links[link.id] = link
-                rollout_files[link.id] = file_path
 
-    # Determine relevant sessions
+    if index is not None:
+        links = dict(index.links)
+        rollout_files = dict(index.rollout_files)
+    else:
+        s_dir = sessions_dir or get_sessions_dir()
+        rollouts = find_rollouts_in_days(max_days_back, sessions_dir=s_dir)
+        if not rollouts:
+            return []
+
+        for file_path, sid, _, mod_time in rollouts:
+            link = peek_session_link(file_path, modified_at=mod_time)
+            if link:
+                existing = links.get(link.id)
+                if not existing or link.modified_at > existing.modified_at:
+                    links[link.id] = link
+                    rollout_files[link.id] = file_path
     relevant_ids: set[str] = set()
     if subagent_id:
         matched = [sid for sid, l in links.items() if sid == subagent_id or sid.startswith(subagent_id) or l.name.lower() == subagent_id.lower()]

@@ -466,12 +466,19 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             # Transition matching dispatched work item to active
             for wid in child_dispatches.get(target_actor, []):
                 wi = work_items_map[wid]
-                if wi.phase == "dispatched":
-                    wi.phase = "active"
+                if wi.phase in ("dispatched", "active"):
+                    if wi.phase == "dispatched":
+                        wi.phase = "active"
                     wi.runtime_state = "running"
                     wi.last_observed_at = ts
                     wi.basis.extend(ev.evidence)
-
+                    wi.basis.append(EvidenceRef(
+                        source=ev.evidence[0].source if ev.evidence else "rollout_event",
+                        source_id=ev.id,
+                        raw_kind=ev.kind,
+                        observed_at=ts,
+                        evidence_class="mechanical",
+                    ))
         elif ev.kind == "actor_stopped":
             target_actor = ev.actor_id or ev.session_id
             if target_actor in actors_map:
@@ -485,7 +492,13 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                     wi.return_observed = False
                     wi.last_observed_at = ts
                     wi.basis.extend(ev.evidence)
-
+                    wi.basis.append(EvidenceRef(
+                        source=ev.evidence[0].source if ev.evidence else "rollout_event",
+                        source_id=ev.id,
+                        raw_kind=ev.kind,
+                        observed_at=ts,
+                        evidence_class="mechanical",
+                    ))
         elif ev.kind == "actor_returned":
             target_child = ev.actor_id or ev.session_id
             if target_child in actors_map:
@@ -506,7 +519,13 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 wi.return_observed = True
                 wi.last_observed_at = ts
                 wi.basis.extend(ev.evidence)
-
+                wi.basis.append(EvidenceRef(
+                    source=ev.evidence[0].source if ev.evidence else "rollout_event",
+                    source_id=ev.id,
+                    raw_kind=ev.kind,
+                    observed_at=ts,
+                    evidence_class="mechanical",
+                ))
                 # Close return_expected obligation
                 wi.obligations = [o for o in wi.obligations if o.kind != "return_expected"]
 
@@ -1019,9 +1038,7 @@ def filter_timeline_events(
             or any(ref.source_id in matched_source_ids for ref in e.evidence)
             or (e.attributes.get("work_id") and str(e.attributes.get("work_id")).lower() in {x.lower() for x in matched_work_ids})
             or (isinstance(e.attributes.get("declaration"), dict) and str(e.attributes.get("declaration", {}).get("work_id", "")).lower() in {x.lower() for x in matched_work_ids})
-            or (e.session_id in matched_actor_ids and e.kind in ("actor_started", "actor_returned", "tool_started", "tool_finished"))
         ]
-
     return tuple(events)
 
 

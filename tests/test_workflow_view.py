@@ -926,5 +926,113 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
         self.assertFalse(any("WORK-AAA" in s or "Task A" in s for s in summaries_b))
         self.assertFalse(any("tool_a_execute" in s for s in summaries_b))
         self.assertFalse(any("Disk full" in s for s in summaries_b))
+    def test_work_timeline_multi_assignment_same_child_session_isolation(self):
+        """Verify that multiple sequential work items in the EXACT SAME child session are strictly isolated."""
+        from charter import observations, workflow_view
+        root = "root-same-sess-multi"
+        child = "child-single-worker"
+
+        # Coordinator dispatches WORK-111, child does work 1 and completes
+        # Coordinator then dispatches WORK-222, child does work 2 and completes
+        spawn_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-111\",\"title\":\"Task 1\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        tool_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "step_one_action"},
+            },
+        }
+        ret_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {"type": "task_complete", "summary": "Finished 1"},
+        }
+        spawn_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-222\",\"title\":\"Task 2\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        tool_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "step_two_action"},
+            },
+        }
+        ret_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:10Z",
+            "payload": {"type": "task_complete", "summary": "Finished 2"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_1, spawn_2])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:05Z", collab_events=[tool_1, ret_1, tool_2, ret_2])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.work_items), 2)
+
+        # Filter for WORK-111
+        tl_1 = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-111")
+        summaries_1 = [e.summary for e in tl_1]
+        self.assertTrue(any("WORK-111" in s or "Task 1" in s for s in summaries_1))
+        self.assertTrue(any("step_one_action" in s for s in summaries_1))
+        # Must have zero crosstalk from WORK-222!
+        self.assertFalse(any("WORK-222" in s or "Task 2" in s for s in summaries_1))
+        self.assertFalse(any("step_two_action" in s for s in summaries_1))
+
+        # Filter for WORK-222
+        tl_2 = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-222")
+        summaries_2 = [e.summary for e in tl_2]
+        self.assertTrue(any("WORK-222" in s or "Task 2" in s for s in summaries_2))
+        self.assertTrue(any("step_two_action" in s for s in summaries_2))
+        # Must have zero crosstalk from WORK-111!
+        self.assertFalse(any("WORK-111" in s or "Task 1" in s for s in summaries_2))
+        self.assertFalse(any("step_one_action" in s for s in summaries_2))
+
+    def test_statusline_fallback_zero_additional_rollout_scans(self):
+        """Verify that statusline fallback to subagents tree reuses snapshot and does zero additional rollout scans."""
+        from unittest.mock import patch
+        from charter import statusline, observations, workflow_view, subagent
+        root = "root-fallback-scan"
+        child = "child-fallback-worker"
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:05Z")
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Proj has 0 work items (plain prompt), so it falls back to subagents tree
+        self.assertEqual(len(proj.work_items), 0)
+
+        with patch("charter.subagent.find_rollouts_in_days") as mock_find:
+            sub_head, sub_lines = statusline._workflow_section(proj, tick=0, sid=root, effective_sid=root, snapshot=snap)
+            self.assertIsNotNone(sub_head)
+            self.assertTrue(any("Worker" in ln for ln in sub_lines))
+            # Must NOT call find_rollouts_in_days because snapshot was reused in-memory!
+            mock_find.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

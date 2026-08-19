@@ -1683,6 +1683,7 @@ def _workflow_section(
     tick: int = 0,
     sid: str | None = None,
     effective_sid: str | None = None,
+    snapshot: Any = None,
 ) -> tuple[str | None, list[str]]:
     """Gather workflow panel lines and header for dashboard integration.
 
@@ -1693,7 +1694,7 @@ def _workflow_section(
         from . import workflow_view
         work_items = getattr(projection, "work_items", ()) if projection else ()
         if not work_items:
-            return _subagent_section(sid, tick=tick, effective_sid=effective_sid)
+            return _subagent_section(sid, tick=tick, effective_sid=effective_sid, snapshot=snapshot)
 
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -1763,6 +1764,7 @@ def _subagent_section(
     sid: str | None = None,
     tick: int = 0,
     effective_sid: str | None = None,
+    snapshot: Any = None,
 ) -> tuple[str | None, list[str]]:
     """Gather subagent tree lines and header for the dashboard.
 
@@ -1779,6 +1781,97 @@ def _subagent_section(
                 if recent:
                     eff_sid = subagent.find_root_session_id(recent[1], max_days_back=1)
         effective_sid = eff_sid
+
+        # Reuse already collected snapshot in-memory if available
+        if snapshot is not None and getattr(snapshot, "sessions", None):
+            sess_map = snapshot.sessions
+            root_id = getattr(snapshot, "root_id", "") or (effective_sid or "")
+            children_map: dict[str, list[str]] = {}
+            for s_id, s_obs in sess_map.items():
+                if s_obs.parent_id:
+                    children_map.setdefault(s_obs.parent_id, []).append(s_id)
+
+            stopped_sids = {
+                e.session_id for e in getattr(snapshot, "events", ())
+                if e.kind in ("actor_stopped", "actor_returned") and e.session_id
+            }
+            running_sids = {
+                e.session_id for e in getattr(snapshot, "events", ())
+                if e.kind in ("actor_started", "tool_started", "dispatch_sent") and e.session_id
+            } - stopped_sids
+
+            def make_node(s_id: str) -> subagent.SubagentTreeNode:
+                s_obs = sess_map.get(s_id)
+                name = s_obs.name if s_obs else s_id[:8]
+                st: subagent.SubagentStatus = "running" if s_id in running_sids else ("completed" if s_id in stopped_sids else "running")
+                ch_nodes = [make_node(c_id) for c_id in children_map.get(s_id, [])]
+                return subagent.SubagentTreeNode(
+                    id=s_id,
+                    name=name,
+                    status=st,
+                    children=ch_nodes,
+                )
+
+            root_children = [make_node(c_id) for c_id in children_map.get(root_id, [])]
+            total_cnt = sum(1 + subagent.count_nodes(n.children) for n in root_children)
+            if total_cnt == 0:
+                return None, []
+
+            exchanges: list[subagent.SubagentExchange] = []
+            for ev in getattr(snapshot, "events", ()):
+                if ev.kind == "dispatch_sent" and ev.actor_id:
+                    exchanges.append(subagent.SubagentExchange(
+                        sender_id=ev.peer_id or root_id,
+                        sender_name=ev.peer_name or "Root",
+                        receiver_id=ev.actor_id,
+                        receiver_name=ev.actor_name or ev.actor_id[:8],
+                        kind="dispatch",
+                        content=ev.summary,
+                        timestamp=ev.observed_at,
+                    ))
+                elif ev.kind == "message_sent" and ev.actor_id and ev.peer_id:
+                    exchanges.append(subagent.SubagentExchange(
+                        sender_id=ev.actor_id,
+                        sender_name=ev.actor_name or ev.actor_id[:8],
+                        receiver_id=ev.peer_id,
+                        receiver_name=ev.peer_name or ev.peer_id[:8],
+                        kind="response",
+                        content=str(ev.attributes.get("content", "")) if ev.attributes else "",
+                        timestamp=ev.observed_at,
+                    ))
+                elif ev.kind == "actor_returned" and ev.actor_id:
+                    exchanges.append(subagent.SubagentExchange(
+                        sender_id=ev.actor_id,
+                        sender_name=ev.actor_name or ev.actor_id[:8],
+                        receiver_id=ev.peer_id or root_id,
+                        receiver_name=ev.peer_name or "Root",
+                        kind="task_complete",
+                        content=ev.summary,
+                        timestamp=ev.observed_at,
+                    ))
+
+            exchanges_by_node = {}
+            for ex in exchanges:
+                if ex.sender_id:
+                    exchanges_by_node[ex.sender_id] = ex
+                if ex.receiver_id:
+                    exchanges_by_node[ex.receiver_id] = ex
+
+            running_n = sum(1 for n in subagent.flatten_subagent_tree(root_children) if n.status in ("running", "starting"))
+            active_tag = f" {_DIM}({_R}{_CYAN}{running_n} active{_R}{_DIM}){_R}" if running_n > 0 else ""
+            sub_head = f"{_DIM}{_HEAD_PAD}subagents{_R} {total_cnt}{active_tag}"
+
+            lines = subagent.render_directory_tree(
+                root_children,
+                prefix="  ",
+                parent_id=root_id,
+                color=True,
+                tick=tick,
+                exchanges_by_node=exchanges_by_node,
+                verbose=False,
+            )
+            return sub_head, lines
+
         tree = subagent.build_subagent_tree(effective_sid or "", max_days_back=1)
         if not tree or tree.total_count == 0:
             return None, []
@@ -1812,7 +1905,6 @@ def _subagent_section(
         return sub_head, lines
     except Exception:
         return None, []
-
 
 def _3columns(
     left_lines: list[str],
@@ -1894,6 +1986,7 @@ def render(payload: dict | None = None, tick: int = 0) -> str:
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")
         # Build observation snapshot & projection at most once per render
         wf_proj = None
+        snap = None
         try:
             from . import observations, subagent, workflow_view
             effective_sid = subagent.find_root_session_id(sid) if sid else ""
@@ -1906,12 +1999,13 @@ def render(payload: dict | None = None, tick: int = 0) -> str:
                 wf_proj = workflow_view.project_workflow(snap)
         except Exception:
             wf_proj = None
+            snap = None
 
         strip = _session_strip(payload, sid, projection=wf_proj)
         alerts = _alerts(active)
 
         # Gather workflow panel or fallback subagents for dashboard integration
-        sub_head, sub_lines = _workflow_section(wf_proj, tick=tick, sid=sid, effective_sid=effective_sid)
+        sub_head, sub_lines = _workflow_section(wf_proj, tick=tick, sid=sid, effective_sid=effective_sid, snapshot=snap)
         has_subagents = bool(sub_head and sub_lines)
 
         # Scheme B: Wide Screen 3-Column Layout (repos | subagents | personas)
