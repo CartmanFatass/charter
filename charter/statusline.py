@@ -1815,10 +1815,16 @@ def _subagent_section(
                 elif ev.kind in ("actor_stopped", "actor_returned"):
                     actor_status[act] = "completed"
 
-            def make_node(s_id: str) -> subagent.SubagentTreeNode:
+            def make_node(s_id: str, seen: set[str] | None = None) -> subagent.SubagentTreeNode:
+                cur_seen = set(seen) if seen else set()
+                cur_seen.add(s_id)
                 name = names_map.get(s_id, s_id[:8])
                 st = actor_status.get(s_id, "running" if s_id in names_map else "completed")
-                ch_nodes = [make_node(c_id) for c_id in children_map.get(s_id, []) if c_id != s_id]
+                ch_nodes = [
+                    make_node(c_id, cur_seen)
+                    for c_id in children_map.get(s_id, [])
+                    if c_id != s_id and c_id not in cur_seen
+                ]
                 return subagent.SubagentTreeNode(
                     id=s_id,
                     name=name,
@@ -1826,7 +1832,7 @@ def _subagent_section(
                     children=ch_nodes,
                 )
 
-            root_children = [make_node(c_id) for c_id in children_map.get(root_id, []) if c_id != root_id]
+            root_children = [make_node(c_id, {root_id}) for c_id in children_map.get(root_id, []) if c_id != root_id]
             total_cnt = sum(1 + subagent.count_nodes(n.children) for n in root_children)
             if total_cnt == 0:
                 return None, []
