@@ -991,5 +991,91 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
 
         # Assert Event ID for Beta is 100% immutable and identical!
         self.assertEqual(ev_beta_1.id, ev_beta_2.id, "Inflight event ID must remain immutable when other records are removed")
+    def test_session_meta_timestamp_later_than_task_complete_preserves_order(self):
+        """Verify that within a single rollout file, session_meta precedes subsequent lines even if timestamps are inverted."""
+        from charter import observations
+        root = "root-inverted-ts"
+        child = "child-inverted-ts"
+        task_comp = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",  # Earlier timestamp on line 2
+            "payload": {"type": "task_complete", "summary": "Done"},
+        }
+        tmp = Path(tempfile.mkdtemp(prefix="test-inv-ts-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp="2026-08-19T10:00:00Z")
+        # Line 1 session_meta has timestamp 10:05:00Z, line 2 has 10:00:00Z
+        write_test_rollout(sdir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:05:00Z", collab_events=[task_comp])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        child_events = [e for e in snap.events if e.session_id == child]
+        self.assertEqual(len(child_events), 2)
+        self.assertEqual(child_events[0].kind, "actor_started")
+        self.assertEqual(child_events[1].kind, "actor_returned")
+
+    def test_premature_intake_followed_by_identical_valid_intake(self):
+        """Verify that a second identical intake after child return is NOT swallowed by dedupe and advances work item to intaken."""
+        from charter import observations, workflow_view
+        root = "root-intake-retry"
+        child = "child-intake-worker"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:01Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-INTK\",\"title\":\"Intake Task\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        premature_intake = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:02Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"WORK-INTK\"}\n```",
+            },
+        }
+        child_return = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {"type": "task_complete", "summary": "Finished job"},
+        }
+        valid_intake = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"WORK-INTK\"}\n```",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-retry-intake-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[spawn_msg, premature_intake, valid_intake])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:03Z", collab_events=[child_return])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        # Verify that both intake declarations are recorded as distinct events in snapshot
+        intake_events = [e for e in snap.events if e.kind == "workflow_declared" and e.attributes.get("declaration", {}).get("event") == "intake"]
+        self.assertEqual(len(intake_events), 2)
+
+        proj = workflow_view.project_workflow(snap)
+        # Work item successfully transitions to intaken because the second intake was evaluated
+        self.assertEqual(len(proj.work_items), 1)
+        self.assertEqual(proj.work_items[0].phase, "intaken")
+        # The premature intake was recorded in unbound_events
+        self.assertEqual(len(proj.unbound_events), 1)
+        self.assertIn("invalid_phase_for_intake", proj.unbound_events[0].attributes.get("unbound_reason", ""))
+
 if __name__ == "__main__":
     unittest.main()

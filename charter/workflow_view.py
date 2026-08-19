@@ -505,13 +505,13 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 actors_map[target_child]["runtime_state"] = "stopped"
                 actors_map[target_child]["basis"].extend(ev.evidence)
 
-            # Bind to newest unmatched dispatch to this child session in dispatched or active phase
+            # In sequential assignments to the same child, bind to the earliest active/dispatched work item
             candidate_ids = [
                 wid for wid in child_dispatches.get(target_child, [])
                 if work_items_map[wid].phase in ("dispatched", "active")
             ]
 
-            if len(candidate_ids) == 1:
+            if candidate_ids:
                 wid = candidate_ids[0]
                 wi = work_items_map[wid]
                 wi.phase = "returned"
@@ -555,19 +555,15 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                     basis=obl_basis,
                 )
                 wi.obligations.append(intake_obl)
-            elif len(candidate_ids) > 1:
-                unbound_events.append(_mark_unbound(ev, "ambiguous_multiple_candidate_dispatches"))
             else:
                 unbound_events.append(_mark_unbound(ev, "no_matching_active_dispatch_for_child"))
-
         elif ev.kind == "incident_seen":
             bound_wid: str | None = None
             target_actor = ev.actor_id or ev.session_id
             if target_actor in child_dispatches:
-                # Find active work item for this actor
-                for cand_wid in reversed(child_dispatches[target_actor]):
+                for cand_wid in child_dispatches[target_actor]:
                     cand_wi = work_items_map[cand_wid]
-                    if cand_wi.phase in ("dispatched", "active") or cand_wi.last_observed_at <= ts:
+                    if cand_wi.phase in ("dispatched", "active"):
                         bound_wid = cand_wid
                         break
 
@@ -584,7 +580,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             incidents_list.append(inc_proj)
             if bound_wid and bound_wid in work_items_map:
                 work_items_map[bound_wid].incidents.append(inc_proj)
-
+                work_items_map[bound_wid].basis.extend(ev.evidence)
         elif ev.kind == "workflow_declared":
             decl_dict = ev.attributes.get("declaration")
             if isinstance(decl_dict, dict):
@@ -1028,10 +1024,6 @@ def filter_timeline_events(
             if inc.work_id and (inc.work_id in matched_work_ids or any(mw.lower() in inc.work_id.lower() for mw in matched_work_ids)):
                 for b in inc.basis:
                     matched_source_ids.add(b.source_id)
-            elif inc.actor_id in matched_actor_ids:
-                for b in inc.basis:
-                    matched_source_ids.add(b.source_id)
-
         events = [
             e for e in events
             if e.id in matched_source_ids

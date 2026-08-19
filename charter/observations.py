@@ -85,12 +85,11 @@ def _topological_causal_sort(
     in_degree: list[int] = [0] * n
     adj: list[list[int]] = [[] for _ in range(n)]
 
-    # 1. Intra-source stream edges (strictly preserve file/stream order)
+    # 1. Intra-source physical stream edges (unify physical rollout file lines regardless of meta/event)
     streams: dict[tuple[Any, ...], list[int]] = {}
     for idx, ev in enumerate(events):
-        src = ev.evidence[0].source if ev.evidence else "unknown"
         fpath = ev.evidence[0].file_path if ev.evidence else None
-        stream_key = (ev.session_id, src, fpath)
+        stream_key = (ev.session_id, fpath)
         streams.setdefault(stream_key, []).append(idx)
 
     for stream_indices in streams.values():
@@ -100,54 +99,65 @@ def _topological_causal_sort(
             adj[u].append(v)
             in_degree[v] += 1
 
-    # 2. Cross-session causal dependencies:
-    # A) dispatch_sent in parent -> child session activity
-    dispatch_to_child: dict[str, int] = {}
+    # 2. Assignment-specific cross-session causal dependencies:
+    # Partition each child session into activity segments demarcated by actor_returned
+    child_segments: dict[str, list[list[int]]] = {}
     for idx, ev in enumerate(events):
-        if ev.kind in ("dispatch_sent", "actor_spawned") and ev.actor_id:
-            if ev.actor_id not in dispatch_to_child:
-                dispatch_to_child[ev.actor_id] = idx
+        if ev.session_id:
+            cs_segs = child_segments.setdefault(ev.session_id, [[]])
+            cs_segs[-1].append(idx)
+            if ev.kind == "actor_returned":
+                cs_segs.append([])
 
-    for child_sid, disp_idx in dispatch_to_child.items():
-        child_indices = [
-            i for i, ev in enumerate(events)
-            if ev.session_id == child_sid and i != disp_idx
-        ]
-        if child_indices:
-            child_first = child_indices[0]
-            if child_first != disp_idx and child_first not in adj[disp_idx]:
-                adj[disp_idx].append(child_first)
-                in_degree[child_first] += 1
+    # Clean empty trailing segment if any
+    for sid, segs in child_segments.items():
+        if len(segs) > 1 and not segs[-1]:
+            segs.pop()
 
-    # B) Child actor_returned -> Coordinator intake
-    child_returns: dict[str, list[int]] = {}
+    # Collect dispatch_sent events per child in order
+    dispatches_by_child: dict[str, list[int]] = {}
     for idx, ev in enumerate(events):
-        if ev.kind == "actor_returned":
-            if ev.session_id:
-                child_returns.setdefault(ev.session_id, []).append(idx)
-            if ev.actor_id:
-                child_returns.setdefault(ev.actor_id, []).append(idx)
+        if ev.kind == "dispatch_sent" and ev.actor_id:
+            dispatches_by_child.setdefault(ev.actor_id, []).append(idx)
 
+    # Connect dispatch_i -> first event of segment_i in that child session
+    for child_sid, disp_indices in dispatches_by_child.items():
+        segs = child_segments.get(child_sid, [])
+        for seg_idx, disp_idx in enumerate(disp_indices):
+            if seg_idx < len(segs) and segs[seg_idx]:
+                first_in_seg = segs[seg_idx][0]
+                if first_in_seg != disp_idx and first_in_seg not in adj[disp_idx]:
+                    adj[disp_idx].append(first_in_seg)
+                    in_degree[first_in_seg] += 1
+
+    # Map each dispatch instance to its corresponding child return event
+    dispatch_to_return: dict[int, int] = {}
+    for child_sid, disp_indices in dispatches_by_child.items():
+        segs = child_segments.get(child_sid, [])
+        for seg_idx, disp_idx in enumerate(disp_indices):
+            if seg_idx < len(segs):
+                for e_idx in segs[seg_idx]:
+                    if events[e_idx].kind == "actor_returned":
+                        dispatch_to_return[disp_idx] = e_idx
+                        break
+
+    # Connect assignment-specific child return -> coordinator intake
     for idx, ev in enumerate(events):
         if ev.kind == "workflow_declared":
             decl_dict = ev.attributes.get("declaration")
             if isinstance(decl_dict, dict) and decl_dict.get("event") == "intake":
                 w_id = decl_dict.get("work_id")
-                matched_returns: list[int] = []
                 if w_id:
-                    for d_ev_idx in range(len(events)):
-                        d_ev = events[d_ev_idx]
+                    for d_idx, d_ev in enumerate(events):
                         if d_ev.kind == "dispatch_sent":
                             d_decl = d_ev.attributes.get("declaration")
                             if isinstance(d_decl, dict) and d_decl.get("work_id") == w_id:
-                                if d_ev.actor_id in child_returns:
-                                    matched_returns.extend(child_returns[d_ev.actor_id])
-                for ret_idx in matched_returns:
-                    if ret_idx != idx and idx not in adj[ret_idx]:
-                        if events[ret_idx].session_id != ev.session_id:
-                            adj[ret_idx].append(idx)
-                            in_degree[idx] += 1
-
+                                ret_idx = dispatch_to_return.get(d_idx)
+                                if ret_idx is not None and ret_idx != idx and idx not in adj[ret_idx]:
+                                    if events[ret_idx].session_id != ev.session_id:
+                                        adj[ret_idx].append(idx)
+                                        in_degree[idx] += 1
+                                break
     # Min-heap priority queue: (observed_at, priority, ordinal, id, node_index)
     heap: list[tuple[datetime, int, int, str, int]] = []
     for idx in range(n):
@@ -575,7 +585,7 @@ def collect_observation_snapshot(
     events: list[ObservedEvent] = []
     ordinal_counter = 0
 
-    seen_declarations: dict[tuple[Any, ...], ObservedEvent] = {}
+    pending_dispatch_mirrors: dict[tuple[Any, ...], ObservedEvent] = {}
 
     for sid in descendants:
         link = index.links.get(sid)
@@ -734,19 +744,6 @@ def collect_observation_snapshot(
 
                                     # Check exact declarations in spawn prompt
                                     for d_idx, d in enumerate(decls):
-                                        decl_key = (
-                                            d.schema,
-                                            d.event,
-                                            d.work_id,
-                                            d.actor_id,
-                                            rx_id,
-                                            d.relation,
-                                            d.related_actor_id,
-                                            d.title,
-                                            d.direction,
-                                            d.actor_role,
-                                            d.owner_role,
-                                        )
                                         decl_ev_ref = EvidenceRef(
                                             source="rollout_event",
                                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -773,9 +770,20 @@ def collect_observation_snapshot(
                                             evidence=(decl_ev_ref,),
                                             ordinal=ordinal_counter,
                                         )
-                                        seen_declarations[decl_key] = decl_event
                                         events.append(decl_event)
-
+                                        if d.event == "dispatch":
+                                            mirror_key = (
+                                                d.schema,
+                                                "dispatch",
+                                                d.work_id,
+                                                d.actor_id,
+                                                rx_id,
+                                                d.title,
+                                                d.direction,
+                                                d.actor_role,
+                                                d.owner_role,
+                                            )
+                                            pending_dispatch_mirrors[mirror_key] = decl_event
                             # Check typed incidents in agents_states on ANY collab tool call
                             for aid_idx, (aid, astate) in enumerate(states.items()):
                                 if isinstance(astate, dict) and (astate.get("error") or astate.get("failed")):
@@ -847,22 +855,9 @@ def collect_observation_snapshot(
                         ordinal=ordinal_counter,
                     ))
 
-                    # Check mirrored declarations in user_message
+                    # Check mirrored declarations in user_message (one-shot dispatch mirror only)
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
                     for d_idx, d in enumerate(decls):
-                        decl_key = (
-                            d.schema,
-                            d.event,
-                            d.work_id,
-                            d.actor_id,
-                            sid,
-                            d.relation,
-                            d.related_actor_id,
-                            d.title,
-                            d.direction,
-                            d.actor_role,
-                            d.owner_role,
-                        )
                         decl_ev_ref = EvidenceRef(
                             source="rollout_event",
                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -872,8 +867,19 @@ def collect_observation_snapshot(
                             file_path=file_path_str,
                             line_number=rec.line_number,
                         )
-                        if decl_key in seen_declarations:
-                            orig_event = seen_declarations[decl_key]
+                        mirror_key = (
+                            d.schema,
+                            "dispatch",
+                            d.work_id,
+                            d.actor_id,
+                            sid,
+                            d.title,
+                            d.direction,
+                            d.actor_role,
+                            d.owner_role,
+                        )
+                        if d.event == "dispatch" and mirror_key in pending_dispatch_mirrors:
+                            orig_event = pending_dispatch_mirrors.pop(mirror_key)
                             for e_idx, ev_item in enumerate(events):
                                 if ev_item.id == orig_event.id:
                                     updated_event = ObservedEvent(
@@ -893,27 +899,26 @@ def collect_observation_snapshot(
                                         ordinal=orig_event.ordinal,
                                     )
                                     events[e_idx] = updated_event
-                                    seen_declarations[decl_key] = updated_event
                                     break
                         else:
-                            decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator=f"decl:{d.event}:{d.work_id or sid}:{d_idx}", ordinal=d_idx)
+                            decl_author = sess_parent or sid
+                            decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=decl_author, discriminator=f"decl:{d.event}:{d.work_id or sid}:{d_idx}", ordinal=d_idx)
                             decl_event = ObservedEvent(
                                 id=decl_ev_id,
                                 root_id=effective_root,
                                 session_id=sid,
                                 kind="workflow_declared",
                                 observed_at=ts,
-                                actor_id=sid,
-                                actor_name=sess_name,
-                                author_actor_id=sess_parent,
+                                actor_id=decl_author,
+                                actor_name=index.links[decl_author].name if decl_author in index.links else decl_author[:8],
+                                peer_id=sid if sess_parent else None,
+                                author_actor_id=decl_author,
                                 summary=f"Workflow declared: {d.event} ({d.work_id or d.title or ''})",
                                 attributes={"declaration": d.to_dict()},
                                 evidence=(decl_ev_ref,),
                                 ordinal=ordinal_counter,
                             )
-                            seen_declarations[decl_key] = decl_event
                             events.append(decl_event)
-
                 elif p_type == "agent_message":
                     msg_text = str(rec.payload.get("message") or rec.payload.get("content") or "")
                     ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "agent_message", sid, discriminator="agent_msg", ordinal=0)
@@ -932,23 +937,9 @@ def collect_observation_snapshot(
                         evidence=(ev_ref,),
                         ordinal=ordinal_counter,
                     ))
-
-                    # Check declarations in agent messages (author is child sid)
+                    # Declarations in agent messages are always distinct observed events
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
                     for d_idx, d in enumerate(decls):
-                        decl_key = (
-                            d.schema,
-                            d.event,
-                            d.work_id,
-                            d.actor_id,
-                            sid,
-                            d.relation,
-                            d.related_actor_id,
-                            d.title,
-                            d.direction,
-                            d.actor_role,
-                            d.owner_role,
-                        )
                         decl_ev_ref = EvidenceRef(
                             source="rollout_event",
                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -973,9 +964,7 @@ def collect_observation_snapshot(
                             evidence=(decl_ev_ref,),
                             ordinal=ordinal_counter,
                         )
-                        seen_declarations[decl_key] = decl_event
                         events.append(decl_event)
-
                 elif p_type == "task_complete":
                     sum_text = str(rec.payload.get("summary") or "Task complete")
                     ev_ret_id = make_event_id("rollout_event", file_path_str, rec.line_number, "task_complete", sid, discriminator="task_complete", ordinal=0)

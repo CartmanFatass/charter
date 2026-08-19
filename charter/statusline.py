@@ -1783,28 +1783,42 @@ def _subagent_section(
         effective_sid = eff_sid
 
         # Reuse already collected snapshot in-memory if available
-        if snapshot is not None and getattr(snapshot, "sessions", None):
-            sess_map = snapshot.sessions
+        if snapshot is not None and (getattr(snapshot, "sessions", None) or getattr(snapshot, "events", None)):
+            sess_map = getattr(snapshot, "sessions", {})
             root_id = getattr(snapshot, "root_id", "") or (effective_sid or "")
             children_map: dict[str, list[str]] = {}
+            names_map: dict[str, str] = {}
+
             for s_id, s_obs in sess_map.items():
+                names_map[s_id] = s_obs.name or s_id[:8]
                 if s_obs.parent_id:
                     children_map.setdefault(s_obs.parent_id, []).append(s_id)
 
-            stopped_sids = {
-                e.session_id for e in getattr(snapshot, "events", ())
-                if e.kind in ("actor_stopped", "actor_returned") and e.session_id
-            }
-            running_sids = {
-                e.session_id for e in getattr(snapshot, "events", ())
-                if e.kind in ("actor_started", "tool_started", "dispatch_sent") and e.session_id
-            } - stopped_sids
+            # Also include any event-only or inflight actors
+            for ev in getattr(snapshot, "events", ()):
+                act = ev.actor_id
+                if act and act != root_id:
+                    if act not in names_map:
+                        names_map[act] = ev.actor_name or act[:8]
+                        parent = ev.peer_id if (ev.peer_id and ev.peer_id != act) else root_id
+                        if act not in children_map.get(parent, []):
+                            children_map.setdefault(parent, []).append(act)
+
+            # Ordered last-event-wins runtime status reduction
+            actor_status: dict[str, subagent.SubagentStatus] = {}
+            for ev in getattr(snapshot, "events", ()):
+                act = ev.actor_id or ev.session_id
+                if not act or act == root_id:
+                    continue
+                if ev.kind in ("actor_started", "tool_started", "dispatch_sent"):
+                    actor_status[act] = "running"
+                elif ev.kind in ("actor_stopped", "actor_returned"):
+                    actor_status[act] = "completed"
 
             def make_node(s_id: str) -> subagent.SubagentTreeNode:
-                s_obs = sess_map.get(s_id)
-                name = s_obs.name if s_obs else s_id[:8]
-                st: subagent.SubagentStatus = "running" if s_id in running_sids else ("completed" if s_id in stopped_sids else "running")
-                ch_nodes = [make_node(c_id) for c_id in children_map.get(s_id, [])]
+                name = names_map.get(s_id, s_id[:8])
+                st = actor_status.get(s_id, "running" if s_id in names_map else "completed")
+                ch_nodes = [make_node(c_id) for c_id in children_map.get(s_id, []) if c_id != s_id]
                 return subagent.SubagentTreeNode(
                     id=s_id,
                     name=name,
@@ -1812,7 +1826,7 @@ def _subagent_section(
                     children=ch_nodes,
                 )
 
-            root_children = [make_node(c_id) for c_id in children_map.get(root_id, [])]
+            root_children = [make_node(c_id) for c_id in children_map.get(root_id, []) if c_id != root_id]
             total_cnt = sum(1 + subagent.count_nodes(n.children) for n in root_children)
             if total_cnt == 0:
                 return None, []

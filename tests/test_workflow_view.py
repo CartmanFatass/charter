@@ -1034,5 +1034,264 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
             # Must NOT call find_rollouts_in_days because snapshot was reused in-memory!
             mock_find.assert_not_called()
 
+    def test_same_child_two_dispatches_identical_timestamps(self):
+        """Verify that two dispatches to the same child with identical timestamps return cleanly with 0 unbound events."""
+        from charter import observations, workflow_view
+        root = "root-same-ts-multi"
+        child = "child-same-ts-worker"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_1 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-1\",\"title\":\"Task 1\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_2 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-2\",\"title\":\"Task 2\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        tool_1 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "tool_1"},
+            },
+        }
+        ret_1 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {"type": "task_complete", "summary": "Done 1"},
+        }
+        tool_2 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "tool_2"},
+            },
+        }
+        ret_2 = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {"type": "task_complete", "summary": "Done 2"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp=ts, collab_events=[spawn_1, spawn_2])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp=ts, collab_events=[tool_1, ret_1, tool_2, ret_2])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.work_items), 2)
+        self.assertEqual(proj.work_items[0].phase, "returned")
+        self.assertEqual(proj.work_items[1].phase, "returned")
+        self.assertEqual(len(proj.unbound_events), 0, f"Expected 0 unbound events, got: {[e.attributes.get('unbound_reason') for e in proj.unbound_events]}")
+
+    def test_same_child_return_a_intake_a_dispatch_b_return_b(self):
+        """Verify complete causal lifecycle across sequential assignments to the same child."""
+        from charter import observations, workflow_view
+        root = "root-seq-lifecycle"
+        child = "child-seq-worker"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:01Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-A\",\"title\":\"Task A\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {"type": "task_complete", "summary": "Finished A"},
+        }
+        intake_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:06Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"WORK-A\"}\n```",
+            },
+        }
+        spawn_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-B\",\"title\":\"Task B\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:15Z",
+            "payload": {"type": "task_complete", "summary": "Finished B"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp=ts, collab_events=[spawn_a, intake_a, spawn_b])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp=ts, collab_events=[ret_a, ret_b])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.work_items), 2)
+        item_a = next(w for w in proj.work_items if w.external_id == "WORK-A")
+        item_b = next(w for w in proj.work_items if w.external_id == "WORK-B")
+        self.assertEqual(item_a.phase, "intaken")
+        self.assertEqual(item_b.phase, "returned")
+        self.assertEqual(len(proj.unbound_events), 0)
+
+    def test_same_child_multi_assignment_incident_bound_strictly_to_work_b(self):
+        """Verify that an incident occurring during WORK-B in the same child actor NEVER contaminates WORK-A timeline."""
+        from charter import observations, workflow_view
+        root = "root-inc-bound"
+        child = "child-inc-worker"
+
+        spawn_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-AAA\",\"title\":\"Task A\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {"type": "task_complete", "summary": "Done A"},
+        }
+        spawn_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-BBB\",\"title\":\"Task B\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        inc_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "wait",
+                    "agents_states": {child: {"error": "Disk exhausted during Task B"}},
+                },
+            },
+        }
+        ret_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:10Z",
+            "payload": {"type": "task_complete", "summary": "Done B"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_a, spawn_b])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:02Z", collab_events=[ret_a, inc_b, ret_b])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Filter for WORK-AAA
+        tl_a = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-AAA")
+        summaries_a = [e.summary for e in tl_a]
+        self.assertFalse(any("Disk exhausted" in s for s in summaries_a), "WORK-AAA timeline must not contain WORK-BBB incident")
+
+        # Filter for WORK-BBB
+        tl_b = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-BBB")
+        summaries_b = [e.summary for e in tl_b]
+        self.assertTrue(any("Disk exhausted" in s for s in summaries_b), "WORK-BBB timeline must contain its incident")
+
+    def test_statusline_fallback_inflight_only_actor_included(self):
+        """Verify that an inflight-only actor appears in the snapshot-backed fallback subagents tree."""
+        from charter import statusline, observations, workflow_view, inflight, config
+        root = "root-fallback-inflight"
+        orig_state = config.STATE_DIR
+        config.STATE_DIR = self.tmp / "inflight-state"
+        self.addCleanup(setattr, config, "STATE_DIR", orig_state)
+
+        # Start inflight actor that has no rollout file yet
+        tok = inflight.start("InflightWorker", session_id=root, agent_id="inf-worker-1")
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z")
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        sub_head, sub_lines = statusline._workflow_section(proj, tick=0, sid=root, effective_sid=root, snapshot=snap)
+        self.assertIsNotNone(sub_head)
+        self.assertTrue(any("InflightWorker" in ln for ln in sub_lines))
+        self.assertTrue(any("active" in sub_head for _ in [1]))
+
+    def test_statusline_fallback_returned_child_later_active_wins(self):
+        """Verify that a child that previously returned but has subsequent running activity renders as running in fallback."""
+        from charter import statusline, observations, workflow_view
+        root = "root-fallback-reuse"
+        child = "child-fallback-reuse-worker"
+
+        ret_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {"type": "task_complete", "summary": "Done 1"},
+        }
+        tool_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "active_tool"},
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="ReusedWorker", timestamp="2026-08-19T10:00:01Z", collab_events=[ret_1, tool_2])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
+        proj = workflow_view.project_workflow(snap)
+
+        sub_head, sub_lines = statusline._workflow_section(proj, tick=0, sid=root, effective_sid=root, snapshot=snap)
+        self.assertIsNotNone(sub_head)
+        self.assertTrue(any("ReusedWorker" in ln for ln in sub_lines))
+        # Active tag must be present because the child is currently active (running)
+        self.assertIn("active", sub_head)
+
 if __name__ == "__main__":
     unittest.main()

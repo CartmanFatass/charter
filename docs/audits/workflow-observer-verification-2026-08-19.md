@@ -10,12 +10,27 @@
 
 Charter's Codex subagent visualization has been extended into a strictly read-only workflow observer. The observer parses exact `charter-observe` declarations and correlates them with mechanical rollout events, Hook traces, and inflight records without guessing ownership, altering state, or exercising orchestration authority.
 
-All four residual gaps identified in the external review report (`local://paste-1.md`) have been completely resolved:
-1. **Canonical Declaration Deduplication (Gate 2)**: Deduplication keys now explicitly include both `declared_actor_id` (`d.actor_id`) and `bound_actor_id` (`rx_id` for spawn prompt, `sid` for child messages). Distinct relation declarations (e.g. `EM-A reports_to ROOT` vs `CM-B reports_to ROOT`) in the same session produce distinct canonical keys and are never merged, while `spawn_agent.prompt` and matching initial `user_message` correctly deduplicate evidence references.
-2. **Deterministic Causal Topological Sort (Gate 4)**: Replaced scalar session high-watermark with a Kahn's topological sort driven by a min-heap priority queue (`observed_at`, `_event_priority`, `ordinal`, `id`). Intra-source stream line order is strictly preserved via mandatory intra-source edges ($E_i \to E_{i+1}$), while cross-session causal edges (`dispatch_sent` $\to$ child start/activity, child `actor_returned` $\to$ coordinator `intake`) are strictly enforced. In coordinator sessions, resolve of prior work followed by dispatch of new work in the same second strictly preserves `dispatch` $\to$ child `actor_started` causality.
-3. **Inflight Event ID Stability (Gate 3)**: Inflight event IDs now use a fixed ordinal `0` and the unique `token` discriminator instead of dynamic list indices (`irec_idx`). Removal of earlier inflight records leaves subsequent existing inflight records' event IDs 100% immutable and unchanged.
-4. **Statusline Fallback Zero Redundant Scans (Gate 5)**: `_workflow_section` passes the pre-collected `ObservationSnapshot` to `_subagent_section`. Fallback to the subagent tree when no work items exist constructs the tree and exchanges 100% in-memory from `snapshot.sessions` and `snapshot.events`, eliminating all redundant rollout discovery and file reads.
-5. **Multi-Assignment Timeline Isolation (Gate 1 & 4)**: Work timeline filtering strictly relies on `matched_source_ids` and work item basis evidence. Multiple sequential work items dispatched to the exact same child session are strictly isolated with zero crosstalk.
+All issues identified across rounds 1 through 5 of external review have been completely resolved:
+1. **One-Shot Dispatch-Only Mirror Deduplication (Gate 2)**:
+   - Deduplication is strictly constrained to the one-shot mirror between `spawn_agent.prompt` and the spawned child's initial `user_message` for `event == "dispatch"`.
+   - Any later declarations—including repeated or retried `intake`, `resolve`, `relation`, or subsequent dispatches—are always preserved as distinct observed events.
+   - Tested by: `test_premature_intake_followed_by_identical_valid_intake` and `test_distinct_relation_actor_ids_not_deduplicated`.
+2. **Assignment-Specific Topological Causal Ordering (Gate 4)**:
+   - Intra-source file ordering unifies `session_meta` and all subsequent lines into single physical streams keyed by `(session_id, file_path)`, guaranteeing physical line order is never rewritten or inverted.
+   - Cross-session causal edges link each specific `dispatch_sent_i` to the first event of child activity segment `i` demarcated by returns.
+   - Child return `i` is strictly linked to its corresponding coordinator `intake_i`.
+   - Sequential assignments to the same child with identical timestamps return cleanly with 0 unbound events.
+   - Tested by: `test_session_meta_timestamp_later_than_task_complete_preserves_order`, `test_same_child_two_dispatches_identical_timestamps`, and `test_same_child_return_a_intake_a_dispatch_b_return_b`.
+3. **Strict Work Incident Isolation (Gate 1 & 4)**:
+   - Work timeline filtering matches incidents strictly by `work_id`, with no actor-fallback leakage across multiple assignments to the same actor.
+   - Tested by: `test_same_child_multi_assignment_incident_bound_strictly_to_work_b`.
+4. **In-Memory Fallback Full Fidelity (Gate 5)**:
+   - Snapshot-backed fallback includes inflight-only and event-only actors not yet present in `snapshot.sessions`.
+   - Runtime status uses chronological last-event-wins reduction, properly reflecting active status when a previously returned child becomes active again.
+   - Tested by: `test_statusline_fallback_zero_additional_rollout_scans`, `test_statusline_fallback_inflight_only_actor_included`, and `test_statusline_fallback_returned_child_later_active_wins`.
+5. **Inflight Event ID Stability (Gate 3)**:
+   - Fixed token-based discriminator with `ordinal=0` ensures absolute immutability of existing inflight event IDs across record removals.
+   - Tested by: `test_inflight_event_id_immutability_on_record_removal`.
 
 ---
 
@@ -23,11 +38,11 @@ All four residual gaps identified in the external review report (`local://paste-
 
 | Gate | Verdict | Evidence |
 | :--- | :---: | :--- |
-| **Gate 1: Authority Boundary & Lifecycle Orthogonality** | **PASS** | Runtime state (`starting`, `running`, `stopped`, `unknown`) and work lifecycle phase (`dispatched`, `active`, `returned`, `intaken`, `resolved`) are completely decoupled. Sequential work items in the same child session have strictly isolated lifecycles and timelines. |
-| **Gate 2: Exact Metadata & Parser Strictness** | **PASS** | `parse_workflow_declarations` strictly validates schemas. Canonical dedupe key preserves distinct declared `actor_id`s in the same session. |
-| **Gate 3: Read-Only & Deterministic Identity** | **PASS** | All observer paths and inflight reads are 100% read-only (`prune=False`). Inflight event IDs are strictly immutable across record additions and removals. |
-| **Gate 4: Session Isolation & Causal Ordering** | **PASS** | Topological causal sort preserves exact intra-source file line order and enforces cross-session causal dependencies (`dispatch` $\to$ `start`, `return` $\to$ `intake`). |
-| **Gate 5: Dashboard & Crash Resilience** | **PASS** | Statusline displays single `▪ workflow` header and reuses snapshot in-memory on fallback with zero additional filesystem scans. `watch_workflow_view` degrades gracefully inside `try/except/finally`. |
+| **Gate 1: Authority Boundary & Lifecycle Orthogonality** | **PASS** | Runtime state and work lifecycle phase are completely decoupled. Sequential work items in the same child session have strictly isolated lifecycles and timelines. Work timeline incidents are strictly isolated per work item. |
+| **Gate 2: Exact Metadata & Parser Strictness** | **PASS** | `parse_workflow_declarations` strictly validates schemas. Mirror deduplication is one-shot and dispatch-specific; repeated or retried declarations remain distinct events. |
+| **Gate 3: Read-Only & Deterministic Identity** | **PASS** | All observer paths and inflight reads are 100% read-only (`prune=False`). Inflight event IDs are strictly immutable. |
+| **Gate 4: Session Isolation & Causal Ordering** | **PASS** | Assignment-specific topological sort preserves exact intra-source file line order and enforces cross-session causal dependencies (`dispatch_i` $\to$ `segment_i`, `return_i` $\to$ `intake_i`). |
+| **Gate 5: Dashboard & Crash Resilience** | **PASS** | Statusline displays single `▪ workflow` header and reuses snapshot in-memory on fallback with zero additional filesystem scans while faithfully representing inflight-only actors and last-event-wins active status. |
 | **Gate 6: Backward Compatibility & CLI Integrity** | **PASS** | Legacy `charter subagent` JSON/text outputs, status fields, additive runtime states, and neutral stopped text rendering are 100% preserved. Exact 32-choice top-level CLI command test passes. |
 
 ---
@@ -35,12 +50,12 @@ All four residual gaps identified in the external review report (`local://paste-
 ## 3. Test Execution Summary
 
 ```text
-Ran 106 tests across:
+Ran 113 tests across:
   - tests.test_workflow_view
   - tests.test_observations
   - tests.test_commands_observe
   - tests.test_subagent
   - tests.test_docs_show
 
-Result: 106 passed, 0 failed, 0 errors (1 platform symlink test skipped on Windows).
+Result: 113 passed, 0 failed, 0 errors (1 platform symlink test skipped on Windows).
 ```
