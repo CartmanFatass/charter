@@ -1,0 +1,550 @@
+"""Tests for deterministic workflow projections, obligation management, and safe rendering."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from charter import observations, tui, workflow_view
+from tests.test_subagent import write_test_rollout
+
+
+class TestWorkflowProjectionReducer(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="test-wf-view-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.sessions_dir = self.tmp / "sessions"
+
+    def test_spawn_activity_task_complete_lifecycle(self):
+        root = "root-life-01"
+        child = "child-gauss-01"
+        now = datetime(2026, 8, 19, 10, 0, 0, tzinfo=timezone.utc)
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"SCDMP-B2\",\"title\":\"B2 review\",\"direction\":\"SCDMP\",\"actor_role\":\"EM\",\"owner_role\":\"ROOT\"}\n```\nReview task.",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Review done."},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:10Z", collab_events=[ret_ev])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.work_items), 1)
+        wi = proj.work_items[0]
+        self.assertEqual(wi.external_id, "SCDMP-B2")
+        self.assertEqual(wi.actor_name, "Gauss")
+        self.assertEqual(wi.actor_role, "EM")
+        self.assertEqual(wi.direction, "SCDMP")
+        self.assertEqual(wi.phase, "returned")
+        self.assertEqual(wi.runtime_state, "stopped")
+        self.assertTrue(wi.return_observed)
+
+        # Obligations: 1 intake_required, 0 return_expected
+        self.assertEqual(len(wi.obligations), 1)
+        self.assertEqual(wi.obligations[0].kind, "intake_required")
+        self.assertEqual(len(proj.open_obligations), 1)
+        self.assertEqual(proj.open_obligations[0].kind, "intake_required")
+
+    def test_spawn_activity_stopped_without_return(self):
+        root = "root-stop-01"
+        child = "child-euler-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T11:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Euler"}],
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T11:00:00Z", collab_events=[spawn_ev])
+        # Child has no task_complete, but Hook trace records subagent_stop
+        from charter import trace, config
+        state_tmp = self.tmp / "state"
+        with unittest.mock.patch.object(config, "PERSONA_STATE_DIR", state_tmp):
+            trace.record("subagent_start", child, agent="Euler", ts="2026-08-19T11:01:00Z")
+            trace.record("subagent_stop", child, agent="Euler", ts="2026-08-19T11:02:00Z")
+            snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+            proj = workflow_view.project_workflow(snap)
+
+            self.assertEqual(len(proj.work_items), 1)
+            wi = proj.work_items[0]
+            self.assertEqual(wi.actor_name, "Euler")
+            self.assertEqual(wi.runtime_state, "stopped")
+            self.assertIn(wi.phase, ("active", "dispatched"))
+            self.assertFalse(wi.return_observed)
+
+            # return_expected remains open!
+            self.assertEqual(len(wi.obligations), 1)
+            self.assertEqual(wi.obligations[0].kind, "return_expected")
+
+    def test_typed_incident_appears_in_incidents_without_changing_phase(self):
+        root = "root-incident-01"
+        child = "child-inc-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "WorkerInc"}],
+                    "agents_states": {child: {"error": "OOM occurred in worker"}},
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.incidents), 1)
+        self.assertIn("OOM occurred", proj.incidents[0].summary)
+        self.assertEqual(len(proj.work_items), 1)
+        # Phase remains dispatched/active, not failed
+        self.assertIn(proj.work_items[0].phase, ("dispatched", "active"))
+
+    def test_free_text_blocked_or_error_changes_nothing(self):
+        root = "root-text-01"
+        child = "child-text-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Noether"}],
+                },
+            },
+        }
+
+        msg_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:02:00Z",
+            "payload": {"type": "agent_message", "message": "I am blocked by timeout, task done, error occurred."},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Noether", timestamp="2026-08-19T10:00:10Z", collab_events=[msg_ev])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        self.assertEqual(len(proj.incidents), 0)
+        self.assertEqual(proj.work_items[0].phase, "active")
+        self.assertFalse(proj.work_items[0].return_observed)
+
+    def test_coordinator_intake_and_ordered_resolve(self):
+        root = "root-intake-resolve"
+        child = "child-ir-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"W-100\"}\n```\nDo work.",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "WorkerIR"}],
+                },
+            },
+        }
+
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Finished."},
+        }
+
+        intake_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"W-100\"}\n```\nIntake acknowledged.",
+            },
+        }
+
+        resolve_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:07:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"W-100\"}\n```\nAll criteria met.",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev, intake_msg, resolve_msg])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="WorkerIR", timestamp="2026-08-19T10:00:10Z", collab_events=[ret_ev])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        wi = proj.work_items[0]
+        self.assertEqual(wi.phase, "resolved")
+        self.assertEqual(len(wi.obligations), 0)
+        self.assertEqual(len(proj.open_obligations), 0)
+
+    def test_child_authored_intake_rejected(self):
+        root = "root-child-auth"
+        child = "child-self-auth"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"W-200\"}\n```\nDo work.",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "WorkerSelf"}],
+                },
+            },
+        }
+
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Finished."},
+        }
+
+        # Child tries to self-intake in an agent_message
+        child_intake_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "agent_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"W-200\"}\n```\nI self-intake.",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="WorkerSelf", timestamp="2026-08-19T10:00:10Z", collab_events=[ret_ev, child_intake_msg])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        wi = proj.work_items[0]
+        # Child intake rejected -> phase remains returned, intake_required remains open!
+        self.assertEqual(wi.phase, "returned")
+        self.assertEqual(len(wi.obligations), 1)
+        self.assertEqual(wi.obligations[0].kind, "intake_required")
+        self.assertTrue(len(proj.unbound_events) > 0)
+
+    def test_resolve_before_intake_rejected(self):
+        root = "root-resolve-early"
+        child = "child-re-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"W-300\"}\n```\nDo work.",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "WorkerRE"}],
+                },
+            },
+        }
+
+        # Coordinator attempts to resolve immediately without intake
+        resolve_early = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:02:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"W-300\"}\n```\nEarly resolve.",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev, resolve_early])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="WorkerRE", timestamp="2026-08-19T10:00:10Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        wi = proj.work_items[0]
+        self.assertNotEqual(wi.phase, "resolved")
+        self.assertTrue(len(proj.unbound_events) > 0)
+
+    def test_declared_peer_coexists_with_spawn_hierarchy(self):
+        root = "root-peer-01"
+        gauss = "child-gauss-02"
+        curie = "child-curie-02"
+
+        spawn_gauss = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": gauss, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_curie = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "receiver_agents": [{"thread_id": curie, "agent_nickname": "Curie"}],
+                },
+            },
+        }
+        peer_decl = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": f"```charter-observe\n{{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"{gauss}\",\"relation\":\"peer\",\"related_actor_id\":\"{curie}\"}}\n```",
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_gauss, spawn_curie, peer_decl])
+        write_test_rollout(self.sessions_dir, gauss, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:15Z")
+        write_test_rollout(self.sessions_dir, curie, parent_id=root, nickname="Curie", timestamp="2026-08-19T10:00:20Z")
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        spawn_rels = [r for r in proj.relations if r.kind == "spawn_parent"]
+        peer_rels = [r for r in proj.relations if r.kind == "peer"]
+
+        self.assertEqual(len(spawn_rels), 2)
+        self.assertEqual(len(peer_rels), 1)
+        self.assertTrue(peer_rels[0].declared)
+        self.assertEqual(peer_rels[0].source_actor_id, gauss)
+        self.assertEqual(peer_rels[0].target_actor_id, curie)
+
+
+class TestWorkflowRenderersAndExplain(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="test-wf-render-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.sessions_dir = self.tmp / "sessions"
+
+    def test_render_position_table_widths(self):
+        root = "root-render-pos"
+        child = "child-render-gauss"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"SCDMP-B2\",\"title\":\"B2 review\",\"direction\":\"SCDMP\",\"actor_role\":\"EM\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Done"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:10Z", collab_events=[ret_ev])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        now_dt = datetime(2026, 8, 19, 10, 7, 0, tzinfo=timezone.utc)
+        for w in (60, 80, 116, 160):
+            lines = workflow_view.render_position_table(proj, width=w, now_dt=now_dt)
+            for line in lines:
+                self.assertLessEqual(tui.width(line), w)
+
+        # Returned work must not say completed
+        full_text = "\n".join(workflow_view.render_position_table(proj, width=120, now_dt=now_dt))
+        self.assertNotIn("completed", full_text)
+        self.assertIn("returned", full_text)
+
+    def test_render_obligations_table(self):
+        root = "root-render-obl"
+        child = "child-render-obl"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"SGSP-B3\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Noether"}],
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        now_dt = datetime(2026, 8, 19, 10, 8, 0, tzinfo=timezone.utc)
+        lines = workflow_view.render_obligations(proj, width=100, now_dt=now_dt)
+        text = "\n".join(lines)
+        self.assertIn("Noether", text)
+        self.assertIn("return to", text)
+        self.assertIn("[DER] spawn_agent", text)
+
+    def test_explain_projection(self):
+        root = "root-explain"
+        child = "child-exp-01"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"EX-1\",\"direction\":\"SCDMP\",\"actor_role\":\"EM\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+
+        fpath = write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        exp = workflow_view.explain_projection(proj, "EX-1")
+        self.assertIsNotNone(exp)
+        self.assertEqual(exp["type"], "work_item")
+        self.assertEqual(exp["external_id"], "EX-1")
+        self.assertEqual(exp["actor_role"], "EM")
+        self.assertEqual(exp["direction"], "SCDMP")
+        self.assertTrue(len(exp["evidence"]) > 0)
+        self.assertEqual(exp["evidence"][0]["file_path"], str(fpath))
+
+
+
+class TestStatuslineWorkflowIntegration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="test-statusline-wf-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.sessions_dir = self.tmp / "sessions"
+
+        from charter import statusline
+        self.env = unittest.mock.patch.dict(os.environ, {"CODEX_SESSIONS_PATH": str(self.sessions_dir)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_statusline_workflow_panel_and_fallback(self):
+        from charter import statusline
+
+        root = "root-statusline-wf"
+        child = "child-statusline-wf"
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WF-STAT\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+
+        # 1. With work dispatch -> header is workflow
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:10Z")
+
+        out = statusline.render({"session_id": root})
+        self.assertIn("workflow", out)
+        self.assertIn("WF-STAT", out)
+
+        # 2. Fallback when only session_meta child exists without dispatch event
+        shutil.rmtree(self.sessions_dir)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        write_test_rollout(self.sessions_dir, "root-raw", timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(self.sessions_dir, "child-raw", parent_id="root-raw", nickname="RawSubagent", timestamp="2026-08-19T10:00:10Z")
+
+        out_fallback = statusline.render({"session_id": "root-raw"})
+        self.assertIn("subagents", out_fallback)
+        self.assertIn("RawSubagent", out_fallback)
+
+    def test_statusline_returned_item_shown_as_intake_not_completed(self):
+        from charter import statusline
+
+        root = "root-ret-status"
+        child = "child-ret-status"
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"INTAKE-ONLY\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Finished review."},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:10Z", collab_events=[ret_ev])
+
+        out = statusline.render({"session_id": root})
+        self.assertIn("intake", out)
+        self.assertNotIn("completed", out)
+
+if __name__ == "__main__":
+    unittest.main()

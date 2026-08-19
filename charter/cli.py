@@ -10,6 +10,7 @@ from . import (
     __version__,
     commands,
     commands_harness,
+    commands_observe,
     commands_persona,
     commands_report,
     commands_secrets,
@@ -274,8 +275,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workspace_parser(sub)
     _add_worktree_parser(sub)
     _add_subagent_parser(sub)
+    _add_observe_parser(sub)
     _add_vault_parser(sub)
-    _add_secret_parser(sub)
     _add_persona_parser(sub)
     _add_report_parser(sub)
 
@@ -330,6 +331,92 @@ def _add_subagent_parser(sub) -> None:
     lg.add_argument("--json", action="store_true", help="Output JSON.")
     lg.set_defaults(func=commands_subagent.cmd_subagent_log)
 
+
+def _add_observe_parser(sub) -> None:
+    obs = sub.add_parser(
+        "observe",
+        aliases=["obs"],
+        help="Read-only workflow observer: positions, obligations, actors, timeline, explain.",
+    )
+    obssub = obs.add_subparsers(dest="observe_cmd")
+    obs.set_defaults(func=commands_observe.cmd_observe_position)
+
+    # Shared flags on top-level `charter observe`
+    obs.add_argument("--session", "-s", help="Session ID (default: active/recent session).")
+    obs.add_argument("--cwd", help="Working directory to filter rollouts by.")
+    obs.add_argument("--days", type=int, default=3, help="Lookback days (default: 3).")
+    obs.add_argument("--direction", help="Filter by declared direction name.")
+    obs.add_argument("--role", help="Filter by declared actor role name.")
+    obs.add_argument("--active-only", action="store_true", help="Show only active/dispatched/returned items.")
+    obs.add_argument("--plain", action="store_true", help="Render plain text without ANSI colors.")
+    obs.add_argument("--json", action="store_true", help="Output JSON.")
+    obs.add_argument("--watch", "-w", action="store_true", help="Live watch mode.")
+    obs.add_argument("--interval", "-i", type=float, default=10.0, help="Watch refresh interval in seconds (default: 10.0).")
+
+    # 1. position
+    pos = obssub.add_parser("position", aliases=["pos"], help="Render workflow position table and next obligations.")
+    pos.add_argument("--session", "-s", help="Session ID.")
+    pos.add_argument("--cwd", help="Working directory.")
+    pos.add_argument("--days", type=int, default=3, help="Lookback days.")
+    pos.add_argument("--direction", help="Filter by declared direction name.")
+    pos.add_argument("--role", help="Filter by declared actor role name.")
+    pos.add_argument("--active-only", action="store_true", help="Show only active items.")
+    pos.add_argument("--plain", action="store_true", help="Plain text output.")
+    pos.add_argument("--json", action="store_true", help="Output JSON.")
+    pos.add_argument("--watch", "-w", action="store_true", help="Live watch mode.")
+    pos.add_argument("--interval", "-i", type=float, default=10.0, help="Watch interval.")
+    pos.set_defaults(func=commands_observe.cmd_observe_position)
+
+    # 2. obligations
+    obl = obssub.add_parser("obligations", aliases=["obls", "obligation"], help="Render open workflow obligations.")
+    obl.add_argument("--session", "-s", help="Session ID.")
+    obl.add_argument("--cwd", help="Working directory.")
+    obl.add_argument("--days", type=int, default=3, help="Lookback days.")
+    obl.add_argument("--owner", help="Filter by owner actor or role name.")
+    obl.add_argument("--kind", choices=["return_expected", "intake_required"], help="Filter by obligation kind.")
+    obl.add_argument("--plain", action="store_true", help="Plain text output.")
+    obl.add_argument("--json", action="store_true", help="Output JSON.")
+    obl.add_argument("--watch", "-w", action="store_true", help="Live watch mode.")
+    obl.add_argument("--interval", "-i", type=float, default=10.0, help="Watch interval.")
+    obl.set_defaults(func=commands_observe.cmd_observe_obligations)
+
+    # 3. actors
+    act = obssub.add_parser("actors", aliases=["actor"], help="Render workflow actors and relationships.")
+    act.add_argument("--session", "-s", help="Session ID.")
+    act.add_argument("--cwd", help="Working directory.")
+    act.add_argument("--days", type=int, default=3, help="Lookback days.")
+    act.add_argument("--runtime-tree", action="store_true", help="Focus on runtime spawn topology.")
+    act.add_argument("--declared-relations", action="store_true", help="Focus on declared relationships.")
+    act.add_argument("--plain", action="store_true", help="Plain text output.")
+    act.add_argument("--json", action="store_true", help="Output JSON.")
+    act.add_argument("--watch", "-w", action="store_true", help="Live watch mode.")
+    act.add_argument("--interval", "-i", type=float, default=10.0, help="Watch interval.")
+    act.set_defaults(func=commands_observe.cmd_observe_actors)
+
+    # 4. timeline
+    tl = obssub.add_parser("timeline", help="Render chronological observation events.")
+    tl.add_argument("--session", "-s", help="Session ID.")
+    tl.add_argument("--cwd", help="Working directory.")
+    tl.add_argument("--days", type=int, default=3, help="Lookback days.")
+    tl.add_argument("--work", help="Filter events to a specific work item ID.")
+    tl.add_argument("--actor", help="Filter events to a specific actor ID or name.")
+    tl.add_argument("--tool-calls", action="store_true", help="Include tool invocation events.")
+    tl.add_argument("--include-content", action="store_true", help="Include full message/declaration content.")
+    tl.add_argument("--plain", action="store_true", help="Plain text output.")
+    tl.add_argument("--json", action="store_true", help="Output JSON.")
+    tl.add_argument("--watch", "-w", action="store_true", help="Live watch mode.")
+    tl.add_argument("--interval", "-i", type=float, default=10.0, help="Watch interval.")
+    tl.set_defaults(func=commands_observe.cmd_observe_timeline)
+
+    # 5. explain
+    exp = obssub.add_parser("explain", help="Explain a projection item with exact evidence basis.")
+    exp.add_argument("id", help="Projection item ID (work ID, actor ID, obligation ID, or incident ID).")
+    exp.add_argument("--session", "-s", help="Session ID.")
+    exp.add_argument("--cwd", help="Working directory.")
+    exp.add_argument("--days", type=int, default=3, help="Lookback days.")
+    exp.add_argument("--plain", action="store_true", help="Plain text output.")
+    exp.add_argument("--json", action="store_true", help="Output JSON.")
+    exp.set_defaults(func=commands_observe.cmd_observe_explain)
 
 def _add_report_parser(sub) -> None:
     r = sub.add_parser("report",

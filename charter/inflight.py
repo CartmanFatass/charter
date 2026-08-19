@@ -24,6 +24,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 #: A dispatch still marked in-flight after this long is assumed dead — the process
 #: was killed, or PostToolUse never fired. Long enough not to prune a genuinely slow
@@ -57,15 +58,19 @@ def live(exclude_token: str | None = None) -> list[str]:
                 continue
             if exclude_token and p.stem == exclude_token:
                 continue
-            out.append(json.loads(p.read_text()).get("agent") or p.stem)
+            data = json.loads(p.read_text(encoding="utf-8"))
+            out.append(data.get("agent") or p.stem)
         except (OSError, ValueError):
             continue
     return sorted(out)
 
 
-def live_records(exclude_token: str | None = None) -> list[dict[str, Any]]:
+def live_records(
+    exclude_token: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Return structured records of agent dispatches currently in flight."""
-    from typing import Any
     d = _dir()
     if not d.exists():
         return []
@@ -82,15 +87,36 @@ def live_records(exclude_token: str | None = None) -> list[dict[str, Any]]:
             data = json.loads(p.read_text(encoding="utf-8"))
             agent_name = data.get("agent") or p.stem.split(".")[0]
             start_ts = data.get("ts") or st.st_mtime
+            rec_session_id = data.get("session_id")
+            rec_agent_id = data.get("agent_id")
+            rec_parent_id = data.get("parent_id")
+            rec_schema = data.get("schema", 1)
+
+            if session_id is not None:
+                if rec_session_id is not None and rec_session_id != session_id:
+                    continue
+
             out.append({
                 "token": p.stem,
                 "agent": agent_name,
+                "agent_id": rec_agent_id,
+                "session_id": rec_session_id,
+                "parent_id": rec_parent_id,
+                "schema": rec_schema,
                 "ts": start_ts,
             })
         except (OSError, ValueError):
             continue
     return sorted(out, key=lambda r: r["ts"])
-def start(agent: str) -> str | None:
+
+
+def start(
+    agent: str,
+    *,
+    session_id: str | None = None,
+    agent_id: str | None = None,
+    parent_id: str | None = None,
+) -> str | None:
     """Mark *agent* as in flight; returns an opaque token, or None on any failure."""
     agent = (agent or "").strip()
     if not agent:
@@ -103,23 +129,56 @@ def start(agent: str) -> str | None:
         # losing exactly the overlap this exists to observe. The agent name stays
         # in the prefix so `finish` can still find its own records.
         fd, path = tempfile.mkstemp(prefix=f"{_safe_name(agent)}.", suffix=".json", dir=d)
-        with os.fdopen(fd, "w") as fh:
-            json.dump({"agent": agent, "ts": time.time()}, fh)
+        payload: dict[str, Any] = {
+            "schema": 2,
+            "agent": agent,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "parent_id": parent_id,
+            "ts": time.time(),
+        }
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
         return Path(path).stem
     except OSError:
         return None
 
 
-def finish(agent: str) -> None:
-    """Clear one in-flight record for *agent* — the oldest, since a repeat dispatch
-    of the same persona should retire the run that started first."""
+def finish(
+    agent: str,
+    *,
+    session_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Clear one in-flight record for *agent* — the oldest matching, respecting session/agent scoping."""
     agent = (agent or "").strip()
     if not agent:
         return
     try:
-        matches = sorted(_dir().glob(f"{_safe_name(agent)}.*.json"),
-                         key=lambda p: p.stat().st_mtime)
-        if matches:
+        d = _dir()
+        if not d.exists():
+            return
+        matches = sorted(
+            d.glob(f"{_safe_name(agent)}.*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        target: Path | None = None
+        for p in matches:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            rec_sid = data.get("session_id")
+            rec_aid = data.get("agent_id")
+            if session_id is not None and rec_sid is not None and rec_sid != session_id:
+                continue
+            if agent_id is not None and rec_aid is not None and rec_aid != agent_id:
+                continue
+            target = p
+            break
+        if target:
+            target.unlink(missing_ok=True)
+        elif session_id is None and agent_id is None and matches:
             matches[0].unlink(missing_ok=True)
     except OSError:
         return

@@ -1718,8 +1718,9 @@ def pretooluse_dispatch() -> int:
         return 0
     try:
         from . import inflight, persona
+        sid = data.get("session_id")
         others = inflight.live()
-        token = inflight.start(agent)
+        token = inflight.start(agent, session_id=sid)
         if not others:
             return 0
         d = persona.load(agent) or {}
@@ -1780,7 +1781,7 @@ def posttooluse_dispatch() -> int:
         _trace("dispatch", data.get("session_id"), agent=agent)
         _commit_dispatch(p, agent)
         from . import inflight
-        inflight.finish(agent)   # this dispatch is no longer in flight
+        inflight.finish(agent, session_id=data.get("session_id"))   # this dispatch is no longer in flight
     except Exception:
         return 0  # a tally must never break a turn
     return 0
@@ -1798,11 +1799,12 @@ def subagentstart() -> int:
     try:
         _trace("subagent_start", sid, agent=agent)
         from . import inflight
-        inflight.start(agent)
+        agent_id = data.get("agent_id")
+        parent_id = data.get("parent_thread_id") or data.get("parent_id")
+        inflight.start(agent, session_id=sid, agent_id=agent_id, parent_id=parent_id)
     except Exception:
         return 0
     return 0
-
 
 def subagentstop() -> int:
     """Handler for SubagentStop hook."""
@@ -1818,12 +1820,11 @@ def subagentstop() -> int:
     try:
         _trace("subagent_stop", sid, agent=agent)
         from . import inflight
-        inflight.finish(agent)
+        agent_id = data.get("agent_id")
+        inflight.finish(agent, session_id=sid, agent_id=agent_id)
     except Exception:
         return 0
     return 0
-
-
 
 def _commit_dispatch(path, agent: str) -> None:
     """Commit the tally line, serialized against concurrent dispatches — reactive and

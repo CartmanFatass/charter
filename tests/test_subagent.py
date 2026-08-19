@@ -329,7 +329,8 @@ class TestSubagentRendering(unittest.TestCase):
 
         # 4. Completed node with recent exchange -> ✔, no speech bubble
         chip_done = subagent.render_chip(node_completed, now=now, color=False, tick=1, latest_exchange=active_ex)
-        self.assertIn("✔ DoneWorker", chip_done)
+        self.assertIn("○ DoneWorker", chip_done)
+        self.assertIn("stopped", chip_done)
         self.assertNotIn("Active working progress", chip_done)
 
     def test_branch_flow_animation_and_fading(self):
@@ -416,7 +417,7 @@ class TestSubagentRendering(unittest.TestCase):
         summ = subagent.subagent_summary(tree, color=False)
         self.assertIn("3 subagents", summ)
         self.assertIn("2 running", summ)
-        self.assertIn("1 completed", summ)
+        self.assertIn("1 stopped", summ)
 class TestSubagentCLI(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="test-subagent-cli-"))
@@ -465,6 +466,89 @@ class TestSubagentCLI(unittest.TestCase):
         self.assertEqual(out_show["id"], child)
         self.assertEqual(out_show["name"], "WorkerAgent")
         self.assertEqual(out_show["parent_id"], root)
+
+    def test_characterization_legacy_subagent_json_shape(self):
+        root = "root-charact-001"
+        child = "child-charact-002"
+        write_test_rollout(self.sessions_dir, root, parent_id=None, nickname="Main")
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="ChildWorker")
+
+        parser = cli.build_parser()
+
+        # tree json shape
+        buf_tree = io.StringIO()
+        with mock.patch("sys.stdout", buf_tree):
+            args = parser.parse_args(["subagent", "tree", "--session", root, "--json"])
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+        tree_data = json.loads(buf_tree.getvalue())
+        self.assertIn("root_id", tree_data)
+        self.assertIn("total_count", tree_data)
+        self.assertIn("updated_at", tree_data)
+        self.assertIn("nodes", tree_data)
+        self.assertIsInstance(tree_data["nodes"], list)
+        self.assertEqual(tree_data["nodes"][0]["name"], "ChildWorker")
+        self.assertIn("status", tree_data["nodes"][0])
+        self.assertIn("children", tree_data["nodes"][0])
+
+        # list json shape
+        buf_list = io.StringIO()
+        with mock.patch("sys.stdout", buf_list):
+            args = parser.parse_args(["subagent", "list", "--session", root, "--json"])
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+        list_data = json.loads(buf_list.getvalue())
+        self.assertIsInstance(list_data, list)
+        self.assertIn("id", list_data[0])
+        self.assertIn("name", list_data[0])
+        self.assertIn("status", list_data[0])
+
+        # show json shape
+        buf_show = io.StringIO()
+        with mock.patch("sys.stdout", buf_show):
+            args = parser.parse_args(["subagent", "show", child, "--json"])
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+        show_data = json.loads(buf_show.getvalue())
+        self.assertIn("id", show_data)
+        self.assertIn("name", show_data)
+        self.assertIn("status", show_data)
+        self.assertIn("parent_id", show_data)
+        self.assertIn("rollout_file", show_data)
+
+    def test_legacy_status_and_additive_runtime_state(self):
+        info = subagent.SubagentInfo(id="a1", name="Worker", status="completed")
+        d = info.to_dict()
+        self.assertEqual(d["status"], "completed")
+        self.assertEqual(d["runtime_state"], "stopped")
+
+        node = subagent.SubagentTreeNode(id="n1", name="WorkerNode", status="completed")
+        nd = node.to_dict()
+        self.assertEqual(nd["status"], "completed")
+        self.assertEqual(nd["runtime_state"], "stopped")
+
+    def test_stopped_subagent_never_renders_completed_word_in_text(self):
+        root = "root-stopped-text"
+        child = "child-stopped-text"
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="OldWorker", timestamp="2026-08-19T10:00:10Z", mtime=100.0)
+
+        parser = cli.build_parser()
+        buf_tree = io.StringIO()
+        with mock.patch("sys.stdout", buf_tree):
+            args = parser.parse_args(["subagent", "tree", "--session", root, "--plain"])
+            args.func(args)
+        tree_text = buf_tree.getvalue()
+        self.assertNotIn("completed", tree_text)
+        self.assertIn("stopped", tree_text)
+
+        buf_list = io.StringIO()
+        with mock.patch("sys.stdout", buf_list):
+            args_list = parser.parse_args(["subagent", "list", "--session", root])
+            args_list.func(args_list)
+        list_text = buf_list.getvalue()
+        self.assertIn("RUNTIME", list_text)
+        self.assertIn("stopped", list_text)
     def test_cli_log_and_exchanges(self):
         root = "root-sess-999"
         child = "child-sess-888"

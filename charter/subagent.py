@@ -15,12 +15,23 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal, Mapping
 
 from . import tui
 
 SubagentStatus = Literal["starting", "running", "completed", "error"]
+RuntimeState = Literal["starting", "running", "stopped", "unknown"]
 
+
+def legacy_status_to_runtime_state(status: SubagentStatus) -> RuntimeState:
+    """Map legacy status value to neutral runtime state."""
+    if status == "starting":
+        return "starting"
+    if status == "running":
+        return "running"
+    if status in ("completed", "error"):
+        return "stopped"
+    return "unknown"
 ACTIVE_WINDOW_SECONDS = 45.0
 DEFAULT_LOOKBACK_DAYS = 30
 DEFAULT_WATCH_INTERVAL = 10.0
@@ -74,10 +85,10 @@ class SubagentInfo:
             "id": self.id,
             "name": self.name,
             "status": self.status,
+            "runtime_state": legacy_status_to_runtime_state(self.status),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "model": self.model,
         }
-
 
 @dataclass
 class SubagentTreeNode:
@@ -95,11 +106,11 @@ class SubagentTreeNode:
             "id": self.id,
             "name": self.name,
             "status": self.status,
+            "runtime_state": legacy_status_to_runtime_state(self.status),
             "depth": self.depth,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "children": [c.to_dict() for c in self.children],
         }
-
 
 @dataclass
 class SubagentTree:
@@ -130,6 +141,23 @@ class SessionLink:
     modified_at: datetime
     cwd: str | None = None
 
+
+@dataclass(frozen=True)
+class RolloutRecord:
+    session_id: str
+    file_path: Path
+    line_number: int
+    entry_type: str
+    raw_kind: str
+    timestamp: datetime | None
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class SessionIndex:
+    links: Mapping[str, SessionLink]
+    rollout_files: Mapping[str, Path]
+    children: Mapping[str, tuple[str, ...]]
 
 @dataclass
 class SubagentExchange:
@@ -445,6 +473,132 @@ def find_active_rollouts(
     return active
 
 
+def iter_rollout_records(file_path: Path) -> Iterator[RolloutRecord]:
+    """Stream raw RolloutRecord objects from a rollout JSONL file with stable line numbers."""
+    if not file_path.is_file():
+        return
+
+    parsed_fn = parse_rollout_filename(file_path.name)
+    default_sid = parsed_fn[1] if parsed_fn else ""
+    cached_sid = default_sid
+
+    line_number = 0
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for raw_line in f:
+                line_number += 1
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+
+                entry_type = str(entry.get("type") or "")
+                raw_payload = entry.get("payload")
+                payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, dict) else entry
+
+                sid = cached_sid
+                if entry_type == "session_meta" and isinstance(raw_payload, dict):
+                    meta_sid = raw_payload.get("id") or raw_payload.get("session_id")
+                    if meta_sid:
+                        cached_sid = str(meta_sid)
+                        sid = cached_sid
+                elif not sid:
+                    if isinstance(raw_payload, dict):
+                        sid = str(raw_payload.get("session_id") or raw_payload.get("thread_id") or "")
+                    if not sid:
+                        sid = cached_sid
+
+                ts_val = entry.get("timestamp")
+                if not ts_val and isinstance(raw_payload, dict):
+                    ts_val = raw_payload.get("timestamp")
+                ts = parse_datetime(ts_val)
+
+                if entry_type == "session_meta":
+                    raw_kind = "session_meta"
+                elif isinstance(raw_payload, dict):
+                    p_type = raw_payload.get("type")
+                    if p_type == "item_completed":
+                        item = raw_payload.get("item")
+                        if isinstance(item, dict):
+                            raw_kind = str(item.get("tool") or item.get("name") or item.get("type") or "item_completed")
+                        else:
+                            raw_kind = "item_completed"
+                    elif p_type:
+                        raw_kind = str(p_type)
+                    else:
+                        raw_kind = entry_type or "unknown"
+                else:
+                    raw_kind = entry_type or "unknown"
+
+                yield RolloutRecord(
+                    session_id=sid,
+                    file_path=file_path,
+                    line_number=line_number,
+                    entry_type=entry_type,
+                    raw_kind=raw_kind,
+                    timestamp=ts,
+                    payload=payload,
+                )
+    except OSError:
+        return
+
+
+def build_session_index(
+    max_days_back: int = DEFAULT_LOOKBACK_DAYS,
+    sessions_dir: Path | None = None,
+) -> SessionIndex:
+    """Build a unified index mapping session IDs to links, rollout files, and children."""
+    rollouts = find_rollouts_in_days(max_days_back, sessions_dir=sessions_dir)
+    links: dict[str, SessionLink] = {}
+    rollout_files: dict[str, Path] = {}
+
+    for file_path, _, _, mod_time in rollouts:
+        link = peek_session_link(file_path, modified_at=mod_time)
+        if not link:
+            continue
+        existing = links.get(link.id)
+        if not existing or link.modified_at > existing.modified_at:
+            links[link.id] = link
+            rollout_files[link.id] = file_path
+
+    children_map: dict[str, list[str]] = {}
+    for link in sorted(links.values(), key=lambda l: (l.started_at or datetime.min.replace(tzinfo=timezone.utc), l.id)):
+        if link.parent_id:
+            children_map.setdefault(link.parent_id, []).append(link.id)
+
+    children: dict[str, tuple[str, ...]] = {
+        k: tuple(v) for k, v in children_map.items()
+    }
+
+    return SessionIndex(
+        links=links,
+        rollout_files=rollout_files,
+        children=children,
+    )
+
+
+def descendant_session_ids(index: SessionIndex, root_id: str) -> tuple[str, ...]:
+    """Return root_id and all its descendant session IDs in deterministic hierarchical order."""
+    if not root_id:
+        return ()
+    result: list[str] = [root_id]
+    visited: set[str] = {root_id}
+    queue: list[str] = [root_id]
+    while queue:
+        curr = queue.pop(0)
+        for child_id in index.children.get(curr, ()):
+            if child_id not in visited:
+                visited.add(child_id)
+                result.append(child_id)
+                queue.append(child_id)
+    return tuple(result)
+
+
 # --------------------------------------------------------------------------
 # Rollout Event Parsing (CollabAgentToolCall etc.)
 # --------------------------------------------------------------------------
@@ -653,12 +807,24 @@ def build_subagent_tree(
     # Discover in-flight dispatches from charter.inflight
     try:
         from . import inflight
-        existing_root_cids = children.get(root_id, [])
-        existing_names = {links[cid].name for cid in existing_root_cids if cid in links}
+        candidate_roots = {lid for lid, l in links.items() if not l.parent_id}
         for rec in inflight.live_records():
+            rec_sid = rec.get("session_id")
+            rec_pid = rec.get("parent_id")
+            if rec_sid is not None:
+                if rec_sid != root_id and rec_pid != root_id and rec_sid not in links:
+                    continue
+            else:
+                if len(candidate_roots) > 1:
+                    continue
+
             agent_name = rec["agent"]
             token = rec["token"]
-            if agent_name not in existing_names and token not in existing_root_cids:
+            target_parent = rec_pid if (rec_pid and rec_pid in links) else root_id
+            target_cids = children.get(target_parent, [])
+            target_names = {links[cid].name for cid in target_cids if cid in links}
+
+            if agent_name not in target_names and token not in target_cids:
                 pseudo_id = f"inflight-{token}"
                 start_dt = datetime.fromtimestamp(rec["ts"], tz=timezone.utc)
                 known_map[pseudo_id] = SubagentInfo(
@@ -667,10 +833,9 @@ def build_subagent_tree(
                     status="running",
                     started_at=start_dt,
                 )
-                children.setdefault(root_id, []).append(pseudo_id)
+                children.setdefault(target_parent, []).append(pseudo_id)
     except Exception:
         pass
-
     visiting: set[str] = set()
 
     def build_node(node_id: str, depth: int) -> SubagentTreeNode:
@@ -870,17 +1035,21 @@ def render_chip(
             is_communicating = False
 
     if node.status == "completed":
-        icon = ICON_COMPLETED
-        col = green
+        icon = "○"
+        col = dim
+        display_status = "stopped"
     elif node.status == "error":
         icon = ICON_ERROR
         col = red
+        display_status = "stopped"
     elif node.status == "starting":
         icon = SPINNER_FRAMES[tick % len(SPINNER_FRAMES)] if (tick > 0 and is_communicating) else ICON_STARTING
         col = yellow
+        display_status = "starting"
     else:
         icon = SPINNER_FRAMES[tick % len(SPINNER_FRAMES)] if (tick > 0 and is_communicating) else ICON_RUNNING
         col = cyan
+        display_status = "running"
 
     elapsed = ""
     if node.started_at:
@@ -889,8 +1058,7 @@ def render_chip(
             elapsed = f" {dim}{el_str}{r}"
 
     name_label = f"{node.name} [{node.id[:8]}]" if (verbose and node.id) else node.name
-    base = f"{col}{icon} {name_label}{r} {dim}{node.status}{r}{elapsed}"
-
+    base = f"{col}{icon} {name_label}{r} {dim}{display_status}{r}{elapsed}"
     # Live communication bubble (only when running/starting and actively communicating)
     if latest_exchange and is_communicating and node.status in ("running", "starting"):
         snippet = latest_exchange.content.strip().replace("\n", " ")
@@ -1084,8 +1252,7 @@ def subagent_summary(tree: SubagentTree | None, color: bool = True) -> str:
     if running > 0:
         parts.append(f"{running} running")
     if completed > 0:
-        parts.append(f"{completed} completed")
-    if errors > 0:
+        parts.append(f"{completed} stopped")
         parts.append(f"{errors} error")
     details = f" ({', '.join(parts)})" if parts else ""
     dim = _DIM if color else ""
@@ -1407,6 +1574,15 @@ class SubagentEventWatcher:
             inflight_dir = inflight._dir()
             if inflight_dir.exists():
                 paths.append(inflight_dir)
+        except Exception:
+            pass
+
+        # Monitor trace directory
+        try:
+            from . import config
+            trace_dir = config.PERSONA_STATE_DIR / "trace"
+            if trace_dir.exists():
+                paths.append(trace_dir)
         except Exception:
             pass
 

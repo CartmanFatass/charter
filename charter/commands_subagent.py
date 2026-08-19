@@ -130,11 +130,14 @@ def cmd_subagent_list(args) -> int:
                 all_links.append(link)
 
         if as_json:
+            now_ts = subagent.datetime.now(subagent.timezone.utc).timestamp()
             print(json.dumps([
                 {
                     "id": l.id,
                     "parent_id": l.parent_id,
                     "name": l.name,
+                    "status": "running" if (now_ts - l.modified_at.timestamp()) <= subagent.ACTIVE_WINDOW_SECONDS else "completed",
+                    "runtime_state": "running" if (now_ts - l.modified_at.timestamp()) <= subagent.ACTIVE_WINDOW_SECONDS else "stopped",
                     "started_at": l.started_at.isoformat() if l.started_at else None,
                     "modified_at": l.modified_at.isoformat(),
                 }
@@ -147,14 +150,14 @@ def cmd_subagent_list(args) -> int:
             return 0
 
         if verbose:
-            print(f"{'SUBAGENT':<28}{'ID':<38}{'PARENT':<38}{'STARTED':<20} STATUS")
+            print(f"{'SUBAGENT':<28}{'ID':<38}{'PARENT':<38}{'STARTED':<20} RUNTIME")
         else:
-            print(f"{'SUBAGENT':<24}{'ID':<12}{'PARENT':<12}{'STARTED':<20} STATUS")
+            print(f"{'SUBAGENT':<24}{'ID':<12}{'PARENT':<12}{'STARTED':<20} RUNTIME")
 
         now_ts = subagent.datetime.now(subagent.timezone.utc).timestamp()
         for l in all_links:
-            st = "running" if (now_ts - l.modified_at.timestamp()) <= subagent.ACTIVE_WINDOW_SECONDS else "completed"
-            st_col = "\033[36m" if st == "running" else "\033[32m"
+            st = "running" if (now_ts - l.modified_at.timestamp()) <= subagent.ACTIVE_WINDOW_SECONDS else "stopped"
+            st_col = "\033[36m" if st == "running" else "\033[2m"
             started_str = l.started_at.strftime("%Y-%m-%d %H:%M:%S") if l.started_at else "-"
             if verbose:
                 print(f"{l.name:<28}{l.id:<38}{l.parent_id if l.parent_id else '-':<38}{started_str:<20} {st_col}{st}\033[0m")
@@ -182,23 +185,25 @@ def cmd_subagent_list(args) -> int:
         return 0
 
     if verbose:
-        print(f"{'SUBAGENT':<28}{'ID':<38}{'DEPTH':<8}{'ELAPSED':<12} STATUS")
+        print(f"{'SUBAGENT':<28}{'ID':<38}{'DEPTH':<8}{'ELAPSED':<12} RUNTIME")
     else:
-        print(f"{'SUBAGENT':<24}{'ID':<12}{'DEPTH':<8}{'ELAPSED':<12} STATUS")
+        print(f"{'SUBAGENT':<24}{'ID':<12}{'DEPTH':<8}{'ELAPSED':<12} RUNTIME")
 
     now = subagent.datetime.now(subagent.timezone.utc)
     for n in nodes:
         elapsed = subagent.format_elapsed(n.started_at, now) if n.started_at else "-"
+        rt_st = subagent.legacy_status_to_runtime_state(n.status)
         st_col = (
-            "\033[32m" if n.status == "completed"
+            "\033[2m" if rt_st == "stopped" and n.status == "completed"
             else "\033[31m" if n.status == "error"
-            else "\033[33m" if n.status == "starting"
+            else "\033[33m" if rt_st == "starting"
             else "\033[36m"
         )
+        disp_text = "stopped" if n.status in ("completed", "error") else rt_st
         if verbose:
-            print(f"{n.name:<28}{n.id:<38}{n.depth:<8}{elapsed:<12} {st_col}{n.status}\033[0m")
+            print(f"{n.name:<28}{n.id:<38}{n.depth:<8}{elapsed:<12} {st_col}{disp_text}\033[0m")
         else:
-            print(f"{n.name:<24}{n.id[:8]:<12}{n.depth:<8}{elapsed:<12} {st_col}{n.status}\033[0m")
+            print(f"{n.name:<24}{n.id[:8]:<12}{n.depth:<8}{elapsed:<12} {st_col}{disp_text}\033[0m")
     return 0
 
 def cmd_subagent_log(args) -> int:
@@ -264,11 +269,13 @@ def cmd_subagent_show(args) -> int:
 
     exchanges = subagent.extract_subagent_exchanges(subagent_id=matched_link.id, max_days_back=days)
 
+    rt_state = subagent.legacy_status_to_runtime_state(status)
     data = {
         "id": matched_link.id,
         "name": matched_link.name,
         "parent_id": matched_link.parent_id,
         "status": status,
+        "runtime_state": rt_state,
         "started_at": matched_link.started_at.isoformat() if matched_link.started_at else None,
         "modified_at": matched_link.modified_at.isoformat(),
         "cwd": matched_link.cwd,
@@ -284,8 +291,8 @@ def cmd_subagent_show(args) -> int:
     print(f"\033[1mSubagent:\033[0m {matched_link.name}")
     print(f"  ID:         {matched_link.id}")
     print(f"  Parent:     {matched_link.parent_id or '(none)'}")
-    st_col = "\033[36m" if status == "running" else "\033[32m"
-    print(f"  Status:     {st_col}{status}\033[0m")
+    st_col = "\033[36m" if rt_state == "running" else "\033[2m"
+    print(f"  Runtime:    {st_col}{rt_state}\033[0m")
     if matched_link.started_at:
         print(f"  Started:    {matched_link.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Last Event: {matched_link.modified_at.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -293,7 +300,6 @@ def cmd_subagent_show(args) -> int:
         print(f"  CWD:        {matched_link.cwd}")
     if matched_rollout:
         print(f"  Rollout:    {matched_rollout[0]}")
-
     if exchanges:
         limit = 15 if verbose else 5
         print(f"\n\033[1mRecent Exchanges ({len(exchanges)}):\033[0m")

@@ -1169,10 +1169,9 @@ def _persona_chips(session: str | None = None) -> list[str]:
         return []
 
 
-def _session_news(sid: str | None) -> list[str]:
+def _session_news(sid: str | None, projection: Any = None) -> list[str]:
     """Counters for what has happened **in this session** — in flight, denied,
     recorded, dispatched.
-
     Deliberately silent when nothing is happening. A counter that renders every turn
     becomes furniture within a day, and then a real guard denial appearing in it gets
     no more attention than a zero would. Presence IS the signal.
@@ -1215,16 +1214,42 @@ def _session_news(sid: str | None) -> list[str]:
     except Exception:
         pass
 
-    try:
-        from . import subagent
-        if sid:
-            tree = subagent.build_subagent_tree(sid, max_days_back=1)
-            if tree.total_count > 0:
-                summ = subagent.subagent_summary(tree)
-                if summ and not any("subagent" in p for p in out):
-                    out.append(summ)
-    except Exception:
-        pass
+    if projection is not None:
+        try:
+            work_items = getattr(projection, "work_items", ())
+            open_obls = getattr(projection, "open_obligations", ())
+            incidents = getattr(projection, "incidents", ())
+            if work_items:
+                active_c = sum(1 for w in work_items if w.phase in ("dispatched", "active") and w.runtime_state == "running")
+                returned_c = sum(1 for w in work_items if w.phase == "returned")
+                intake_c = sum(1 for o in open_obls if o.kind == "intake_required")
+                inc_c = len(incidents)
+
+                parts = []
+                if active_c > 0:
+                    parts.append(f"{active_c} active")
+                if returned_c > 0:
+                    parts.append(f"{returned_c} returned")
+                if intake_c > 0:
+                    parts.append(f"{intake_c} intake")
+                if inc_c > 0:
+                    parts.append(f"{inc_c} incident")
+
+                if parts:
+                    out.append(f"{_CYAN}⇢ {' · '.join(parts)}{_R}")
+        except Exception:
+            pass
+    else:
+        try:
+            from . import subagent
+            if sid:
+                tree = subagent.build_subagent_tree(sid, max_days_back=1)
+                if tree.total_count > 0:
+                    summ = subagent.subagent_summary(tree)
+                    if summ and not any("subagent" in p for p in out):
+                        out.append(summ)
+        except Exception:
+            pass
     return out
 
 
@@ -1321,8 +1346,6 @@ def _common_git_dir(gitdir: Path) -> Path:
         txt = (gitdir / "commondir").read_text().strip()
     except OSError:
         return gitdir                      # a clone's git dir IS the common dir
-    if not txt:
-        return gitdir
     p = Path(txt)
     return p if p.is_absolute() else (gitdir / p)
 
@@ -1526,7 +1549,7 @@ def _root_marker() -> str:
     return _r.MARKER
 
 
-def _session_strip(payload: dict, sid: str | None) -> str:
+def _session_strip(payload: dict, sid: str | None, projection: Any = None) -> str:
     """The bottom zone: everything true of **this session**, on one line.
 
     ``ctx``/``⚡`` (context + cache health) sit here rather than in the top line
@@ -1537,9 +1560,8 @@ def _session_strip(payload: dict, sid: str | None) -> str:
     Empty string when there is nothing to report (a fresh session or one just past
     ``/compact`` has no usage yet): the brand alone does not justify a row.
     """
-    parts = [*_context_gauge(payload), *_session_news(sid)]
+    parts = [*_context_gauge(payload), *_session_news(sid, projection=projection)]
     return f"{_DIM} · {_R}".join(parts) if parts else ""
-
 
 def _brand() -> str:
     """`⬢ charter x.y.z`, plus `↑ a.b.c` when a newer release is cached.
@@ -1654,6 +1676,86 @@ def _with_brand(body: str, width: int) -> str:
         return "\n".join(lines)
     except Exception:
         return body
+
+
+def _workflow_section(
+    projection: Any = None,
+    tick: int = 0,
+    sid: str | None = None,
+) -> tuple[str | None, list[str]]:
+    """Gather workflow panel lines and header for dashboard integration.
+
+    Returns:
+        (wf_head, wf_lines) or falls back to raw subagents tree when no work items exist.
+    """
+    try:
+        from . import workflow_view
+        work_items = getattr(projection, "work_items", ()) if projection else ()
+        if not work_items:
+            return _subagent_section(sid, tick=tick)
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        active_n = sum(1 for w in work_items if w.phase in ("dispatched", "active") and w.runtime_state == "running")
+        returned_n = sum(1 for w in work_items if w.phase == "returned")
+        missing_ret_n = sum(1 for w in work_items if w.runtime_state == "stopped" and not w.return_observed)
+
+        counts_str = []
+        if active_n > 0:
+            counts_str.append(f"{active_n} active")
+        if returned_n > 0:
+            counts_str.append(f"{returned_n} returned")
+        if missing_ret_n > 0:
+            counts_str.append(f"{missing_ret_n} return-missing")
+
+        counts_tag = f" {_DIM}({_R}{' · '.join(counts_str)}{_DIM}){_R}" if counts_str else ""
+        wf_head = f"{_DIM}{_HEAD_PAD}▪ workflow{_R} {len(work_items)}{counts_tag}"
+
+        def item_sort_key(w) -> tuple[int, float]:
+            has_intake = any(o.kind == "intake_required" for o in w.obligations)
+            if has_intake:
+                return (0, -w.last_observed_at.timestamp())
+            if w.phase in ("active", "dispatched") and w.runtime_state == "running":
+                return (1, -w.last_observed_at.timestamp())
+            if w.phase == "returned":
+                return (2, -w.last_observed_at.timestamp())
+            if w.runtime_state == "stopped" and not w.return_observed:
+                return (3, -w.last_observed_at.timestamp())
+            return (4, -w.last_observed_at.timestamp())
+
+        sorted_items = sorted(work_items, key=item_sort_key)
+        lines: list[str] = []
+
+        for w in sorted_items[:6]:
+            age_str = workflow_view._format_age(w.last_observed_at, now)
+            label = w.display_label
+            actor = w.actor_name or (w.actor_id[:8] if w.actor_id else "subagent")
+            if w.actor_role:
+                actor = f"{actor} / {w.actor_role}"
+
+            has_intake = any(o.kind == "intake_required" for o in w.obligations)
+            if has_intake:
+                coord = w.coordinator_name or "ROOT"
+                row = f"  {_MAGENTA}◆{_R} {coord} ← {actor}  {label} intake {age_str}"
+            elif w.runtime_state == "running":
+                row = f"  {_GREEN}●{_R} {actor}  {label} active {age_str}"
+            elif w.runtime_state == "stopped" and not w.return_observed:
+                row = f"  {_DIM}○{_R} {actor}  stopped · return not observed {age_str}"
+            elif w.phase == "returned":
+                row = f"  {_CYAN}↩{_R} {actor}  {label} returned {age_str}"
+            elif w.phase == "resolved":
+                row = f"  {_GREEN}✓{_R} {actor}  {label} resolved {age_str}"
+            else:
+                row = f"  {_DIM}○{_R} {actor}  {label} {w.phase} {age_str}"
+
+            lines.append(row)
+            if w.incidents:
+                lines.append(f"    {_RED}⚠ incident evidence {len(w.incidents)}{_R}")
+
+        return wf_head, lines
+    except Exception:
+        return None, []
 
 
 def _subagent_section(
@@ -1786,11 +1888,26 @@ def render(payload: dict | None = None, tick: int = 0) -> str:
         header = f"{_DIM}{_HEAD_PAD}personas{_R} {len(chips)}" + (
             f"{_DIM} · vaults{_R} {nv}" if nv else "") + (
             f"{_DIM} · shared{_R}{shared_badge}" if shared_badge else "")
-        strip = _session_strip(payload, sid)
+        # Build observation snapshot & projection at most once per render
+        wf_proj = None
+        try:
+            from . import observations, subagent, workflow_view
+            effective_sid = subagent.find_root_session_id(sid) if sid else ""
+            if not effective_sid:
+                recent = subagent.find_most_recent_rollout(max_days_back=1)
+                if recent:
+                    effective_sid = subagent.find_root_session_id(recent[1], max_days_back=1)
+            if effective_sid:
+                snap = observations.collect_observation_snapshot(effective_sid, max_days_back=1)
+                wf_proj = workflow_view.project_workflow(snap)
+        except Exception:
+            wf_proj = None
+
+        strip = _session_strip(payload, sid, projection=wf_proj)
         alerts = _alerts(active)
 
-        # Gather subagents for dashboard integration
-        sub_head, sub_lines = _subagent_section(sid, tick=tick)
+        # Gather workflow panel or fallback subagents for dashboard integration
+        sub_head, sub_lines = _workflow_section(wf_proj, tick=tick, sid=sid)
         has_subagents = bool(sub_head and sub_lines)
 
         # Scheme B: Wide Screen 3-Column Layout (repos | subagents | personas)

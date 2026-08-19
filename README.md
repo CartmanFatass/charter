@@ -326,6 +326,8 @@ copy wins, is compared to nothing, and drifts unwatched in both directions.
   self-hosted example, a mixed-forge example, the memory posture, the version pin.
 - [docs/personas.md](docs/personas.md) — the charter format, inheritance, the memory model,
   and dispatching a persona as a sub-agent, end to end.
+- [docs/observe.md](docs/observe.md) — read-only workflow observation: position,
+  obligations, actors, timeline, and machine-readable evidence without supervisor authority.
 - [docs/workspaces.md](docs/workspaces.md) — the session lock and how to get out of it,
   LIVE vs LOCAL and where your notes actually go, and what belongs in `workspace.md`
   versus memory versus the manifest.
