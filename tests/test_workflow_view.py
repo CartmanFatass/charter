@@ -1099,11 +1099,21 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
 
         snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
         proj = workflow_view.project_workflow(snap)
-
         self.assertEqual(len(proj.work_items), 2)
         self.assertEqual(proj.work_items[0].phase, "returned")
         self.assertEqual(proj.work_items[1].phase, "returned")
         self.assertEqual(len(proj.unbound_events), 0, f"Expected 0 unbound events, got: {[e.attributes.get('unbound_reason') for e in proj.unbound_events]}")
+
+        # Timeline isolation under identical timestamps
+        tl_1 = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-1")
+        summaries_1 = [e.summary for e in tl_1]
+        self.assertTrue(any("tool_1" in s for s in summaries_1))
+        self.assertFalse(any("tool_2" in s for s in summaries_1), "WORK-1 timeline must not contain tool_2")
+
+        tl_2 = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-2")
+        summaries_2 = [e.summary for e in tl_2]
+        self.assertTrue(any("tool_2" in s for s in summaries_2))
+        self.assertFalse(any("tool_1" in s for s in summaries_2), "WORK-2 timeline must not contain tool_1")
 
     def test_same_child_return_a_intake_a_dispatch_b_return_b(self):
         """Verify complete causal lifecycle across sequential assignments to the same child."""

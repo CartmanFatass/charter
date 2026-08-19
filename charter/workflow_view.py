@@ -463,42 +463,48 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 actors_map[target_actor]["runtime_state"] = "running"
                 actors_map[target_actor]["basis"].extend(ev.evidence)
 
-            # Transition matching dispatched work item to active
-            for wid in child_dispatches.get(target_actor, []):
-                wi = work_items_map[wid]
-                if wi.phase in ("dispatched", "active"):
-                    if wi.phase == "dispatched":
-                        wi.phase = "active"
-                    wi.runtime_state = "running"
-                    wi.last_observed_at = ts
-                    wi.basis.extend(ev.evidence)
-                    wi.basis.append(EvidenceRef(
-                        source=ev.evidence[0].source if ev.evidence else "rollout_event",
-                        source_id=ev.id,
-                        raw_kind=ev.kind,
-                        observed_at=ts,
-                        evidence_class="mechanical",
-                    ))
+            # Bind strictly to the single current assignment (earliest still-open work item)
+            open_wids = [
+                wid for wid in child_dispatches.get(target_actor, [])
+                if work_items_map[wid].phase in ("dispatched", "active")
+            ]
+            if open_wids:
+                wi = work_items_map[open_wids[0]]
+                if wi.phase == "dispatched":
+                    wi.phase = "active"
+                wi.runtime_state = "running"
+                wi.last_observed_at = ts
+                wi.basis.extend(ev.evidence)
+                wi.basis.append(EvidenceRef(
+                    source=ev.evidence[0].source if ev.evidence else "rollout_event",
+                    source_id=ev.id,
+                    raw_kind=ev.kind,
+                    observed_at=ts,
+                    evidence_class="mechanical",
+                ))
         elif ev.kind == "actor_stopped":
             target_actor = ev.actor_id or ev.session_id
             if target_actor in actors_map:
                 actors_map[target_actor]["runtime_state"] = "stopped"
                 actors_map[target_actor]["basis"].extend(ev.evidence)
 
-            for wid in child_dispatches.get(target_actor, []):
-                wi = work_items_map[wid]
-                if wi.phase in ("dispatched", "active"):
-                    wi.runtime_state = "stopped"
-                    wi.return_observed = False
-                    wi.last_observed_at = ts
-                    wi.basis.extend(ev.evidence)
-                    wi.basis.append(EvidenceRef(
-                        source=ev.evidence[0].source if ev.evidence else "rollout_event",
-                        source_id=ev.id,
-                        raw_kind=ev.kind,
-                        observed_at=ts,
-                        evidence_class="mechanical",
-                    ))
+            open_wids = [
+                wid for wid in child_dispatches.get(target_actor, [])
+                if work_items_map[wid].phase in ("dispatched", "active")
+            ]
+            if open_wids:
+                wi = work_items_map[open_wids[0]]
+                wi.runtime_state = "stopped"
+                wi.return_observed = False
+                wi.last_observed_at = ts
+                wi.basis.extend(ev.evidence)
+                wi.basis.append(EvidenceRef(
+                    source=ev.evidence[0].source if ev.evidence else "rollout_event",
+                    source_id=ev.id,
+                    raw_kind=ev.kind,
+                    observed_at=ts,
+                    evidence_class="mechanical",
+                ))
         elif ev.kind == "actor_returned":
             target_child = ev.actor_id or ev.session_id
             if target_child in actors_map:

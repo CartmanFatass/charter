@@ -10,23 +10,21 @@
 
 Charter's Codex subagent visualization has been extended into a strictly read-only workflow observer. The observer parses exact `charter-observe` declarations and correlates them with mechanical rollout events, Hook traces, and inflight records without guessing ownership, altering state, or exercising orchestration authority.
 
-All issues identified across rounds 1 through 5 of external review have been completely resolved:
-1. **One-Shot Dispatch-Only Mirror Deduplication (Gate 2)**:
-   - Deduplication is strictly constrained to the one-shot mirror between `spawn_agent.prompt` and the spawned child's initial `user_message` for `event == "dispatch"`.
-   - Any later declarations—including repeated or retried `intake`, `resolve`, `relation`, or subsequent dispatches—are always preserved as distinct observed events.
-   - Tested by: `test_premature_intake_followed_by_identical_valid_intake` and `test_distinct_relation_actor_ids_not_deduplicated`.
-2. **Assignment-Specific Topological Causal Ordering (Gate 4)**:
-   - Intra-source file ordering unifies `session_meta` and all subsequent lines into single physical streams keyed by `(session_id, file_path)`, guaranteeing physical line order is never rewritten or inverted.
-   - Cross-session causal edges link each specific `dispatch_sent_i` to the first event of child activity segment `i` demarcated by returns.
-   - Child return `i` is strictly linked to its corresponding coordinator `intake_i`.
-   - Sequential assignments to the same child with identical timestamps return cleanly with 0 unbound events.
-   - Tested by: `test_session_meta_timestamp_later_than_task_complete_preserves_order`, `test_same_child_two_dispatches_identical_timestamps`, and `test_same_child_return_a_intake_a_dispatch_b_return_b`.
-3. **Strict Work Incident Isolation (Gate 1 & 4)**:
-   - Work timeline filtering matches incidents strictly by `work_id`, with no actor-fallback leakage across multiple assignments to the same actor.
-   - Tested by: `test_same_child_multi_assignment_incident_bound_strictly_to_work_b`.
-4. **In-Memory Fallback Full Fidelity (Gate 5)**:
-   - Snapshot-backed fallback includes inflight-only and event-only actors not yet present in `snapshot.sessions`.
-   - Runtime status uses chronological last-event-wins reduction, properly reflecting active status when a previously returned child becomes active again.
+All issues identified across rounds 1 through 6 of external review have been completely resolved:
+1. **Initial-Message-Constrained One-Shot Dispatch Mirror Deduplication (Gate 2)**:
+   - Deduplication is strictly constrained to the spawned child's **first** `user_message`. Mirror eligibility for that child is immediately expired after inspecting the first message.
+   - Any late repeated `dispatch` declarations (even with identical payload) arriving after an initial plain child message are preserved as distinct `ObservedEvent`s and never merged.
+   - Tested by: `test_late_repeated_dispatch_declaration_after_plain_initial_message` and `test_mirrored_declaration_deduplication`.
+2. **Premature Intake Rejection and Strict Causal DAG (Gate 4)**:
+   - Causal edges (`return_i` $\to$ `intake_i`) are **only** added when `intake.observed_at >= return.observed_at`. Intake declarations observably earlier than the child return receive no causal edge and are evaluated in natural order, correctly triggering `invalid_phase_for_intake` rejection in `unbound_events`.
+   - Tested by: `test_premature_intake_followed_by_identical_valid_intake` (asserting that `unbound_events[0].id` exactly matches the premature 10:00:02 intake event).
+3. **Assignment-Segment Activity Binding in Reducer (Gate 1 & 4)**:
+   - In `project_workflow`, activity, stop, incident, and return events bind strictly to the single earliest still-open (FIFO) assignment for the child.
+   - During WORK-1, WORK-2 remains in phase `dispatched` and receives zero activity evidence. When WORK-1 returns, WORK-2 becomes active upon segment 2 activity.
+   - Under coarse or identical timestamps, WORK-1's timeline contains only tool 1, and WORK-2's timeline contains only tool 2, with zero crosstalk.
+   - Tested by: `test_same_child_two_dispatches_identical_timestamps` and `test_work_timeline_multi_assignment_same_child_session_isolation`.
+4. **Statusline Fallback Full Fidelity & Zero Scans (Gate 5)**:
+   - Subagent tree is reconstructed 100% in-memory from `snapshot.sessions` and `snapshot.events`, including inflight-only and event-only actors, with chronological last-event-wins runtime reduction.
    - Tested by: `test_statusline_fallback_zero_additional_rollout_scans`, `test_statusline_fallback_inflight_only_actor_included`, and `test_statusline_fallback_returned_child_later_active_wins`.
 5. **Inflight Event ID Stability (Gate 3)**:
    - Fixed token-based discriminator with `ordinal=0` ensures absolute immutability of existing inflight event IDs across record removals.
@@ -38,24 +36,24 @@ All issues identified across rounds 1 through 5 of external review have been com
 
 | Gate | Verdict | Evidence |
 | :--- | :---: | :--- |
-| **Gate 1: Authority Boundary & Lifecycle Orthogonality** | **PASS** | Runtime state and work lifecycle phase are completely decoupled. Sequential work items in the same child session have strictly isolated lifecycles and timelines. Work timeline incidents are strictly isolated per work item. |
-| **Gate 2: Exact Metadata & Parser Strictness** | **PASS** | `parse_workflow_declarations` strictly validates schemas. Mirror deduplication is one-shot and dispatch-specific; repeated or retried declarations remain distinct events. |
+| **Gate 1: Authority Boundary & Lifecycle Orthogonality** | **PASS** | Runtime state and work lifecycle phase are completely decoupled. Sequential assignments to the same child actor have strictly isolated lifecycles, bases, and timelines. |
+| **Gate 2: Exact Metadata & Parser Strictness** | **PASS** | `parse_workflow_declarations` strictly validates schemas. Mirror deduplication is one-shot and strictly initial-message constrained. |
 | **Gate 3: Read-Only & Deterministic Identity** | **PASS** | All observer paths and inflight reads are 100% read-only (`prune=False`). Inflight event IDs are strictly immutable. |
-| **Gate 4: Session Isolation & Causal Ordering** | **PASS** | Assignment-specific topological sort preserves exact intra-source file line order and enforces cross-session causal dependencies (`dispatch_i` $\to$ `segment_i`, `return_i` $\to$ `intake_i`). |
+| **Gate 4: Session Isolation & Causal Ordering** | **PASS** | Assignment-specific topological sort preserves exact physical file order and enforces cross-session causal dependencies without artificially reordering premature declarations. |
 | **Gate 5: Dashboard & Crash Resilience** | **PASS** | Statusline displays single `▪ workflow` header and reuses snapshot in-memory on fallback with zero additional filesystem scans while faithfully representing inflight-only actors and last-event-wins active status. |
-| **Gate 6: Backward Compatibility & CLI Integrity** | **PASS** | Legacy `charter subagent` JSON/text outputs, status fields, additive runtime states, and neutral stopped text rendering are 100% preserved. Exact 32-choice top-level CLI command test passes. |
+| **Gate 6: Backward Compatibility & Test Integrity** | **PASS** | Legacy `charter subagent` JSON/text outputs, status fields, additive runtime states, and neutral stopped text rendering are 100% preserved. Exact 32-choice top-level CLI command test passes. |
 
 ---
 
 ## 3. Test Execution Summary
 
 ```text
-Ran 113 tests across:
+Ran 114 tests across:
   - tests.test_workflow_view
   - tests.test_observations
   - tests.test_commands_observe
   - tests.test_subagent
   - tests.test_docs_show
 
-Result: 113 passed, 0 failed, 0 errors (1 platform symlink test skipped on Windows).
+Result: 114 passed, 0 failed, 0 errors (1 platform symlink test skipped on Windows).
 ```

@@ -155,8 +155,10 @@ def _topological_causal_sort(
                                 ret_idx = dispatch_to_return.get(d_idx)
                                 if ret_idx is not None and ret_idx != idx and idx not in adj[ret_idx]:
                                     if events[ret_idx].session_id != ev.session_id:
-                                        adj[ret_idx].append(idx)
-                                        in_degree[idx] += 1
+                                        # ONLY add causal edge if intake is NOT observably earlier than child return
+                                        if ev.observed_at >= events[ret_idx].observed_at:
+                                            adj[ret_idx].append(idx)
+                                            in_degree[idx] += 1
                                 break
     # Min-heap priority queue: (observed_at, priority, ordinal, id, node_index)
     heap: list[tuple[datetime, int, int, str, int]] = []
@@ -586,7 +588,7 @@ def collect_observation_snapshot(
     ordinal_counter = 0
 
     pending_dispatch_mirrors: dict[tuple[Any, ...], ObservedEvent] = {}
-
+    initial_user_message_seen: set[str] = set()
     for sid in descendants:
         link = index.links.get(sid)
         rollout_file = index.rollout_files.get(sid)
@@ -855,7 +857,9 @@ def collect_observation_snapshot(
                         ordinal=ordinal_counter,
                     ))
 
-                    # Check mirrored declarations in user_message (one-shot dispatch mirror only)
+                    # Check mirrored declarations in user_message (first user_message only!)
+                    is_first_user_msg = (sid not in initial_user_message_seen)
+                    initial_user_message_seen.add(sid)
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
                     for d_idx, d in enumerate(decls):
                         decl_ev_ref = EvidenceRef(
@@ -878,7 +882,7 @@ def collect_observation_snapshot(
                             d.actor_role,
                             d.owner_role,
                         )
-                        if d.event == "dispatch" and mirror_key in pending_dispatch_mirrors:
+                        if is_first_user_msg and d.event == "dispatch" and mirror_key in pending_dispatch_mirrors:
                             orig_event = pending_dispatch_mirrors.pop(mirror_key)
                             for e_idx, ev_item in enumerate(events):
                                 if ev_item.id == orig_event.id:
@@ -919,6 +923,12 @@ def collect_observation_snapshot(
                                 ordinal=ordinal_counter,
                             )
                             events.append(decl_event)
+
+                    # Expire all pending dispatch mirrors for this child after its first user_message
+                    if is_first_user_msg:
+                        for k in list(pending_dispatch_mirrors.keys()):
+                            if len(k) >= 5 and k[4] == sid:
+                                pending_dispatch_mirrors.pop(k, None)
                 elif p_type == "agent_message":
                     msg_text = str(rec.payload.get("message") or rec.payload.get("content") or "")
                     ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "agent_message", sid, discriminator="agent_msg", ordinal=0)

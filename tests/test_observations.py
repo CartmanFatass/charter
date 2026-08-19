@@ -1068,14 +1068,66 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
         # Verify that both intake declarations are recorded as distinct events in snapshot
         intake_events = [e for e in snap.events if e.kind == "workflow_declared" and e.attributes.get("declaration", {}).get("event") == "intake"]
         self.assertEqual(len(intake_events), 2)
+        self.assertEqual(intake_events[0].observed_at.strftime("%H:%M:%S"), "10:00:02")
+        self.assertEqual(intake_events[1].observed_at.strftime("%H:%M:%S"), "10:00:10")
 
         proj = workflow_view.project_workflow(snap)
         # Work item successfully transitions to intaken because the second intake was evaluated
         self.assertEqual(len(proj.work_items), 1)
         self.assertEqual(proj.work_items[0].phase, "intaken")
-        # The premature intake was recorded in unbound_events
+        # The premature intake (10:00:02) was recorded in unbound_events
         self.assertEqual(len(proj.unbound_events), 1)
+        self.assertEqual(proj.unbound_events[0].id, intake_events[0].id, "The rejected event must be exactly the premature 10:00:02 intake")
         self.assertIn("invalid_phase_for_intake", proj.unbound_events[0].attributes.get("unbound_reason", ""))
+
+    def test_late_repeated_dispatch_declaration_after_plain_initial_message(self):
+        """Verify that a repeated dispatch declaration after an ordinary initial child user message is NOT merged."""
+        from charter import observations
+        root = "root-late-disp"
+        child = "child-late-disp-worker"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:01Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-LATE\",\"title\":\"Late Task\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        plain_initial_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:02Z",
+            "payload": {
+                "type": "user_message",
+                "message": "Plain initial instructions without charter-observe fence",
+            },
+        }
+        late_repeated_dispatch = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-LATE\",\"title\":\"Late Task\"}\n```",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-late-disp-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[spawn_msg])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:01Z", collab_events=[plain_initial_msg, late_repeated_dispatch])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        decl_events = [e for e in snap.events if e.kind == "workflow_declared" and e.attributes.get("declaration", {}).get("work_id") == "WORK-LATE"]
+        # Because initial user message already passed, the late repeated dispatch must NOT be swallowed as a mirror
+        self.assertEqual(len(decl_events), 2)
 
 if __name__ == "__main__":
     unittest.main()
