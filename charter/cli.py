@@ -13,6 +13,7 @@ from . import (
     commands_persona,
     commands_report,
     commands_secrets,
+    commands_subagent,
     commands_workspace,
     commands_worktree,
     hooks,
@@ -272,12 +273,62 @@ def build_parser() -> argparse.ArgumentParser:
     _add_harness_parser(sub)
     _add_workspace_parser(sub)
     _add_worktree_parser(sub)
+    _add_subagent_parser(sub)
     _add_vault_parser(sub)
     _add_secret_parser(sub)
     _add_persona_parser(sub)
     _add_report_parser(sub)
 
     return p
+
+def _add_subagent_parser(sub) -> None:
+    sa = sub.add_parser(
+        "subagent",
+        aliases=["subagents"],
+        help="Track and display subagent hierarchy and status (Codex collab agents / dispatches).",
+    )
+    sasub = sa.add_subparsers(dest="subagent_cmd")
+    sa.set_defaults(func=commands_subagent.cmd_subagent_tree)
+
+    tree = sasub.add_parser("tree", help="Render the subagent hierarchy tree.")
+    tree.add_argument("--session", "-s", help="Session ID (default: active session / auto-detected).")
+    tree.add_argument("--cwd", help="Working directory to filter rollouts by.")
+    tree.add_argument("--watch", "-w", action="store_true", help="Live watch mode (repaints periodically).")
+    tree.add_argument("--interval", "-i", type=float, default=10.0, help="Refresh interval in seconds for --watch (default: 10.0).")
+    tree.add_argument("--days", type=int, default=3, help="Lookback days for rollout scanning (default: 3).")
+    tree.add_argument("--plain", action="store_true", help="Render plain text without ANSI colors.")
+    tree.add_argument("--json", action="store_true", help="Output JSON.")
+    tree.add_argument("--verbose", "-v", action="store_true", help="Show verbose details, IDs, and live exchange feed.")
+    tree.set_defaults(func=commands_subagent.cmd_subagent_tree)
+
+    lst = sasub.add_parser("list", help="List subagents.")
+    lst.add_argument("--session", "-s", help="Session ID.")
+    lst.add_argument("--cwd", help="Working directory to filter rollouts by.")
+    lst.add_argument("--days", type=int, default=3, help="Lookback days.")
+    lst.add_argument("--all", action="store_true", help="List all subagents across recent sessions.")
+    lst.add_argument("--json", action="store_true", help="Output JSON.")
+    lst.add_argument("--verbose", "-v", action="store_true", help="Show verbose details including full IDs.")
+    lst.set_defaults(func=commands_subagent.cmd_subagent_list)
+
+    show = sasub.add_parser("show", help="Show details for a specific subagent.")
+    show.add_argument("id", help="Subagent ID or name.")
+    show.add_argument("--days", type=int, default=30, help="Lookback days (default: 30).")
+    show.add_argument("--json", action="store_true", help="Output JSON.")
+    show.add_argument("--verbose", "-v", action="store_true", help="Show verbose details including extended exchanges.")
+    show.set_defaults(func=commands_subagent.cmd_subagent_show)
+
+    lg = sasub.add_parser(
+        "log",
+        aliases=["logs", "comms", "exchanges"],
+        help="Show communication exchanges/messages between session and subagents or among peers.",
+    )
+    lg.add_argument("--session", "-s", help="Session ID (default: active session / auto-detected).")
+    lg.add_argument("--subagent", help="Filter exchanges to a specific subagent name or ID.")
+    lg.add_argument("--cwd", help="Working directory.")
+    lg.add_argument("--days", type=int, default=3, help="Lookback days (default: 3).")
+    lg.add_argument("--tool-calls", action="store_true", help="Include function/tool invocations.")
+    lg.add_argument("--json", action="store_true", help="Output JSON.")
+    lg.set_defaults(func=commands_subagent.cmd_subagent_log)
 
 
 def _add_report_parser(sub) -> None:

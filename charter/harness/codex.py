@@ -56,8 +56,13 @@ def config_path() -> Path:
     unconditionally would silently miss anyone who sets it.
     """
     home = os.environ.get("CODEX_HOME")
-    return (Path(home) if home else Path.home() / ".codex") / "config.toml"
-
+    if home:
+        return Path(home) / "config.toml"
+    try:
+        return Path.home() / ".codex" / "config.toml"
+    except Exception:
+        raw = os.environ.get("USERPROFILE") or os.environ.get("HOME") or "."
+        return Path(raw) / ".codex" / "config.toml"
 
 def _block() -> str:
     """The TOML charter appends: the harness name, and nothing else.

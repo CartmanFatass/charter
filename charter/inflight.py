@@ -63,6 +63,33 @@ def live(exclude_token: str | None = None) -> list[str]:
     return sorted(out)
 
 
+def live_records(exclude_token: str | None = None) -> list[dict[str, Any]]:
+    """Return structured records of agent dispatches currently in flight."""
+    from typing import Any
+    d = _dir()
+    if not d.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    now = time.time()
+    for p in d.glob("*.json"):
+        try:
+            st = p.stat()
+            if now - st.st_mtime > TTL_SECONDS:
+                p.unlink(missing_ok=True)
+                continue
+            if exclude_token and p.stem == exclude_token:
+                continue
+            data = json.loads(p.read_text(encoding="utf-8"))
+            agent_name = data.get("agent") or p.stem.split(".")[0]
+            start_ts = data.get("ts") or st.st_mtime
+            out.append({
+                "token": p.stem,
+                "agent": agent_name,
+                "ts": start_ts,
+            })
+        except (OSError, ValueError):
+            continue
+    return sorted(out, key=lambda r: r["ts"])
 def start(agent: str) -> str | None:
     """Mark *agent* as in flight; returns an opaque token, or None on any failure."""
     agent = (agent or "").strip()

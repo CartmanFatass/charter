@@ -1209,6 +1209,19 @@ def _session_news(sid: str | None) -> list[str]:
             out.append(f"{_GREEN}✎ {kinds['memory']}{_R}{_DIM} recorded{_R}")
         if kinds.get("dispatch"):
             out.append(f"{_DIM}⇢ {kinds['dispatch']} dispatched{_R}")
+        if kinds.get("subagent_start") and not kinds.get("dispatch"):
+            out.append(f"{_CYAN}⇢ {kinds['subagent_start']} subagent(s){_R}")
+    except Exception:
+        pass
+
+    try:
+        from . import subagent
+        if sid:
+            tree = subagent.build_subagent_tree(sid, max_days_back=1)
+            if tree.total_count > 0:
+                summ = subagent.subagent_summary(tree)
+                if summ and not any("subagent" in p for p in out):
+                    out.append(summ)
     except Exception:
         pass
     return out

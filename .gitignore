@@ -53,3 +53,6 @@ dist/
 
 # Agent worktrees created by the harness for isolated sub-agent runs.
 .claude/worktrees/
+
+# External references
+/_external/

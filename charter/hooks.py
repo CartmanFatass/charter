@@ -1784,6 +1784,45 @@ def posttooluse_dispatch() -> int:
     except Exception:
         return 0  # a tally must never break a turn
     return 0
+def subagentstart() -> int:
+    """Handler for SubagentStart hook."""
+    data = _read_stdin()
+    sid = data.get("session_id")
+    agent = (
+        data.get("agent_nickname")
+        or data.get("agent_name")
+        or data.get("agent_id")
+        or (data.get("tool_input") or {}).get("subagent_type")
+        or "subagent"
+    ).strip()
+    try:
+        _trace("subagent_start", sid, agent=agent)
+        from . import inflight
+        inflight.start(agent)
+    except Exception:
+        return 0
+    return 0
+
+
+def subagentstop() -> int:
+    """Handler for SubagentStop hook."""
+    data = _read_stdin()
+    sid = data.get("session_id")
+    agent = (
+        data.get("agent_nickname")
+        or data.get("agent_name")
+        or data.get("agent_id")
+        or (data.get("tool_input") or {}).get("subagent_type")
+        or "subagent"
+    ).strip()
+    try:
+        _trace("subagent_stop", sid, agent=agent)
+        from . import inflight
+        inflight.finish(agent)
+    except Exception:
+        return 0
+    return 0
+
 
 
 def _commit_dispatch(path, agent: str) -> None:
@@ -2216,6 +2255,8 @@ _HANDLERS = {
     "posttooluse": posttooluse,
     "posttooluse-skill": posttooluse_skill,
     "posttooluse-dispatch": posttooluse_dispatch,
+    "subagentstart": subagentstart,
+    "subagentstop": subagentstop,
 }
 
 

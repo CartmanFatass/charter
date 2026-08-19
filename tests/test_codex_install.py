@@ -25,9 +25,14 @@ class CodexHome(unittest.TestCase):
             self.assertEqual(codex.config_path(), Path("/somewhere/config.toml"))
 
     def test_it_falls_back_to_the_default_home(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(codex.config_path(), Path.home() / ".codex" / "config.toml")
-
+        expected = Path.home() / ".codex" / "config.toml"
+        env = {}
+        if "USERPROFILE" in os.environ:
+            env["USERPROFILE"] = os.environ["USERPROFILE"]
+        if "HOME" in os.environ:
+            env["HOME"] = os.environ["HOME"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(codex.config_path(), expected)
 
 class Install(unittest.TestCase):
     def setUp(self) -> None:
