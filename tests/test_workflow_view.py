@@ -832,5 +832,99 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
         self.assertIn("intake", out)
         self.assertNotIn("completed", out)
 
+    def test_work_timeline_multi_assignment_and_incident_filtering(self):
+        root = "root-multi-assign"
+        child_a = "child-work-a"
+        child_b = "child-work-b"
+
+        spawn_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-AAA\",\"title\":\"Task A\"}\n```",
+                    "receiver_agents": [{"thread_id": child_a, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-BBB\",\"title\":\"Task B\"}\n```",
+                    "receiver_agents": [{"thread_id": child_b, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        tool_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "tool_a_execute"},
+            },
+        }
+        inc_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:15Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "CollabAgentToolCall", "tool": "wait", "agents_states": {child_a: {"error": "Disk full"}}},
+            },
+        }
+        ret_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:20Z",
+            "payload": {"type": "task_complete", "summary": "Finished A"},
+        }
+
+        tool_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:10Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "tool_b_execute"},
+            },
+        }
+        ret_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:20Z",
+            "payload": {"type": "task_complete", "summary": "Finished B"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_a, spawn_b])
+        write_test_rollout(self.sessions_dir, child_a, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:05Z", collab_events=[tool_a, inc_a, ret_a])
+        write_test_rollout(self.sessions_dir, child_b, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:01:05Z", collab_events=[tool_b, ret_b])
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
+        proj = workflow_view.project_workflow(snap)
+
+        # Filter for WORK-AAA
+        tl_a = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-AAA")
+        summaries_a = [e.summary for e in tl_a]
+        self.assertTrue(any("WORK-AAA" in s or "Task A" in s for s in summaries_a))
+        self.assertTrue(any("tool_a_execute" in s for s in summaries_a))
+        self.assertTrue(any("Disk full" in s for s in summaries_a))
+        # Must have zero crosstalk from WORK-BBB!
+        self.assertFalse(any("WORK-BBB" in s or "Task B" in s for s in summaries_a))
+        self.assertFalse(any("tool_b_execute" in s for s in summaries_a))
+        self.assertFalse(any("Finished B" in s for s in summaries_a))
+
+        # Filter for WORK-BBB
+        tl_b = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-BBB")
+        summaries_b = [e.summary for e in tl_b]
+        self.assertTrue(any("WORK-BBB" in s or "Task B" in s for s in summaries_b))
+        self.assertTrue(any("tool_b_execute" in s for s in summaries_b))
+        self.assertTrue(any("Finished B" in s for s in summaries_b))
+        # Must have zero crosstalk from WORK-AAA!
+        self.assertFalse(any("WORK-AAA" in s or "Task A" in s for s in summaries_b))
+        self.assertFalse(any("tool_a_execute" in s for s in summaries_b))
+        self.assertFalse(any("Disk full" in s for s in summaries_b))
 if __name__ == "__main__":
     unittest.main()

@@ -160,9 +160,11 @@ class TestTheContainmentCheckIsReal(unittest.TestCase):
     def test_a_symlink_out_of_the_docs_dir_is_not_read(self):
         secret = self.tmp / "outside.txt"
         secret.write_text("NOT A DOCUMENTATION PAGE\n")
-        (self.docs / "leak.md").symlink_to(secret)
+        try:
+            (self.docs / "leak.md").symlink_to(secret)
+        except OSError:
+            self.skipTest("Symlink creation not permitted on this platform")
         self.assertIsNone(docsrc.read("leak"))
-
     def test_a_real_page_still_reads(self):
         self.assertEqual(docsrc.read("real"), "# real\n")
 

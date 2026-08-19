@@ -997,20 +997,29 @@ def filter_timeline_events(
                 matched_work_ids.add(w.id)
                 if w.external_id:
                     matched_work_ids.add(w.external_id)
-                matched_actor_ids.add(w.actor_id)
+                if w.actor_id:
+                    matched_actor_ids.add(w.actor_id)
                 for b in w.basis:
                     matched_source_ids.add(b.source_id)
                 for o in w.obligations:
                     for ob in o.basis:
                         matched_source_ids.add(ob.source_id)
 
+        for inc in projection.incidents:
+            if inc.work_id and (inc.work_id in matched_work_ids or any(mw.lower() in inc.work_id.lower() for mw in matched_work_ids)):
+                for b in inc.basis:
+                    matched_source_ids.add(b.source_id)
+            elif inc.actor_id in matched_actor_ids:
+                for b in inc.basis:
+                    matched_source_ids.add(b.source_id)
+
         events = [
             e for e in events
             if e.id in matched_source_ids
             or any(ref.source_id in matched_source_ids for ref in e.evidence)
             or (e.attributes.get("work_id") and str(e.attributes.get("work_id")).lower() in {x.lower() for x in matched_work_ids})
-            or (e.attributes.get("declaration", {}).get("work_id") and str(e.attributes.get("declaration", {}).get("work_id")).lower() in {x.lower() for x in matched_work_ids})
-            or (e.actor_id in matched_actor_ids and e.kind in ("dispatch_sent", "actor_started", "actor_returned", "tool_started", "tool_finished"))
+            or (isinstance(e.attributes.get("declaration"), dict) and str(e.attributes.get("declaration", {}).get("work_id", "")).lower() in {x.lower() for x in matched_work_ids})
+            or (e.session_id in matched_actor_ids and e.kind in ("actor_started", "actor_returned", "tool_started", "tool_finished"))
         ]
 
     return tuple(events)

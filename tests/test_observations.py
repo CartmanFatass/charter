@@ -26,35 +26,35 @@ class TestSessionIndexAndRolloutRecords(unittest.TestCase):
         t1 = 1787130000.0
         t2 = 1787130500.0
 
-        dir_p = self.sessions_dir / "2026" / "08" / "19"
+        today = datetime.now(timezone.utc)
+        dir_p = self.sessions_dir / today.strftime("%Y") / today.strftime("%m") / today.strftime("%d")
         dir_p.mkdir(parents=True, exist_ok=True)
 
-        f1 = dir_p / f"rollout-2026-08-19T10-00-00-{root}.jsonl"
+        f1 = dir_p / f"rollout-{today.strftime('%Y-%m-%dT10-00-00')}-{root}.jsonl"
         meta1 = {
             "type": "session_meta",
             "payload": {
                 "id": root,
                 "parent_thread_id": None,
                 "agent_nickname": "OlderFile",
-                "timestamp": "2026-08-19T10:00:00Z",
+                "timestamp": f"{today.strftime('%Y-%m-%d')}T10:00:00Z",
             },
         }
         f1.write_text(json.dumps(meta1) + "\n", encoding="utf-8")
         os.utime(f1, (t1, t1))
 
-        f2 = dir_p / f"rollout-2026-08-19T10-05-00-{root}.jsonl"
+        f2 = dir_p / f"rollout-{today.strftime('%Y-%m-%dT10-05-00')}-{root}.jsonl"
         meta2 = {
             "type": "session_meta",
             "payload": {
                 "id": root,
                 "parent_thread_id": None,
                 "agent_nickname": "NewerFile",
-                "timestamp": "2026-08-19T10:05:00Z",
+                "timestamp": f"{today.strftime('%Y-%m-%d')}T10:05:00Z",
             },
         }
         f2.write_text(json.dumps(meta2) + "\n", encoding="utf-8")
         os.utime(f2, (t2, t2))
-
         index = subagent.build_session_index(max_days_back=3, sessions_dir=self.sessions_dir)
         self.assertIn(root, index.links)
         self.assertEqual(index.links[root].name, "NewerFile")
@@ -738,6 +738,151 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
         self.assertEqual(len(decl_events[0].evidence), 2)
         self.assertEqual(decl_events[0].evidence[0].evidence_class, "declared")
         self.assertEqual(decl_events[0].evidence[1].evidence_class, "declared")
+    def test_distinct_relation_declarations_not_deduplicated(self):
+        from charter import observations, workflow_view
+
+        root = "root-multi-rel"
+        r1_text = "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"reports_to\",\"related_actor_id\":\"Boss\"}\n```"
+        r2_text = "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"owner\",\"related_actor_id\":\"TechLead\"}\n```"
+        r3_text = "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"peer\",\"related_actor_id\":\"Reviewer\"}\n```"
+
+        ev1 = {"type": "event_msg", "payload": {"type": "user_message", "message": r1_text}}
+        ev2 = {"type": "event_msg", "payload": {"type": "user_message", "message": r2_text}}
+        ev3 = {"type": "event_msg", "payload": {"type": "user_message", "message": r3_text}}
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-obs-rel-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[ev1, ev2, ev3])
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        decl_events = [e for e in snap.events if e.kind == "workflow_declared"]
+
+        # All 3 distinct relations must be recorded as 3 separate events!
+        self.assertEqual(len(decl_events), 3)
+        relations_recorded = [e.attributes["declaration"]["relation"] for e in decl_events]
+        self.assertEqual(relations_recorded, ["reports_to", "owner", "peer"])
+
+    def test_forbidden_fields_with_null_rejected(self):
+        from charter import observations
+
+        # 1. Dispatch with relation: null must be rejected
+        w1: list[str] = []
+        d1 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1, \"event\": \"dispatch\", \"relation\": null}\n```", warnings=w1)
+        self.assertEqual(d1, ())
+        self.assertTrue(any("forbids field 'relation'" in w for w in w1))
+
+        # 2. Relation with work_id: null must be rejected
+        w2: list[str] = []
+        d2 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1, \"event\": \"relation\", \"relation\": \"peer\", \"related_actor_id\": \"B\", \"work_id\": null}\n```", warnings=w2)
+        self.assertEqual(d2, ())
+        self.assertTrue(any("forbids field 'work_id'" in w for w in w2))
+
+        # 3. Intake with title: null must be rejected
+        w3: list[str] = []
+        d3 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\": 1, \"event\": \"intake\", \"work_id\": \"W1\", \"title\": null}\n```", warnings=w3)
+        self.assertEqual(d3, ())
+        self.assertTrue(any("forbids field 'title'" in w for w in w3))
+
+    def test_source_local_event_id_determinism_and_immutability(self):
+        from charter import observations
+
+        root = "root-id-stability"
+        spawn_ev = {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"STAB-1\",\"title\":\"Task Stability\"}\n```",
+                    "receiver_agents": [{"thread_id": "child-stab-1", "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        tmp = Path(tempfile.mkdtemp(prefix="test-id-stab-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        snap1 = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        ids_before = [e.id for e in snap1.events]
+        self.assertTrue(len(ids_before) > 0)
+        # Sub-events on the same line (spawn, dispatch, declaration) must have distinct SHA-256 IDs
+        self.assertEqual(len(ids_before), len(set(ids_before)))
+
+        # Append unrelated child session and later event
+        write_test_rollout(sdir, "child-stab-1", parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:01:00Z", collab_events=[{
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "summary": "done"},
+        }])
+        snap2 = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        ids_after = [e.id for e in snap2.events if e.session_id == root]
+
+        # All pre-existing event IDs in root session MUST remain 100% identical!
+        self.assertEqual(ids_before, ids_after)
+
+    def test_negative_causal_order_intra_source_preservation(self):
+        from charter import observations, workflow_view
+
+        root = "root-neg-order"
+        child = "child-neg-order"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"NEG-1\",\"title\":\"Task Negative\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+
+        task_complete_ev = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {"type": "task_complete", "summary": "Finished work"},
+        }
+
+        # Backwards declarations in coordinator: resolve (line 2) before intake (line 3)
+        resolve_msg = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"NEG-1\"}\n```\nPremature resolve.",
+            },
+        }
+        intake_msg = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"NEG-1\"}\n```\nIntake after resolve.",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-causal-neg-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[spawn_ev])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Gauss", timestamp=ts, collab_events=[task_complete_ev, resolve_msg, intake_msg])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Because resolve was written before intake in source order, resolve was rejected as invalid_phase_for_resolve!
+        # Then intake moved phase to intaken. So work item remains intaken, and resolve is in unbound_events.
+        self.assertEqual(len(proj.work_items), 1)
+        self.assertEqual(proj.work_items[0].phase, "intaken")
+        self.assertEqual(len(proj.unbound_events), 1)
+        self.assertIn("invalid_phase_for_resolve", proj.unbound_events[0].attributes.get("unbound_reason", ""))
 
 if __name__ == "__main__":
     unittest.main()

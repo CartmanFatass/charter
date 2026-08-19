@@ -475,30 +475,35 @@ def watch_workflow_view(
     """Watch workflow view, re-rendering only when source data changes or on heartbeat."""
     from . import trace, inflight
 
-    effective_root, _ = _resolve_session_root_id(session_id=root_id, cwd=target_cwd, days=max_days_back)
-    s_dir = subagent.get_sessions_dir()
-    watcher = subagent.SubagentEventWatcher(sessions_dir=s_dir, max_days_back=max_days_back)
-
-    try:
-        inflight_dir = inflight._dir()
-        if inflight_dir.exists():
-            watcher.extra_paths.append(inflight_dir)
-        if effective_root:
-            t_file = trace._file(effective_root)
-            if t_file.exists():
-                watcher.extra_paths.append(t_file)
-    except Exception:
-        pass
-
-    poll_interval = 0.5
-    last_repaint = 0.0
-    last_projection: workflow_view.WorkflowProjection | None = None
-    last_snapshot: observations.ObservationSnapshot | None = None
-
     try:
         if not plain:
             sys.stdout.write("\033[?25l")
             sys.stdout.flush()
+
+        try:
+            effective_root, _ = _resolve_session_root_id(session_id=root_id, cwd=target_cwd, days=max_days_back)
+            s_dir = subagent.get_sessions_dir()
+            watcher = subagent.SubagentEventWatcher(sessions_dir=s_dir, max_days_back=max_days_back)
+            try:
+                inflight_dir = inflight._dir()
+                if inflight_dir.exists():
+                    watcher.extra_paths.append(inflight_dir)
+                if effective_root:
+                    t_file = trace._file(effective_root)
+                    if t_file.exists():
+                        watcher.extra_paths.append(t_file)
+            except Exception:
+                pass
+        except Exception as init_exc:
+            if not plain:
+                sys.stdout.write("\033[H\033[J")
+            print(f"[WARN] Observation watch initialization failed: {init_exc}")
+            return 0
+
+        poll_interval = 0.5
+        last_repaint = 0.0
+        last_projection: workflow_view.WorkflowProjection | None = None
+        last_snapshot: observations.ObservationSnapshot | None = None
 
         while True:
             now = time.time()
@@ -592,6 +597,7 @@ def watch_workflow_view(
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         pass
+    finally:
         if not plain:
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()

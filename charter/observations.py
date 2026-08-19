@@ -366,18 +366,18 @@ def parse_workflow_declarations(
     # Event-specific schema validation
     if event_val == "dispatch":
         for forbidden in ("relation", "related_actor_id"):
-            if data.get(forbidden) is not None:
+            if forbidden in data:
                 if warnings is not None:
                     warnings.append(f"Event 'dispatch' forbids field '{forbidden}'")
                 return ()
     elif event_val in ("intake", "resolve"):
         work_id_val = data.get("work_id")
-        if not work_id_val or not str(work_id_val).strip():
+        if not work_id_val or not isinstance(work_id_val, str) or not str(work_id_val).strip():
             if warnings is not None:
                 warnings.append(f"Missing or empty work_id for '{event_val}' event declaration")
             return ()
         for forbidden in ("relation", "related_actor_id", "title", "direction", "actor_role", "owner_role"):
-            if data.get(forbidden) is not None:
+            if forbidden in data:
                 if warnings is not None:
                     warnings.append(f"Event '{event_val}' forbids field '{forbidden}'")
                 return ()
@@ -393,7 +393,7 @@ def parse_workflow_declarations(
                 warnings.append("Event 'relation' requires non-empty related_actor_id")
             return ()
         for forbidden in ("work_id", "title", "direction", "actor_role", "owner_role"):
-            if data.get(forbidden) is not None:
+            if forbidden in data:
                 if warnings is not None:
                     warnings.append(f"Event 'relation' forbids field '{forbidden}'")
                 return ()
@@ -510,7 +510,7 @@ def collect_observation_snapshot(
 
             if rec.entry_type == "session_meta":
                 if sess_parent:
-                    ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid, actor_id=sid)
+                    ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid, actor_id=sid, ordinal=0)
                     events.append(ObservedEvent(
                         id=ev_id,
                         root_id=effective_root,
@@ -527,7 +527,7 @@ def collect_observation_snapshot(
                         ordinal=ordinal_counter,
                     ))
                 else:
-                    ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid)
+                    ev_id = make_event_id("rollout_meta", file_path_str, rec.line_number, "session_meta", sid, ordinal=0)
                     events.append(ObservedEvent(
                         id=ev_id,
                         root_id=effective_root,
@@ -560,7 +560,7 @@ def collect_observation_snapshot(
                                 prompt = str(item.get("prompt") or "")
 
                                 decls = parse_workflow_declarations(prompt, warnings=warnings)
-                                for rx in receivers:
+                                for rx_idx, rx in enumerate(receivers):
                                     rx_id = rx.get("thread_id") or ""
                                     rx_name = rx.get("agent_nickname") or rx_id[:8] or "subagent"
 
@@ -575,7 +575,7 @@ def collect_observation_snapshot(
                                             basis=(ev_ref,),
                                         )
 
-                                    ev_spawn_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="spawn")
+                                    ev_spawn_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator=f"spawn:{rx_id}", ordinal=rx_idx)
                                     events.append(ObservedEvent(
                                         id=ev_spawn_id,
                                         root_id=effective_root,
@@ -596,7 +596,7 @@ def collect_observation_snapshot(
                                     if decls:
                                         disp_attrs["declaration"] = decls[0].to_dict()
 
-                                    ev_disp_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator="dispatch")
+                                    ev_disp_id = make_event_id("rollout_event", file_path_str, rec.line_number, "spawn_agent", sid, actor_id=rx_id, discriminator=f"dispatch:{rx_id}", ordinal=rx_idx)
                                     events.append(ObservedEvent(
                                         id=ev_disp_id,
                                         root_id=effective_root,
@@ -615,8 +615,19 @@ def collect_observation_snapshot(
                                     ))
 
                                     # Check exact declarations in spawn prompt
-                                    for d in decls:
-                                        decl_key = (d.schema, d.event, d.work_id, rx_id or d.actor_id)
+                                    for d_idx, d in enumerate(decls):
+                                        decl_key = (
+                                            d.schema,
+                                            d.event,
+                                            d.work_id,
+                                            rx_id or d.actor_id,
+                                            d.relation,
+                                            d.related_actor_id,
+                                            d.title,
+                                            d.direction,
+                                            d.actor_role,
+                                            d.owner_role,
+                                        )
                                         decl_ev_ref = EvidenceRef(
                                             source="rollout_event",
                                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -626,7 +637,7 @@ def collect_observation_snapshot(
                                             file_path=file_path_str,
                                             line_number=rec.line_number,
                                         )
-                                        decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=rx_id, discriminator="decl")
+                                        decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=rx_id, discriminator=f"decl:{d.event}:{d.work_id or rx_id}:{d_idx}", ordinal=d_idx)
                                         decl_event = ObservedEvent(
                                             id=decl_ev_id,
                                             root_id=effective_root,
@@ -647,10 +658,10 @@ def collect_observation_snapshot(
                                         events.append(decl_event)
 
                             # Check typed incidents in agents_states on ANY collab tool call
-                            for aid, astate in states.items():
+                            for aid_idx, (aid, astate) in enumerate(states.items()):
                                 if isinstance(astate, dict) and (astate.get("error") or astate.get("failed")):
                                     inc_err = str(astate.get("error") or astate.get("failed") or "Agent error state")
-                                    inc_id = make_event_id("rollout_event", file_path_str, rec.line_number, "incident", sid, actor_id=aid)
+                                    inc_id = make_event_id("rollout_event", file_path_str, rec.line_number, "incident", sid, actor_id=aid, discriminator=f"incident:{aid}", ordinal=aid_idx)
                                     events.append(ObservedEvent(
                                         id=inc_id,
                                         root_id=effective_root,
@@ -668,7 +679,7 @@ def collect_observation_snapshot(
 
                         elif include_tool_calls and item_type in ("function_call", "custom_tool_call"):
                             t_name = str(item.get("name") or item.get("tool") or "tool")
-                            ev_t_id = make_event_id("rollout_event", file_path_str, rec.line_number, "tool_started", sid, discriminator=t_name)
+                            ev_t_id = make_event_id("rollout_event", file_path_str, rec.line_number, "tool_started", sid, discriminator=f"tool_start:{t_name}", ordinal=0)
                             events.append(ObservedEvent(
                                 id=ev_t_id,
                                 root_id=effective_root,
@@ -684,7 +695,7 @@ def collect_observation_snapshot(
                                 ordinal=ordinal_counter,
                             ))
                         elif include_tool_calls and item_type in ("function_call_output", "custom_tool_call_output"):
-                            ev_tf_id = make_event_id("rollout_event", file_path_str, rec.line_number, "tool_finished", sid)
+                            ev_tf_id = make_event_id("rollout_event", file_path_str, rec.line_number, "tool_finished", sid, discriminator="tool_finish", ordinal=0)
                             events.append(ObservedEvent(
                                 id=ev_tf_id,
                                 root_id=effective_root,
@@ -701,7 +712,7 @@ def collect_observation_snapshot(
 
                 elif p_type == "user_message":
                     msg_text = str(rec.payload.get("message") or rec.payload.get("content") or "")
-                    ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "user_message", sid)
+                    ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "user_message", sid, discriminator="user_msg", ordinal=0)
                     events.append(ObservedEvent(
                         id=ev_msg_id,
                         root_id=effective_root,
@@ -719,8 +730,19 @@ def collect_observation_snapshot(
 
                     # Check mirrored declarations in user_message
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
-                    for d in decls:
-                        decl_key = (d.schema, d.event, d.work_id, sid or d.actor_id)
+                    for d_idx, d in enumerate(decls):
+                        decl_key = (
+                            d.schema,
+                            d.event,
+                            d.work_id,
+                            sid or d.actor_id,
+                            d.relation,
+                            d.related_actor_id,
+                            d.title,
+                            d.direction,
+                            d.actor_role,
+                            d.owner_role,
+                        )
                         decl_ev_ref = EvidenceRef(
                             source="rollout_event",
                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -754,7 +776,7 @@ def collect_observation_snapshot(
                                     seen_declarations[decl_key] = updated_event
                                     break
                         else:
-                            decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator="decl")
+                            decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator=f"decl:{d.event}:{d.work_id or sid}:{d_idx}", ordinal=d_idx)
                             decl_event = ObservedEvent(
                                 id=decl_ev_id,
                                 root_id=effective_root,
@@ -774,7 +796,7 @@ def collect_observation_snapshot(
 
                 elif p_type == "agent_message":
                     msg_text = str(rec.payload.get("message") or rec.payload.get("content") or "")
-                    ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "agent_message", sid)
+                    ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "agent_message", sid, discriminator="agent_msg", ordinal=0)
                     events.append(ObservedEvent(
                         id=ev_msg_id,
                         root_id=effective_root,
@@ -793,8 +815,19 @@ def collect_observation_snapshot(
 
                     # Check declarations in agent messages (author is child sid)
                     decls = parse_workflow_declarations(msg_text, warnings=warnings)
-                    for d in decls:
-                        decl_key = (d.schema, d.event, d.work_id, sid or d.actor_id)
+                    for d_idx, d in enumerate(decls):
+                        decl_key = (
+                            d.schema,
+                            d.event,
+                            d.work_id,
+                            sid or d.actor_id,
+                            d.relation,
+                            d.related_actor_id,
+                            d.title,
+                            d.direction,
+                            d.actor_role,
+                            d.owner_role,
+                        )
                         decl_ev_ref = EvidenceRef(
                             source="rollout_event",
                             source_id=f"{sid}:{rec.line_number}:decl",
@@ -804,7 +837,7 @@ def collect_observation_snapshot(
                             file_path=file_path_str,
                             line_number=rec.line_number,
                         )
-                        decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator="decl")
+                        decl_ev_id = make_event_id("rollout_event", file_path_str, rec.line_number, "workflow_declared", sid, actor_id=sid, discriminator=f"decl:{d.event}:{d.work_id or sid}:{d_idx}", ordinal=d_idx)
                         decl_event = ObservedEvent(
                             id=decl_ev_id,
                             root_id=effective_root,
@@ -824,7 +857,7 @@ def collect_observation_snapshot(
 
                 elif p_type == "task_complete":
                     sum_text = str(rec.payload.get("summary") or "Task complete")
-                    ev_ret_id = make_event_id("rollout_event", file_path_str, rec.line_number, "task_complete", sid)
+                    ev_ret_id = make_event_id("rollout_event", file_path_str, rec.line_number, "task_complete", sid, discriminator="task_complete", ordinal=0)
                     events.append(ObservedEvent(
                         id=ev_ret_id,
                         root_id=effective_root,
@@ -866,7 +899,7 @@ def collect_observation_snapshot(
                 )
 
                 if tev_type == "subagent_start":
-                    t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_start", sid, actor_id=sid)
+                    t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_start", sid, actor_id=sid, discriminator="subagent_start", ordinal=0)
                     events.append(ObservedEvent(
                         id=t_ev_id,
                         root_id=effective_root,
@@ -881,7 +914,7 @@ def collect_observation_snapshot(
                         ordinal=ordinal_counter,
                     ))
                 elif tev_type == "subagent_stop":
-                    t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_stop", sid, actor_id=sid)
+                    t_ev_id = make_event_id("hook_trace", t_file_str, idx, "subagent_stop", sid, actor_id=sid, discriminator="subagent_stop", ordinal=0)
                     events.append(ObservedEvent(
                         id=t_ev_id,
                         root_id=effective_root,
@@ -903,7 +936,7 @@ def collect_observation_snapshot(
         from . import inflight
         for sid in list(sessions_obs.keys()):
             in_recs = inflight.read_records(session_id=sid, prune=False)
-            for irec in in_recs:
+            for irec_idx, irec in enumerate(in_recs):
                 ordinal_counter += 1
                 start_dt = _ensure_utc(datetime.fromtimestamp(irec["ts"], tz=timezone.utc))
                 token = irec["token"]
@@ -923,6 +956,7 @@ def collect_observation_snapshot(
                     sid,
                     actor_id=irec.get("agent_id") or token,
                     discriminator=token,
+                    ordinal=irec_idx,
                 )
                 events.append(ObservedEvent(
                     id=in_ev_id,
@@ -940,12 +974,24 @@ def collect_observation_snapshot(
     except (OSError, ValueError) as exc:
         warnings.append(f"Failed to read inflight records: {exc}")
 
-    # Sort events by observed_at, then kind causal priority, then source ordinal, then stable ID
-    def event_sort_key(e: ObservedEvent) -> tuple[datetime, int, int, str]:
-        prio = _event_priority(e)
-        return (e.observed_at, prio, e.ordinal, e.id)
-    events.sort(key=event_sort_key)
+    # Assign monotonic effective priority per session to preserve intra-source sequence
+    # while applying cross-session causal priorities (e.g. child return before parent intake).
+    session_eff_prio: dict[str, int] = {}
+    events_with_prio: list[tuple[ObservedEvent, int]] = []
+    for ev in events:
+        s_key = ev.session_id or ""
+        base_prio = _event_priority(ev)
+        prev_prio = session_eff_prio.get(s_key, 0)
+        curr_eff_prio = max(prev_prio, base_prio)
+        session_eff_prio[s_key] = curr_eff_prio
+        events_with_prio.append((ev, curr_eff_prio))
 
+    def event_sort_key(item: tuple[ObservedEvent, int]) -> tuple[datetime, int, str, int, str]:
+        ev, eff_prio = item
+        return (ev.observed_at, eff_prio, ev.session_id or "", ev.ordinal, ev.id)
+
+    events_with_prio.sort(key=event_sort_key)
+    events = [ev for ev, _ in events_with_prio]
     return ObservationSnapshot(
         root_id=effective_root,
         captured_at=cap_time,

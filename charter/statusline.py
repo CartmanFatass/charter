@@ -1682,6 +1682,7 @@ def _workflow_section(
     projection: Any = None,
     tick: int = 0,
     sid: str | None = None,
+    effective_sid: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Gather workflow panel lines and header for dashboard integration.
 
@@ -1692,7 +1693,7 @@ def _workflow_section(
         from . import workflow_view
         work_items = getattr(projection, "work_items", ()) if projection else ()
         if not work_items:
-            return _subagent_section(sid, tick=tick)
+            return _subagent_section(sid, tick=tick, effective_sid=effective_sid)
 
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -1761,6 +1762,7 @@ def _workflow_section(
 def _subagent_section(
     sid: str | None = None,
     tick: int = 0,
+    effective_sid: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Gather subagent tree lines and header for the dashboard.
 
@@ -1769,12 +1771,14 @@ def _subagent_section(
     """
     try:
         from . import subagent
-        effective_sid = subagent.find_root_session_id(sid) if sid else ""
-        if not effective_sid:
-            recent = subagent.find_most_recent_rollout(max_days_back=1)
-            if recent:
-                effective_sid = subagent.find_root_session_id(recent[1], max_days_back=1)
-
+        eff_sid = effective_sid
+        if not eff_sid:
+            eff_sid = subagent.find_root_session_id(sid) if sid else ""
+            if not eff_sid:
+                recent = subagent.find_most_recent_rollout(max_days_back=1)
+                if recent:
+                    eff_sid = subagent.find_root_session_id(recent[1], max_days_back=1)
+        effective_sid = eff_sid
         tree = subagent.build_subagent_tree(effective_sid or "", max_days_back=1)
         if not tree or tree.total_count == 0:
             return None, []
@@ -1907,7 +1911,7 @@ def render(payload: dict | None = None, tick: int = 0) -> str:
         alerts = _alerts(active)
 
         # Gather workflow panel or fallback subagents for dashboard integration
-        sub_head, sub_lines = _workflow_section(wf_proj, tick=tick, sid=sid)
+        sub_head, sub_lines = _workflow_section(wf_proj, tick=tick, sid=sid, effective_sid=effective_sid)
         has_subagents = bool(sub_head and sub_lines)
 
         # Scheme B: Wide Screen 3-Column Layout (repos | subagents | personas)
