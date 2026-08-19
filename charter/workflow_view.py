@@ -325,9 +325,23 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 basis=s_obs.basis,
             ))
 
+    # Also include any inflight-only or event-mentioned actors not yet in snapshot.sessions
+    for ev in snapshot.events:
+        act_id = ev.actor_id
+        if act_id and act_id not in actors_map:
+            act_name = ev.actor_name or act_id[:8]
+            actors_map[act_id] = {
+                "id": act_id,
+                "name": act_name,
+                "runtime_parent_id": ev.peer_id or snapshot.root_id,
+                "declared_role": None,
+                "declared_direction": None,
+                "runtime_state": "running",
+                "basis": list(ev.evidence),
+            }
+
     # Pre-index declared metadata
     declarations_by_work_id: dict[str, WorkflowDeclaration] = {}
-    declarations_by_actor: dict[str, WorkflowDeclaration] = {}
     declared_relations: list[tuple[WorkflowDeclaration, ObservedEvent]] = []
 
     for ev in snapshot.events:
@@ -337,8 +351,6 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 decl = WorkflowDeclaration(**decl_dict)
                 if decl.work_id:
                     declarations_by_work_id[decl.work_id] = decl
-                if decl.actor_id:
-                    declarations_by_actor[decl.actor_id] = decl
                 if decl.event == "relation":
                     declared_relations.append((decl, ev))
 
@@ -346,8 +358,8 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
     for decl, ev in declared_relations:
         src = decl.actor_id or ev.author_actor_id or ev.session_id
         tgt = decl.related_actor_id
-        rel_kind: RelationKind = decl.relation or "peer"
-        if src and tgt:
+        rel_kind = decl.relation
+        if src and tgt and rel_kind:
             rel_id = f"rel:{src}:{tgt}:{rel_kind}"
             relations_list.append(RelationProjection(
                 id=rel_id,
@@ -357,7 +369,6 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
                 declared=True,
                 basis=ev.evidence,
             ))
-
     # Main reduction loop over ordered events
     for ev in snapshot.events:
         ts = ev.observed_at
@@ -375,19 +386,16 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             rx_hash = rx_id[:8] if rx_id else "subagent"
             internal_work_id = f"work:{ev_hash}:{rx_hash}"
 
-            # Check prompt for declaration
+            # Check prompt for declaration - strictly bound to this exact dispatch event
             decl_dict = ev.attributes.get("declaration")
             decl: WorkflowDeclaration | None = None
             if isinstance(decl_dict, dict):
                 decl = WorkflowDeclaration(**decl_dict)
-            elif rx_id in declarations_by_actor:
-                decl = declarations_by_actor[rx_id]
             elif ev.attributes.get("prompt"):
                 from .observations import parse_workflow_declarations
                 p_decls = parse_workflow_declarations(str(ev.attributes["prompt"]))
                 if p_decls:
                     decl = p_decls[0]
-
             ext_id = decl.work_id if decl else None
             title = (decl.title if decl else None) or ev.summary or f"Dispatch to {rx_name}"
             direction = decl.direction if decl else None
@@ -902,33 +910,38 @@ def render_actor_view(
         d = a.declared_direction or "Direct"
         declared_by_dir.setdefault(d, []).append(a)
 
-    peer_pairs = [
-        (r.source_actor_id, r.target_actor_id)
+    declared_edges = [
+        (r.source_actor_id, r.target_actor_id, r.kind)
         for r in projection.relations
-        if r.declared and r.kind == "peer"
+        if r.declared
     ]
 
     for d, d_actors in declared_by_dir.items():
         declared_lines.append(f"   ├─ {d}")
         for act in d_actors:
             role_prefix = f"{act.declared_role} " if act.declared_role else ""
-            peer_partner = None
-            for s, t in peer_pairs:
+            rel_tags = []
+            for s, t, k in declared_edges:
                 if s == act.id:
-                    peer_partner = actors_by_id[t].name if t in actors_by_id else t[:8]
-                    break
-                elif t == act.id:
-                    peer_partner = actors_by_id[s].name if s in actors_by_id else s[:8]
-                    break
-            if peer_partner:
-                declared_lines.append(f"   │  ├─ {role_prefix}{act.name} ── peer ── {peer_partner}")
+                    t_name = actors_by_id[t].name if t in actors_by_id else t[:8]
+                    if k == "peer":
+                        rel_tags.append(f"── peer ── {t_name}")
+                    elif k == "reports_to":
+                        rel_tags.append(f"── reports_to ──> {t_name}")
+                    elif k == "owner":
+                        rel_tags.append(f"── owner ──> {t_name}")
+                elif t == act.id and k == "peer":
+                    s_name = actors_by_id[s].name if s in actors_by_id else s[:8]
+                    rel_tags.append(f"── peer ── {s_name}")
+            if rel_tags:
+                declared_lines.append(f"   │  ├─ {role_prefix}{act.name} {' '.join(rel_tags)}")
             else:
                 declared_lines.append(f"   │  ├─ {role_prefix}{act.name}")
 
     if declared_relations_only:
         return [tui.truncate(ln, width) for ln in declared_lines]
 
-    # Side by side composition
+    # Side by side composition with wide-character aware width handling
     half_w = max(30, int((width - 4) / 2))
     max_h = max(len(declared_lines), len(runtime_lines))
     while len(declared_lines) < max_h:
@@ -938,11 +951,69 @@ def render_actor_view(
 
     combined = []
     for dl, rl in zip(declared_lines, runtime_lines):
-        d_pad = dl.ljust(half_w)[:half_w]
-        r_pad = rl[:half_w]
+        d_w = tui.width(dl)
+        if d_w > half_w:
+            d_pad = tui.truncate(dl, half_w)
+            d_pad += " " * max(0, half_w - tui.width(d_pad))
+        else:
+            d_pad = dl + " " * (half_w - d_w)
+        r_pad = tui.truncate(rl, half_w)
         combined.append(f"{d_pad}  {r_pad}")
 
     return [tui.truncate(ln, width) for ln in combined]
+
+
+def filter_timeline_events(
+    snapshot: ObservationSnapshot,
+    projection: WorkflowProjection,
+    *,
+    work_filter: str | None = None,
+    actor_filter: str | None = None,
+) -> tuple[ObservedEvent, ...]:
+    """Filter snapshot events for a specific work item or actor matching exact evidence references."""
+    events = list(snapshot.events)
+    if not work_filter and not actor_filter:
+        return tuple(events)
+
+    if actor_filter:
+        act_lower = actor_filter.lower()
+        events = [
+            e for e in events
+            if (e.actor_id and act_lower in e.actor_id.lower())
+            or (e.actor_name and act_lower in e.actor_name.lower())
+            or (e.author_actor_id and act_lower in e.author_actor_id.lower())
+            or (e.peer_id and act_lower in e.peer_id.lower())
+            or (e.peer_name and act_lower in e.peer_name.lower())
+        ]
+
+    if work_filter:
+        wf_lower = work_filter.lower()
+        matched_work_ids: set[str] = set()
+        matched_source_ids: set[str] = set()
+        matched_actor_ids: set[str] = set()
+
+        for w in projection.work_items:
+            if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
+                matched_work_ids.add(w.id)
+                if w.external_id:
+                    matched_work_ids.add(w.external_id)
+                matched_actor_ids.add(w.actor_id)
+                for b in w.basis:
+                    matched_source_ids.add(b.source_id)
+                for o in w.obligations:
+                    for ob in o.basis:
+                        matched_source_ids.add(ob.source_id)
+
+        events = [
+            e for e in events
+            if e.id in matched_source_ids
+            or any(ref.source_id in matched_source_ids for ref in e.evidence)
+            or (e.attributes.get("work_id") and str(e.attributes.get("work_id")).lower() in {x.lower() for x in matched_work_ids})
+            or (e.attributes.get("declaration", {}).get("work_id") and str(e.attributes.get("declaration", {}).get("work_id")).lower() in {x.lower() for x in matched_work_ids})
+            or (e.actor_id in matched_actor_ids and e.kind in ("dispatch_sent", "actor_started", "actor_returned", "tool_started", "tool_finished"))
+        ]
+
+    return tuple(events)
 
 
 def render_observation_timeline(
@@ -956,33 +1027,7 @@ def render_observation_timeline(
     actor_filter: str | None = None,
 ) -> list[str]:
     """Render observation timeline with optional work/actor filters."""
-    events = list(snapshot.events)
-
-    if actor_filter:
-        act_lower = actor_filter.lower()
-        events = [
-            e for e in events
-            if (e.actor_id and act_lower in e.actor_id.lower())
-            or (e.actor_name and act_lower in e.actor_name.lower())
-            or (e.author_actor_id and act_lower in e.author_actor_id.lower())
-        ]
-
-    if work_filter:
-        wf_lower = work_filter.lower()
-        matched_event_ids: set[str] = set()
-        for w in projection.work_items:
-            if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
-                for b in w.basis:
-                    matched_event_ids.add(b.source_id)
-
-        events = [
-            e for e in events
-            if e.id in matched_event_ids
-            or f"{e.session_id}" in matched_event_ids
-            or (e.attributes.get("declaration", {}).get("work_id") and wf_lower in str(e.attributes.get("declaration", {}).get("work_id")).lower())
-            or (wf_lower in e.summary.lower())
-        ]
-
+    events = list(filter_timeline_events(snapshot, projection, work_filter=work_filter, actor_filter=actor_filter))
     if not events:
         return ["  (no matching observed events)"]
 

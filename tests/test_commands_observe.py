@@ -37,12 +37,11 @@ class TestObserveCLI(unittest.TestCase):
         expected = {
             "init", "doctor", "reinit", "discover", "clone", "sync", "status",
             "browser", "docs", "save", "recall", "git-policy", "statusline",
-            "guard", "hook", "trace", "harness", "workspace", "worktree",
-            "subagent", "observe", "vault", "secret", "persona", "report"
+            "guard", "hook", "trace", "harness", "workspace", "ws", "worktree", "wt",
+            "subagent", "subagents", "observe", "obs", "vault", "secret", "persona",
+            "report", "gl-refresh", "version", "_version-check"
         }
-        for cmd in expected:
-            self.assertIn(cmd, choices, f"Expected top-level CLI command '{cmd}' missing from parser")
-
+        self.assertEqual(choices, expected)
     def test_observe_position_json_schema(self):
         root = "root-obs-cli-01"
         child = "child-obs-cli-01"
@@ -220,6 +219,137 @@ class TestObserveCLI(unittest.TestCase):
         snap_after = take_tree_snapshot(self.tmp)
         self.assertEqual(snap_before, snap_after, "File system state was modified during charter observe invocation!")
 
+    def test_timeline_json_privacy_sanitizes_prompt_and_content(self):
+        root = "root-priv-01"
+        child = "child-priv-01"
+        secret_prompt = "CONFIDENTIAL DISPATCH INSTRUCTIONS 12345"
+        secret_msg = "INTERNAL CLASSIFIED MESSAGE BODY"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": secret_prompt,
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        user_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": secret_msg,
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:01:00Z", collab_events=[user_msg])
+
+        parser = cli.build_parser()
+
+        # 1. Default JSON output (must elide prompt and content)
+        buf_default = io.StringIO()
+        with mock.patch("sys.stdout", buf_default):
+            args = parser.parse_args(["observe", "timeline", "--session", root, "--json"])
+            rc = args.func(args)
+            self.assertEqual(rc, 0)
+
+        out_default = buf_default.getvalue()
+        self.assertNotIn(secret_prompt, out_default)
+        self.assertNotIn(secret_msg, out_default)
+        self.assertIn("prompt elided", out_default)
+        self.assertIn("content elided", out_default)
+
+        # 2. With --include-content flag
+        buf_full = io.StringIO()
+        with mock.patch("sys.stdout", buf_full):
+            args_full = parser.parse_args(["observe", "timeline", "--session", root, "--json", "--include-content"])
+            rc_full = args_full.func(args_full)
+            self.assertEqual(rc_full, 0)
+
+        out_full = buf_full.getvalue()
+        self.assertIn(secret_prompt, out_full)
+        self.assertIn(secret_msg, out_full)
+
+    def test_observe_actors_json_filtering_and_mutually_exclusive_flags(self):
+        root = "root-act-json-01"
+        child = "child-act-json-01"
+        decl_peer = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"peer\",\"actor_id\":\"" + root + "\",\"related_actor_id\":\"" + child + "\"}\n```",
+            },
+        }
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "Work on task",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_ev, decl_peer])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:10Z")
+
+        parser = cli.build_parser()
+
+        # 1. Mutually exclusive flag enforcement
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr", io.StringIO()):
+                parser.parse_args(["observe", "actors", "--runtime-tree", "--declared-relations"])
+
+        # 2. JSON with --runtime-tree (omits declared relations)
+        buf_rt = io.StringIO()
+        with mock.patch("sys.stdout", buf_rt):
+            args_rt = parser.parse_args(["observe", "actors", "--session", root, "--json", "--runtime-tree"])
+            args_rt.func(args_rt)
+        data_rt = json.loads(buf_rt.getvalue())["data"]
+        self.assertTrue(all(not r["declared"] for r in data_rt["relations"]))
+
+        # 3. JSON with --declared-relations (only declared relations)
+        buf_decl = io.StringIO()
+        with mock.patch("sys.stdout", buf_decl):
+            args_decl = parser.parse_args(["observe", "actors", "--session", root, "--json", "--declared-relations"])
+            args_decl.func(args_decl)
+        data_decl = json.loads(buf_decl.getvalue())["data"]
+        self.assertTrue(all(r["declared"] for r in data_decl["relations"]))
+
+    def test_watch_mode_handles_anomaly_without_crashing(self):
+        from charter import commands_observe
+
+        calls = 0
+        def flaky_collect(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("Simulated transient observation error")
+            raise KeyboardInterrupt()
+
+        with mock.patch("charter.observations.collect_observation_snapshot", side_effect=flaky_collect):
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = commands_observe.watch_workflow_view(
+                    view="position",
+                    root_id="test-root",
+                    target_cwd=None,
+                    interval=0.01,
+                    max_days_back=1,
+                    plain=True,
+                )
+                self.assertEqual(rc, 0)
+                self.assertIn("Observation update degraded", buf.getvalue())
 
 
 class TestObserveWatchMode(unittest.TestCase):

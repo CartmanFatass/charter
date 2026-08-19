@@ -262,18 +262,23 @@ def cmd_observe_actors(args) -> int:
         projection = workflow_view.project_workflow(snapshot)
 
         if as_json:
+            actors_data = [a.to_dict() for a in projection.actors]
+            relations_data = [r.to_dict() for r in projection.relations]
+            if runtime_tree:
+                relations_data = [r for r in relations_data if not r["declared"]]
+            elif declared_relations:
+                relations_data = [r for r in relations_data if r["declared"]]
             _emit_json(
                 view="actors",
                 root_id=root_id,
                 data={
-                    "actors": [a.to_dict() for a in projection.actors],
-                    "relations": [r.to_dict() for r in projection.relations],
+                    "actors": actors_data,
+                    "relations": relations_data,
                 },
                 warnings=snapshot.warnings,
                 captured_at=snapshot.captured_at.isoformat(),
             )
             return 0
-
         width = tui.term_width() if not plain else 120
         lines = workflow_view.render_actor_view(
             projection,
@@ -338,38 +343,16 @@ def cmd_observe_timeline(args) -> int:
         projection = workflow_view.project_workflow(snapshot)
 
         if as_json:
-            # Respect safe-by-default content behavior and filters
-            filtered_events = list(snapshot.events)
-            if actor_filter:
-                act_lower = actor_filter.lower()
-                filtered_events = [
-                    e for e in filtered_events
-                    if (e.actor_id and act_lower in e.actor_id.lower())
-                    or (e.actor_name and act_lower in e.actor_name.lower())
-                    or (e.author_actor_id and act_lower in e.author_actor_id.lower())
-                ]
-            if work_filter:
-                wf_lower = work_filter.lower()
-                matched_event_ids: set[str] = set()
-                for w in projection.work_items:
-                    if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
-                        for b in w.basis:
-                            matched_event_ids.add(b.source_id)
-                filtered_events = [
-                    e for e in filtered_events
-                    if e.id in matched_event_ids
-                    or f"{e.session_id}" in matched_event_ids
-                    or (e.attributes.get("declaration", {}).get("work_id") and wf_lower in str(e.attributes.get("declaration", {}).get("work_id")).lower())
-                    or (wf_lower in e.summary.lower())
-                ]
-
-            raw_events = []
-            for e in filtered_events:
-                ed = e.to_dict()
-                if not include_content and "attributes" in ed and "content" in ed["attributes"]:
-                    ed["attributes"]["content"] = "[elided; pass --include-content to view]"
-                raw_events.append(ed)
-
+            filtered_events = workflow_view.filter_timeline_events(
+                snapshot,
+                projection,
+                work_filter=work_filter,
+                actor_filter=actor_filter,
+            )
+            raw_events = [
+                observations.sanitize_event_for_public_view(e, include_content=include_content)
+                for e in filtered_events
+            ]
             _emit_json(
                 view="timeline",
                 root_id=root_id,
@@ -378,7 +361,6 @@ def cmd_observe_timeline(args) -> int:
                 captured_at=snapshot.captured_at.isoformat(),
             )
             return 0
-
         width = tui.term_width() if not plain else 120
         lines = workflow_view.render_observation_timeline(
             snapshot,
@@ -520,89 +502,96 @@ def watch_workflow_view(
 
         while True:
             now = time.time()
-            changed = watcher.check_for_changes()
-            need_rebuild = changed or (last_projection is None)
-            need_repaint = need_rebuild or (now - last_repaint >= interval)
+            try:
+                changed = watcher.check_for_changes()
+                need_rebuild = changed or (last_projection is None)
+                need_repaint = need_rebuild or (now - last_repaint >= interval)
 
-            if need_rebuild:
-                if not effective_root:
-                    effective_root, _ = _resolve_session_root_id(session_id=root_id, cwd=target_cwd, days=max_days_back)
-                if effective_root:
-                    last_snapshot = observations.collect_observation_snapshot(
-                        effective_root,
-                        max_days_back=max_days_back,
-                        include_tool_calls=tool_calls,
-                    )
-                    last_projection = workflow_view.project_workflow(last_snapshot)
+                if need_rebuild:
+                    if not effective_root:
+                        effective_root, _ = _resolve_session_root_id(session_id=root_id, cwd=target_cwd, days=max_days_back)
+                    if effective_root:
+                        last_snapshot = observations.collect_observation_snapshot(
+                            effective_root,
+                            max_days_back=max_days_back,
+                            include_tool_calls=tool_calls,
+                        )
+                        last_projection = workflow_view.project_workflow(last_snapshot)
 
-            if need_repaint and last_projection is not None and last_snapshot is not None:
-                width = tui.term_width() if not plain else 120
-                if view == "position":
-                    items = list(last_projection.work_items)
-                    if direction:
-                        items = [w for w in items if w.direction and w.direction.lower() == direction.lower()]
-                    if role:
-                        items = [w for w in items if w.actor_role and w.actor_role.lower() == role.lower()]
-                    if active_only:
-                        items = [w for w in items if w.phase in ("dispatched", "active", "returned")]
-                    sub_proj = workflow_view.WorkflowProjection(
-                        root_id=last_projection.root_id,
-                        captured_at=last_projection.captured_at,
-                        actors=last_projection.actors,
-                        relations=last_projection.relations,
-                        work_items=tuple(items),
-                        open_obligations=last_projection.open_obligations,
-                        incidents=last_projection.incidents,
-                        unbound_events=last_projection.unbound_events,
-                    )
-                    lines = workflow_view.render_position_table(sub_proj, width=width, color=not plain)
-                elif view == "obligations":
-                    obls = list(last_projection.open_obligations)
-                    if owner:
-                        obls = [o for o in obls if owner.lower() in o.owner_label.lower()]
-                    if kind:
-                        obls = [o for o in obls if o.kind == kind]
-                    sub_proj = workflow_view.WorkflowProjection(
-                        root_id=last_projection.root_id,
-                        captured_at=last_projection.captured_at,
-                        actors=last_projection.actors,
-                        relations=last_projection.relations,
-                        work_items=last_projection.work_items,
-                        open_obligations=tuple(obls),
-                        incidents=last_projection.incidents,
-                        unbound_events=last_projection.unbound_events,
-                    )
-                    lines = workflow_view.render_obligations(sub_proj, width=width, color=not plain)
-                elif view == "actors":
-                    lines = workflow_view.render_actor_view(
-                        last_projection,
-                        width=width,
-                        color=not plain,
-                        runtime_tree_only=runtime_tree,
-                        declared_relations_only=declared_relations,
-                    )
-                elif view == "timeline":
-                    lines = workflow_view.render_observation_timeline(
-                        last_snapshot,
-                        last_projection,
-                        width=width,
-                        color=not plain,
-                        include_content=include_content,
-                        work_filter=work,
-                        actor_filter=actor,
-                    )
-                else:
-                    lines = ["(unknown view)"]
+                if need_repaint and last_projection is not None and last_snapshot is not None:
+                    width = tui.term_width() if not plain else 120
+                    if view == "position":
+                        items = list(last_projection.work_items)
+                        if direction:
+                            items = [w for w in items if w.direction and w.direction.lower() == direction.lower()]
+                        if role:
+                            items = [w for w in items if w.actor_role and w.actor_role.lower() == role.lower()]
+                        if active_only:
+                            items = [w for w in items if w.phase in ("dispatched", "active", "returned")]
+                        sub_proj = workflow_view.WorkflowProjection(
+                            root_id=last_projection.root_id,
+                            captured_at=last_projection.captured_at,
+                            actors=last_projection.actors,
+                            relations=last_projection.relations,
+                            work_items=tuple(items),
+                            open_obligations=last_projection.open_obligations,
+                            incidents=last_projection.incidents,
+                            unbound_events=last_projection.unbound_events,
+                        )
+                        lines = workflow_view.render_position_table(sub_proj, width=width, color=not plain)
+                    elif view == "obligations":
+                        obls = list(last_projection.open_obligations)
+                        if owner:
+                            obls = [o for o in obls if owner.lower() in o.owner_label.lower()]
+                        if kind:
+                            obls = [o for o in obls if o.kind == kind]
+                        sub_proj = workflow_view.WorkflowProjection(
+                            root_id=last_projection.root_id,
+                            captured_at=last_projection.captured_at,
+                            actors=last_projection.actors,
+                            relations=last_projection.relations,
+                            work_items=last_projection.work_items,
+                            open_obligations=tuple(obls),
+                            incidents=last_projection.incidents,
+                            unbound_events=last_projection.unbound_events,
+                        )
+                        lines = workflow_view.render_obligations(sub_proj, width=width, color=not plain)
+                    elif view == "actors":
+                        lines = workflow_view.render_actor_view(
+                            last_projection,
+                            width=width,
+                            color=not plain,
+                            runtime_tree_only=runtime_tree,
+                            declared_relations_only=declared_relations,
+                        )
+                    elif view == "timeline":
+                        lines = workflow_view.render_observation_timeline(
+                            last_snapshot,
+                            last_projection,
+                            width=width,
+                            color=not plain,
+                            include_content=include_content,
+                            work_filter=work,
+                            actor_filter=actor,
+                        )
+                    else:
+                        lines = ["(unknown view)"]
 
+                    if not plain:
+                        sys.stdout.write("\033[H\033[J")
+                    print("\n".join(lines))
+                    last_repaint = now
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
                 if not plain:
                     sys.stdout.write("\033[H\033[J")
-                print("\n".join(lines))
+                print(f"[WARN] Observation update degraded: {exc}")
                 last_repaint = now
 
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         pass
-    finally:
         if not plain:
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()

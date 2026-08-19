@@ -574,6 +574,114 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
             "````"
         )
         self.assertEqual(observations.parse_workflow_declarations(four_ticks), ())
+    def test_event_specific_schemas(self):
+        from charter import observations
+
+        # 1. Dispatch forbids relation
+        w1: list[str] = []
+        d1 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"relation\":\"peer\"}\n```", warnings=w1)
+        self.assertEqual(d1, ())
+        self.assertTrue(any("forbids field 'relation'" in msg for msg in w1))
+
+        # 2. Intake requires non-empty work_id
+        w2: list[str] = []
+        d2 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"intake\"}\n```", warnings=w2)
+        self.assertEqual(d2, ())
+        self.assertTrue(any("Missing or empty work_id" in msg for msg in w2))
+
+        # 3. Intake forbids relation fields
+        w3: list[str] = []
+        d3 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"W1\",\"relation\":\"peer\"}\n```", warnings=w3)
+        self.assertEqual(d3, ())
+        self.assertTrue(any("forbids field 'relation'" in msg for msg in w3))
+
+        # 4. Resolve requires non-empty work_id
+        w4: list[str] = []
+        d4 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"   \"}\n```", warnings=w4)
+        self.assertEqual(d4, ())
+        self.assertTrue(any("Missing or empty work_id" in msg for msg in w4))
+
+        # 5. Relation requires relation and related_actor_id
+        w5: list[str] = []
+        d5 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"actor_id\":\"A\"}\n```", warnings=w5)
+        self.assertEqual(d5, ())
+        self.assertTrue(any("requires valid relation" in msg for msg in w5))
+
+        w6: list[str] = []
+        d6 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"peer\",\"actor_id\":\"A\"}\n```", warnings=w6)
+        self.assertEqual(d6, ())
+        self.assertTrue(any("requires non-empty related_actor_id" in msg for msg in w6))
+
+        # 6. Relation forbids work_id
+        w7: list[str] = []
+        d7 = observations.parse_workflow_declarations("```charter-observe\n{\"schema\":1,\"event\":\"relation\",\"relation\":\"peer\",\"related_actor_id\":\"B\",\"work_id\":\"W1\"}\n```", warnings=w7)
+        self.assertEqual(d7, ())
+        self.assertTrue(any("forbids field 'work_id'" in msg for msg in w7))
+
+    def test_causal_full_lifecycle_with_identical_timestamps(self):
+        from charter import observations, workflow_view
+
+        root = "root-causal-full"
+        child = "child-causal-full"
+        ts = "2026-08-19T10:00:00Z"
+
+        spawn_ev = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"FULL-1\",\"title\":\"Task Full\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+
+        task_complete_ev = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "task_complete",
+                "summary": "Finished work",
+            },
+        }
+
+        intake_msg = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"FULL-1\"}\n```\nAccepted return.",
+            },
+        }
+
+        resolve_msg = {
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"resolve\",\"work_id\":\"FULL-1\"}\n```\nResolution approved.",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-causal-full-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts, collab_events=[spawn_ev])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Gauss", timestamp=ts, collab_events=[task_complete_ev, intake_msg, resolve_msg])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Event ordering must be: dispatch -> return -> intake -> resolve
+        kinds = [(e.kind, e.attributes.get("declaration", {}).get("event")) for e in snap.events]
+        # Must resolve to phase resolved without getting stuck at unbound!
+        self.assertEqual(len(proj.work_items), 1)
+        self.assertEqual(proj.work_items[0].phase, "resolved")
+        self.assertEqual(proj.unbound_events, ())
     def test_ordinary_prose_is_ignored(self):
         from charter import observations
 

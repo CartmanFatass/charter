@@ -41,8 +41,8 @@ def _safe_name(agent: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in agent)[:64]
 
 
-def live(exclude_token: str | None = None, *, prune: bool = True) -> list[str]:
-    """Agent names currently in flight, stale entries optionally pruned.
+def live(exclude_token: str | None = None, *, prune: bool = False) -> list[str]:
+    """Agent names currently in flight. Read-only by default (prune=False).
 
     ``exclude_token`` drops one specific record — the caller's own, so a dispatch
     never reports itself as a concurrent peer.
@@ -117,7 +117,7 @@ def read_records(
             })
         except (OSError, ValueError):
             continue
-    return sorted(out, key=lambda r: r["ts"])
+    return sorted(out, key=lambda r: (r["ts"], str(r.get("token") or "")))
 
 
 def live_records(

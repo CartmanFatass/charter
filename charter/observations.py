@@ -51,6 +51,27 @@ _KIND_PRIORITY: dict[str, int] = {
     "actor_stopped": 90,
 }
 
+
+def _event_priority(e: ObservedEvent) -> int:
+    """Determine deterministic causal priority for event ordering."""
+    if e.kind == "workflow_declared":
+        decl_dict = e.attributes.get("declaration")
+        decl_ev = ""
+        if isinstance(decl_dict, dict):
+            decl_ev = decl_dict.get("event") or ""
+        elif isinstance(decl_dict, WorkflowDeclaration):
+            decl_ev = decl_dict.event
+        if decl_ev == "dispatch":
+            return 20
+        elif decl_ev == "intake":
+            return 82
+        elif decl_ev == "resolve":
+            return 85
+        elif decl_ev == "relation":
+            return 25
+        return 25
+    return _KIND_PRIORITY.get(e.kind, 50)
+
 _MAX_DECLARATION_BLOCK_BYTES = 4096
 
 # Exact line-anchored fenced block: requires ```charter-observe on its own line and ``` on its own line.
@@ -221,8 +242,9 @@ def make_event_id(
     actor_id: str | None = None,
     peer_id: str | None = None,
     discriminator: str | None = None,
+    ordinal: int | None = None,
 ) -> str:
-    """Generate a deterministic 64-hex SHA-256 event ID."""
+    """Generate a deterministic 64-hex SHA-256 event ID incorporating source ordinal."""
     norm_path = ""
     if file_path:
         norm_path = Path(file_path).as_posix()
@@ -236,11 +258,28 @@ def make_event_id(
         str(actor_id or ""),
         str(peer_id or ""),
     ]
+    if ordinal is not None:
+        parts.append(str(ordinal))
     if discriminator:
         parts.append(str(discriminator))
     raw_string = "|".join(parts)
     return hashlib.sha256(raw_string.encode("utf-8")).hexdigest()
 
+
+def sanitize_event_for_public_view(
+    event: ObservedEvent,
+    *,
+    include_content: bool = False,
+) -> dict[str, Any]:
+    """Produce a public dictionary representation of an event with sensitive content elided by default."""
+    d = event.to_dict()
+    if not include_content:
+        attrs = dict(d.get("attributes", {}))
+        for k in ("content", "prompt", "arguments", "output", "raw_message"):
+            if k in attrs:
+                attrs[k] = f"[{k} elided; pass --include-content to view]"
+        d["attributes"] = attrs
+    return d
 
 def _no_duplicate_keys_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     res: dict[str, Any] = {}
@@ -316,7 +355,7 @@ def parse_workflow_declarations(
         return ()
 
     # Validate string fields (reject list, dict, bool, int passed into string fields)
-    for str_field in ("work_id", "title", "direction", "actor_role", "owner_role", "actor_id", "related_actor_id"):
+    for str_field in ("work_id", "title", "direction", "actor_role", "owner_role", "actor_id", "related_actor_id", "relation"):
         if str_field in data:
             val = data[str_field]
             if val is not None and not isinstance(val, str):
@@ -324,33 +363,57 @@ def parse_workflow_declarations(
                     warnings.append(f"Field '{str_field}' must be a string, got {type(val).__name__}")
                 return ()
 
-    work_id_val = data.get("work_id")
-    if event_val in ("intake", "resolve") and not work_id_val:
-        if warnings is not None:
-            warnings.append(f"Missing work_id for '{event_val}' event declaration")
-        return ()
-
-    relation_val = data.get("relation")
-    if relation_val is not None:
-        if not isinstance(relation_val, str) or relation_val not in _ALLOWED_RELATIONS:
+    # Event-specific schema validation
+    if event_val == "dispatch":
+        for forbidden in ("relation", "related_actor_id"):
+            if data.get(forbidden) is not None:
+                if warnings is not None:
+                    warnings.append(f"Event 'dispatch' forbids field '{forbidden}'")
+                return ()
+    elif event_val in ("intake", "resolve"):
+        work_id_val = data.get("work_id")
+        if not work_id_val or not str(work_id_val).strip():
             if warnings is not None:
-                warnings.append(f"Unsupported relation kind: '{relation_val}'")
+                warnings.append(f"Missing or empty work_id for '{event_val}' event declaration")
             return ()
+        for forbidden in ("relation", "related_actor_id", "title", "direction", "actor_role", "owner_role"):
+            if data.get(forbidden) is not None:
+                if warnings is not None:
+                    warnings.append(f"Event '{event_val}' forbids field '{forbidden}'")
+                return ()
+    elif event_val == "relation":
+        relation_val = data.get("relation")
+        if not relation_val or not isinstance(relation_val, str) or relation_val not in _ALLOWED_RELATIONS:
+            if warnings is not None:
+                warnings.append(f"Event 'relation' requires valid relation in {sorted(_ALLOWED_RELATIONS)}, got '{relation_val}'")
+            return ()
+        rel_actor = data.get("related_actor_id")
+        if not rel_actor or not isinstance(rel_actor, str) or not rel_actor.strip():
+            if warnings is not None:
+                warnings.append("Event 'relation' requires non-empty related_actor_id")
+            return ()
+        for forbidden in ("work_id", "title", "direction", "actor_role", "owner_role"):
+            if data.get(forbidden) is not None:
+                if warnings is not None:
+                    warnings.append(f"Event 'relation' forbids field '{forbidden}'")
+                return ()
+
+    work_id_val = data.get("work_id")
+    relation_val = data.get("relation")
 
     decl = WorkflowDeclaration(
         schema=1,
         event=event_val,
         work_id=str(work_id_val).strip() if work_id_val else None,
-        title=str(data.get("title")).strip() if data.get("title") else None,
-        direction=str(data.get("direction")).strip() if data.get("direction") else None,
-        actor_role=str(data.get("actor_role")).strip() if data.get("actor_role") else None,
-        owner_role=str(data.get("owner_role")).strip() if data.get("owner_role") else None,
-        actor_id=str(data.get("actor_id")).strip() if data.get("actor_id") else None,
+        title=str(data["title"]).strip() if data.get("title") else None,
+        direction=str(data["direction"]).strip() if data.get("direction") else None,
+        actor_role=str(data["actor_role"]).strip() if data.get("actor_role") else None,
+        owner_role=str(data["owner_role"]).strip() if data.get("owner_role") else None,
+        actor_id=str(data["actor_id"]).strip() if data.get("actor_id") else None,
         relation=relation_val,
-        related_actor_id=str(data.get("related_actor_id")).strip() if data.get("related_actor_id") else None,
+        related_actor_id=str(data["related_actor_id"]).strip() if data.get("related_actor_id") else None,
     )
     return (decl,)
-
 
 def _ensure_utc(dt: datetime | None) -> datetime:
     if dt is None:
@@ -879,9 +942,8 @@ def collect_observation_snapshot(
 
     # Sort events by observed_at, then kind causal priority, then source ordinal, then stable ID
     def event_sort_key(e: ObservedEvent) -> tuple[datetime, int, int, str]:
-        prio = _KIND_PRIORITY.get(e.kind, 50)
+        prio = _event_priority(e)
         return (e.observed_at, prio, e.ordinal, e.id)
-
     events.sort(key=event_sort_key)
 
     return ObservationSnapshot(

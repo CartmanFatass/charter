@@ -1710,7 +1710,7 @@ def _workflow_section(
             counts_str.append(f"{missing_ret_n} return-missing")
 
         counts_tag = f" {_DIM}({_R}{' · '.join(counts_str)}{_DIM}){_R}" if counts_str else ""
-        wf_head = f"{_DIM}{_HEAD_PAD}▪ workflow{_R} {len(work_items)}{counts_tag}"
+        wf_head = f"{_DIM}{_HEAD_PAD}workflow{_R} {len(work_items)}{counts_tag}"
 
         def item_sort_key(w) -> tuple[int, float]:
             has_intake = any(o.kind == "intake_required" for o in w.obligations)
