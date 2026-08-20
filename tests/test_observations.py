@@ -1129,5 +1129,152 @@ class TestWorkflowDeclarationParsing(unittest.TestCase):
         # Because initial user message already passed, the late repeated dispatch must NOT be swallowed as a mirror
         self.assertEqual(len(decl_events), 2)
 
+    def test_identical_dispatch_a_child_first_mirror_identical_later_dispatch_b(self):
+        """Verify that child's first mirror merges ONLY with the earlier eligible dispatch, not a later identical retry."""
+        from charter import observations
+        root = "root-disp-queue"
+        child = "child-disp-queue"
+        ts_early = "2026-08-19T10:00:00Z"
+        ts_late = "2026-08-19T10:10:00Z"
+
+        spawn_early = {
+            "type": "event_msg",
+            "timestamp": ts_early,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-DUP\",\"title\":\"Task Dup\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        spawn_late = {
+            "type": "event_msg",
+            "timestamp": ts_late,
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-DUP\",\"title\":\"Task Dup\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        child_first_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "user_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-DUP\",\"title\":\"Task Dup\"}\n```",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-disp-q-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp=ts_early, collab_events=[spawn_early, spawn_late])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:30Z", collab_events=[child_first_msg])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        disp_decls = [e for e in snap.events if e.kind == "workflow_declared" and e.attributes.get("declaration", {}).get("work_id") == "WORK-DUP"]
+        self.assertEqual(len(disp_decls), 2)
+
+        early_decl = next(e for e in disp_decls if e.observed_at.strftime("%H:%M:%S") == "10:00:00")
+        late_decl = next(e for e in disp_decls if e.observed_at.strftime("%H:%M:%S") == "10:10:00")
+
+        # Early dispatch must have 2 evidence entries (parent spawn + child first user_message mirror)
+        self.assertEqual(len(early_decl.evidence), 2)
+        # Late dispatch must have only 1 evidence entry (parent spawn only; child mirror occurred BEFORE late dispatch)
+        self.assertEqual(len(late_decl.evidence), 1)
+
+    def test_causal_cycle_with_non_monotonic_source_timestamps_preserves_physical_order(self):
+        """Verify that when a causal cycle is detected, physical intra-source order is preserved."""
+        from charter import observations
+        root = "root-cycle-src"
+        child = "child-cycle-src"
+
+        # Parent physical file order: Line 1 = intake declaration, Line 2 = dispatch declaration
+        # But intake declaration has ts = 10:00:10, dispatch declaration has ts = 10:00:00
+        # Child return has ts = 10:00:05.
+        # Physical intra-stream edge: intake -> dispatch
+        # Cross-session causal edges: dispatch -> child_activity -> return -> intake
+        # This creates a cycle: intake -> dispatch -> child_return -> intake!
+        intake_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:10Z",
+            "payload": {
+                "type": "agent_message",
+                "message": "```charter-observe\n{\"schema\":1,\"event\":\"intake\",\"work_id\":\"WORK-CYCLE\"}\n```",
+            },
+        }
+        spawn_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-CYCLE\",\"title\":\"Cycle Task\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        ret_msg = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:05Z",
+            "payload": {
+                "type": "task_complete",
+                "summary": "Finished cycle task",
+            },
+        }
+
+        tmp = Path(tempfile.mkdtemp(prefix="test-cycle-src-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        # Write parent rollout with intake physically BEFORE spawn
+        write_test_rollout(sdir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[intake_msg, spawn_msg])
+        write_test_rollout(sdir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:00Z", collab_events=[ret_msg])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        self.assertTrue(any("Causal ordering cycle detected" in w for w in snap.warnings))
+
+        # In the sorted events, parent intake MUST precede parent dispatch because intake was physically first in parent rollout!
+        parent_events = [e for e in snap.events if e.session_id == root and e.kind == "workflow_declared"]
+        self.assertEqual(len(parent_events), 2)
+        self.assertEqual(parent_events[0].attributes["declaration"]["event"], "intake")
+        self.assertEqual(parent_events[1].attributes["declaration"]["event"], "dispatch")
+
+    def test_nested_inflight_actor_under_non_root_coordinator(self):
+        """Verify that an inflight actor preserves its recorded non-root parent_id in peer_id."""
+        from charter import observations, inflight
+        root = "root-inflight-nest"
+        coord = "coord-inflight-nest"
+        tmp = Path(tempfile.mkdtemp(prefix="test-inflight-nest-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        sdir = tmp / "sessions"
+
+        write_test_rollout(sdir, root, timestamp="2026-08-19T10:00:00Z")
+        write_test_rollout(sdir, coord, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:00Z")
+
+        orig_dir_func = inflight._dir
+        state_dir = tmp / "state" / "dispatch-inflight"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(setattr, inflight, "_dir", orig_dir_func)
+        setattr(inflight, "_dir", lambda: state_dir)
+        token = inflight.start("Worker", session_id=root, agent_id="worker-sub", parent_id=coord)
+        self.assertIsNotNone(token)
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=sdir)
+        worker_ev = next(e for e in snap.events if e.actor_id == "worker-sub")
+        # peer_id must be the nested coordinator (coord), not root!
+        self.assertEqual(worker_ev.peer_id, coord)
+        self.assertEqual(worker_ev.peer_name, "Gauss")
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,59 +1,60 @@
 # Workflow Observer Verification Audit
 
-**Date:** 2026-08-19  
-**Branch:** main  
-**Scope:** Read-only Workflow Observer implementation and external audit review fixes (ADR 0017, `charter observe`, `charter/observations.py`, `charter/workflow_view.py`, `charter/commands_observe.py`, `charter/subagent.py`, `charter/statusline.py`, and causal lifecycle verification).
+**Date:** 2026-08-19 
+**Branch:** main 
+**Scope:** Read-only Workflow Observer implementation and external audit review fixes (ADR 0017, `charter observe`, `charter/observations.py`, `charter/workflow_view.py`, `charter/commands_observe.py`, `charter/subagent.py`, `charter/inflight.py`, `charter/statusline.py`, `charter/hooks.py`).
 
 ---
 
 ## 1. Executive Summary
 
-Charter's Codex subagent visualization has been extended into a strictly read-only workflow observer. The observer parses exact `charter-observe` declarations and correlates them with mechanical rollout events, Hook traces, and inflight records without guessing ownership, altering state, or exercising orchestration authority.
+Charter's read-only workflow observer is fully implemented, verified, and strictly isolated across all 6 core audit gates. It surfaces exact runtime facts and declarations from Codex rollouts, Hook traces, and inflight records without ever becoming an orchestrator, assuming transition authority, mutating state, or guessing ownership.
 
-All issues identified across rounds 1 through 6 of external review have been completely resolved:
-1. **Initial-Message-Constrained One-Shot Dispatch Mirror Deduplication (Gate 2)**:
-   - Deduplication is strictly constrained to the spawned child's **first** `user_message`. Mirror eligibility for that child is immediately expired after inspecting the first message.
-   - Any late repeated `dispatch` declarations (even with identical payload) arriving after an initial plain child message are preserved as distinct `ObservedEvent`s and never merged.
-   - Tested by: `test_late_repeated_dispatch_declaration_after_plain_initial_message` and `test_mirrored_declaration_deduplication`.
-2. **Premature Intake Rejection and Strict Causal DAG (Gate 4)**:
-   - Causal edges (`return_i` $\to$ `intake_i`) are **only** added when `intake.observed_at >= return.observed_at`. Intake declarations observably earlier than the child return receive no causal edge and are evaluated in natural order, correctly triggering `invalid_phase_for_intake` rejection in `unbound_events`.
-   - Tested by: `test_premature_intake_followed_by_identical_valid_intake` (asserting that `unbound_events[0].id` exactly matches the premature 10:00:02 intake event).
-3. **Assignment-Segment Activity Binding in Reducer (Gate 1 & 4)**:
-   - In `project_workflow`, activity, stop, incident, and return events bind strictly to the single earliest still-open (FIFO) assignment for the child.
-   - During WORK-1, WORK-2 remains in phase `dispatched` and receives zero activity evidence. When WORK-1 returns, WORK-2 becomes active upon segment 2 activity.
-   - Under coarse or identical timestamps, WORK-1's timeline contains only tool 1, and WORK-2's timeline contains only tool 2, with zero crosstalk.
-   - Tested by: `test_same_child_two_dispatches_identical_timestamps` and `test_work_timeline_multi_assignment_same_child_session_isolation`.
-4. **Statusline Fallback Full Fidelity & Zero Scans (Gate 5)**:
-   - Subagent tree is reconstructed 100% in-memory from `snapshot.sessions` and `snapshot.events`, including inflight-only and event-only actors, with chronological last-event-wins runtime reduction.
-   - Tested by: `test_statusline_fallback_zero_additional_rollout_scans`, `test_statusline_fallback_inflight_only_actor_included`, and `test_statusline_fallback_returned_child_later_active_wins`.
-5. **Inflight Event ID Stability (Gate 3)**:
-   - Fixed token-based discriminator with `ordinal=0` ensures absolute immutability of existing inflight event IDs across record removals.
-   - Tested by: `test_inflight_event_id_immutability_on_record_removal`.
+All residual audit items across Rounds 1 through 7 have been completely resolved and verified by comprehensive unit and integration tests.
 
 ---
 
-## 2. Gate Verification Scorecard
+## 2. Itemized Verification of Audit Gates
 
-| Gate | Verdict | Evidence |
-| :--- | :---: | :--- |
-| **Gate 1: Authority Boundary & Lifecycle Orthogonality** | **PASS** | Runtime state and work lifecycle phase are completely decoupled. Sequential assignments to the same child actor have strictly isolated lifecycles, bases, and timelines. |
-| **Gate 2: Exact Metadata & Parser Strictness** | **PASS** | `parse_workflow_declarations` strictly validates schemas. Mirror deduplication is one-shot and strictly initial-message constrained. |
-| **Gate 3: Read-Only & Deterministic Identity** | **PASS** | All observer paths and inflight reads are 100% read-only (`prune=False`). Inflight event IDs are strictly immutable. |
-| **Gate 4: Session Isolation & Causal Ordering** | **PASS** | Assignment-specific topological sort preserves exact physical file order and enforces cross-session causal dependencies without artificially reordering premature declarations. |
-| **Gate 5: Dashboard & Crash Resilience** | **PASS** | Statusline displays single `▪ workflow` header and reuses snapshot in-memory on fallback with zero additional filesystem scans while faithfully representing inflight-only actors and last-event-wins active status. |
-| **Gate 6: Backward Compatibility & Test Integrity** | **PASS** | Legacy `charter subagent` JSON/text outputs, status fields, additive runtime states, and neutral stopped text rendering are 100% preserved. Exact 32-choice top-level CLI command test passes. |
+### Gate 1: Authority & Orthogonality
+- **Runtime / Lifecycle Orthogonality:** Runtime states (`starting`, `running`, `stopped`, `unknown`) and work lifecycle phases (`dispatched`, `active`, `returned`, `intaken`, `resolved`) are completely orthogonal. A child stopping never implies work resolution.
+- **Strict FIFO Assignment-Segment Activity Binding:** Activity (`actor_started`, `tool_started`, `tool_finished`), `actor_stopped`, typed incidents, and returns bind strictly to the single earliest still-open (FIFO) assignment for the child (`open_wids[0]`), and only if the event timestamp is at or after that work item's dispatch timestamp (`dispatched_at`).
+- **Exact Incident Isolation:** Incidents are bound by exact internal work IDs (`w.id`). Filtered timelines use exact internal work ID sets (`matched_internal_work_ids`), eliminating substring false positives.
+- *Tests:* `test_same_child_two_dispatches_identical_timestamps`, `test_same_child_multi_assignment_incident_bound_strictly_to_work_b`, `test_return_a_incident_or_stop_later_dispatch_b_causal_isolation`, `test_short_external_work_id_incident_substring_isolation`.
+
+### Gate 2: Exact Metadata & Parser Strictness
+- **Strict Line-Anchored Fences:** Fenced declaration blocks require exact line-anchored ```` ```charter-observe ```` and ```` ``` ```` without extra wrapping.
+- **Temporally-Exact Mirror Candidate Queue:** Pending dispatch mirrors are tracked in per-child ordered queues (`pending_dispatch_mirrors[rx_id]`). On the child's first `user_message`, only dispatch candidates with `dispatch.observed_at <= message.observed_at` are eligible. The earliest matching candidate is merged, and all remaining pending mirrors for that child are expired. Subsequent parent dispatches remain distinct events and never absorb past child evidence.
+- *Tests:* `test_mirrored_declaration_deduplication`, `test_late_repeated_dispatch_declaration_after_plain_initial_message`, `test_identical_dispatch_a_child_first_mirror_identical_later_dispatch_b`.
+
+### Gate 3: Read-Only & Deterministic Identity
+- **Non-Pruning Observation Snapshot:** Observation snapshots read inflight records with `prune=False`, ensuring zero disk writes.
+- **Token-Stable Inflight Event IDs:** Inflight event IDs use `token` as discriminator with fixed `ordinal=0`, guaranteeing 100% SHA-256 ID immutability when other inflight records are added or removed.
+- *Tests:* `test_inflight_event_id_immutability_on_record_removal`, `test_filesystem_write_guard_read_only_invariant`.
+
+### Gate 4: Session Isolation & Causal Ordering
+- **Physical Source Stream Invariant:** Physical source line order within each rollout file is preserved across all events.
+- **Deterministic Causal DAG:** `_topological_causal_sort` adds cross-session causal edges (`dispatch -> child activity`, `child return -> intake`). Intake declarations earlier than return are never artificially delayed, properly triggering `invalid_phase_for_intake` in `unbound_events`.
+- **Causal-Cycle Recovery with Physical Order Preservation:** If cross-session edges induce a cycle, optional cross-session causal edges are discarded, and Kahn's algorithm is rerun over mandatory intra-source linear chains, preserving 100% of physical file order without timestamp reordering.
+- *Tests:* `test_causal_cycle_with_non_monotonic_source_timestamps_preserves_physical_order`, `test_premature_intake_followed_by_identical_valid_intake`, `test_negative_causal_order_intra_source_preservation`.
+
+### Gate 5: Dashboard & Crash Resilience
+- **Zero-Scan In-Memory Fallback:** Statusline fallback reconstructs `SubagentTreeNode` hierarchies directly from pre-collected `ObservationSnapshot.sessions` and `ObservationSnapshot.events` in memory, executing 0 filesystem rollout searches.
+- **Last-Event-Wins Active Status & Cycle Protection:** Fallback determines live actor status using last-event-wins across observation events and inflight records. Tree construction includes path-local `seen` cycle protection.
+- **Nested Inflight Parentage:** Inflight records propagate `parent_id` into `peer_id`, correctly placing nested inflight subagents under their parent coordinator.
+- *Tests:* `test_statusline_fallback_zero_additional_rollout_scans`, `test_statusline_fallback_inflight_only_actor_included`, `test_nested_inflight_actor_under_non_root_coordinator`.
+
+### Gate 6: Backward Compatibility & Test Integrity
+- All existing `charter subagent` commands, Hook signatures, and statusline contracts remain fully backward compatible.
+- All 119 observer, subagent, and docs tests pass cleanly.
 
 ---
 
 ## 3. Test Execution Summary
 
-```text
-Ran 114 tests across:
-  - tests.test_workflow_view
-  - tests.test_observations
-  - tests.test_commands_observe
-  - tests.test_subagent
-  - tests.test_docs_show
+```bash
+python -m unittest tests.test_workflow_view tests.test_observations tests.test_commands_observe tests.test_subagent tests.test_docs_show -v
 
-Result: 114 passed, 0 failed, 0 errors (1 platform symlink test skipped on Windows).
+Ran 119 tests in 5.520s
+OK (skipped=1)
 ```

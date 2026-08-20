@@ -99,6 +99,10 @@ def _topological_causal_sort(
             adj[u].append(v)
             in_degree[v] += 1
 
+    # Snapshot intra-source physical edges for deterministic cycle recovery
+    intra_adj = [list(edges) for edges in adj]
+    intra_in_degree = list(in_degree)
+
     # 2. Assignment-specific cross-session causal dependencies:
     # Partition each child session into activity segments demarcated by actor_returned
     child_segments: dict[str, list[list[int]]] = {}
@@ -120,15 +124,22 @@ def _topological_causal_sort(
         if ev.kind == "dispatch_sent" and ev.actor_id:
             dispatches_by_child.setdefault(ev.actor_id, []).append(idx)
 
-    # Connect dispatch_i -> first event of segment_i in that child session
+    # Connect dispatch_i -> first eligible assignment activity event of segment_i in that child session
+    activity_kinds = {"actor_started", "tool_started", "tool_finished", "actor_returned"}
     for child_sid, disp_indices in dispatches_by_child.items():
         segs = child_segments.get(child_sid, [])
         for seg_idx, disp_idx in enumerate(disp_indices):
             if seg_idx < len(segs) and segs[seg_idx]:
-                first_in_seg = segs[seg_idx][0]
-                if first_in_seg != disp_idx and first_in_seg not in adj[disp_idx]:
-                    adj[disp_idx].append(first_in_seg)
-                    in_degree[first_in_seg] += 1
+                disp_ev = events[disp_idx]
+                target_ev_idx = None
+                for e_idx in segs[seg_idx]:
+                    ev = events[e_idx]
+                    if ev.kind in activity_kinds and ev.observed_at >= disp_ev.observed_at:
+                        target_ev_idx = e_idx
+                        break
+                if target_ev_idx is not None and target_ev_idx != disp_idx and target_ev_idx not in adj[disp_idx]:
+                    adj[disp_idx].append(target_ev_idx)
+                    in_degree[target_ev_idx] += 1
 
     # Map each dispatch instance to its corresponding child return event
     dispatch_to_return: dict[int, int] = {}
@@ -160,45 +171,39 @@ def _topological_causal_sort(
                                             adj[ret_idx].append(idx)
                                             in_degree[idx] += 1
                                 break
-    # Min-heap priority queue: (observed_at, priority, ordinal, id, node_index)
-    heap: list[tuple[datetime, int, int, str, int]] = []
-    for idx in range(n):
-        if in_degree[idx] == 0:
-            ev = events[idx]
-            heapq.heappush(
-                heap,
-                (ev.observed_at, _event_priority(ev), ev.ordinal, ev.id, idx),
-            )
 
-    sorted_events: list[ObservedEvent] = []
-    visited = [False] * n
-
-    while heap:
-        _, _, _, _, u = heapq.heappop(heap)
-        if visited[u]:
-            continue
-        visited[u] = True
-        sorted_events.append(events[u])
-
-        for v in adj[u]:
-            in_degree[v] -= 1
-            if in_degree[v] == 0 and not visited[v]:
-                ev_v = events[v]
+    def _run_kahn(graph_adj: list[list[int]], graph_in_degree: list[int]) -> list[ObservedEvent]:
+        heap: list[tuple[datetime, int, int, str, int]] = []
+        deg = list(graph_in_degree)
+        for idx in range(n):
+            if deg[idx] == 0:
+                ev = events[idx]
                 heapq.heappush(
                     heap,
-                    (ev_v.observed_at, _event_priority(ev_v), ev_v.ordinal, ev_v.id, v),
+                    (ev.observed_at, _event_priority(ev), ev.ordinal, ev.id, idx),
                 )
+        res: list[ObservedEvent] = []
+        visited = [False] * n
+        while heap:
+            _, _, _, _, u = heapq.heappop(heap)
+            if visited[u]:
+                continue
+            visited[u] = True
+            res.append(events[u])
+            for v in graph_adj[u]:
+                deg[v] -= 1
+                if deg[v] == 0 and not visited[v]:
+                    ev_v = events[v]
+                    heapq.heappush(
+                        heap,
+                        (ev_v.observed_at, _event_priority(ev_v), ev_v.ordinal, ev_v.id, v),
+                    )
+        return res
 
+    sorted_events = _run_kahn(adj, in_degree)
     if len(sorted_events) < n:
-        warnings.append("Causal ordering cycle detected; falling back to source ordinal for remaining events")
-        remaining = [
-            (events[i].observed_at, events[i].ordinal, events[i].id, i)
-            for i in range(n)
-            if not visited[i]
-        ]
-        remaining.sort()
-        for _, _, _, i in remaining:
-            sorted_events.append(events[i])
+        warnings.append("Causal ordering cycle detected; dropping optional cross-session causal edges to preserve physical source order")
+        sorted_events = _run_kahn(intra_adj, intra_in_degree)
 
     return sorted_events
 
@@ -587,7 +592,7 @@ def collect_observation_snapshot(
     events: list[ObservedEvent] = []
     ordinal_counter = 0
 
-    pending_dispatch_mirrors: dict[tuple[Any, ...], ObservedEvent] = {}
+    pending_dispatch_mirrors: dict[str, list[tuple[tuple[Any, ...], ObservedEvent]]] = {}
     initial_user_message_seen: set[str] = set()
     for sid in descendants:
         link = index.links.get(sid)
@@ -785,7 +790,7 @@ def collect_observation_snapshot(
                                                 d.actor_role,
                                                 d.owner_role,
                                             )
-                                            pending_dispatch_mirrors[mirror_key] = decl_event
+                                            pending_dispatch_mirrors.setdefault(rx_id, []).append((mirror_key, decl_event))
                             # Check typed incidents in agents_states on ANY collab tool call
                             for aid_idx, (aid, astate) in enumerate(states.items()):
                                 if isinstance(astate, dict) and (astate.get("error") or astate.get("failed")):
@@ -882,25 +887,35 @@ def collect_observation_snapshot(
                             d.actor_role,
                             d.owner_role,
                         )
-                        if is_first_user_msg and d.event == "dispatch" and mirror_key in pending_dispatch_mirrors:
-                            orig_event = pending_dispatch_mirrors.pop(mirror_key)
+                        matched_orig: ObservedEvent | None = None
+                        if is_first_user_msg and d.event == "dispatch" and sid in pending_dispatch_mirrors:
+                            eligible = [
+                                (c_idx, c_k, c_ev)
+                                for c_idx, (c_k, c_ev) in enumerate(pending_dispatch_mirrors[sid])
+                                if c_k == mirror_key and c_ev.observed_at <= ts
+                            ]
+                            if eligible:
+                                chosen_idx, _, matched_orig = eligible[0]
+                                pending_dispatch_mirrors[sid].pop(chosen_idx)
+
+                        if matched_orig is not None:
                             for e_idx, ev_item in enumerate(events):
-                                if ev_item.id == orig_event.id:
+                                if ev_item.id == matched_orig.id:
                                     updated_event = ObservedEvent(
-                                        id=orig_event.id,
-                                        root_id=orig_event.root_id,
-                                        session_id=orig_event.session_id,
-                                        kind=orig_event.kind,
-                                        observed_at=orig_event.observed_at,
-                                        actor_id=orig_event.actor_id,
-                                        actor_name=orig_event.actor_name,
-                                        peer_id=orig_event.peer_id,
-                                        peer_name=orig_event.peer_name,
-                                        author_actor_id=orig_event.author_actor_id,
-                                        summary=orig_event.summary,
-                                        attributes=orig_event.attributes,
-                                        evidence=orig_event.evidence + (decl_ev_ref,),
-                                        ordinal=orig_event.ordinal,
+                                        id=matched_orig.id,
+                                        root_id=matched_orig.root_id,
+                                        session_id=matched_orig.session_id,
+                                        kind=matched_orig.kind,
+                                        observed_at=matched_orig.observed_at,
+                                        actor_id=matched_orig.actor_id,
+                                        actor_name=matched_orig.actor_name,
+                                        peer_id=matched_orig.peer_id,
+                                        peer_name=matched_orig.peer_name,
+                                        author_actor_id=matched_orig.author_actor_id,
+                                        summary=matched_orig.summary,
+                                        attributes=matched_orig.attributes,
+                                        evidence=matched_orig.evidence + (decl_ev_ref,),
+                                        ordinal=matched_orig.ordinal,
                                     )
                                     events[e_idx] = updated_event
                                     break
@@ -925,10 +940,8 @@ def collect_observation_snapshot(
                             events.append(decl_event)
 
                     # Expire all pending dispatch mirrors for this child after its first user_message
-                    if is_first_user_msg:
-                        for k in list(pending_dispatch_mirrors.keys()):
-                            if len(k) >= 5 and k[4] == sid:
-                                pending_dispatch_mirrors.pop(k, None)
+                    if is_first_user_msg and sid in pending_dispatch_mirrors:
+                        pending_dispatch_mirrors[sid].clear()
                 elif p_type == "agent_message":
                     msg_text = str(rec.payload.get("message") or rec.payload.get("content") or "")
                     ev_msg_id = make_event_id("rollout_event", file_path_str, rec.line_number, "agent_message", sid, discriminator="agent_msg", ordinal=0)
@@ -1078,6 +1091,7 @@ def collect_observation_snapshot(
                     discriminator=token,
                     ordinal=0,
                 )
+                rec_parent = irec.get("parent_id")
                 events.append(ObservedEvent(
                     id=in_ev_id,
                     root_id=effective_root,
@@ -1087,6 +1101,8 @@ def collect_observation_snapshot(
                     actor_id=irec.get("agent_id") or f"inflight-{token}",
                     actor_name=agent_name,
                     author_actor_id=sid,
+                    peer_id=rec_parent or sid,
+                    peer_name=index.links[rec_parent].name if (rec_parent and rec_parent in index.links) else None,
                     summary=f"Inflight subagent active: {agent_name}",
                     evidence=(in_ref,),
                     ordinal=ordinal_counter,

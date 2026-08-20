@@ -239,12 +239,12 @@ class _MutableWorkItem:
         self.declared_owner_role = declared_owner_role
         self.runtime_state = runtime_state
         self.phase = phase
+        self.dispatched_at = last_observed_at
         self.last_observed_at = last_observed_at
         self.return_observed = return_observed
         self.obligations: list[ObligationProjection] = []
         self.incidents: list[IncidentProjection] = []
         self.basis = list(basis)
-
     def freeze(self) -> WorkItemProjection:
         return WorkItemProjection(
             id=self.id,
@@ -467,6 +467,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             open_wids = [
                 wid for wid in child_dispatches.get(target_actor, [])
                 if work_items_map[wid].phase in ("dispatched", "active")
+                and ts >= work_items_map[wid].dispatched_at
             ]
             if open_wids:
                 wi = work_items_map[open_wids[0]]
@@ -491,6 +492,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             open_wids = [
                 wid for wid in child_dispatches.get(target_actor, [])
                 if work_items_map[wid].phase in ("dispatched", "active")
+                and ts >= work_items_map[wid].dispatched_at
             ]
             if open_wids:
                 wi = work_items_map[open_wids[0]]
@@ -515,8 +517,8 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             candidate_ids = [
                 wid for wid in child_dispatches.get(target_child, [])
                 if work_items_map[wid].phase in ("dispatched", "active")
+                and ts >= work_items_map[wid].dispatched_at
             ]
-
             if candidate_ids:
                 wid = candidate_ids[0]
                 wi = work_items_map[wid]
@@ -1009,15 +1011,26 @@ def filter_timeline_events(
 
     if work_filter:
         wf_lower = work_filter.lower()
-        matched_work_ids: set[str] = set()
+        matched_internal_work_ids: set[str] = set()
+        matched_external_work_ids: set[str] = set()
         matched_source_ids: set[str] = set()
         matched_actor_ids: set[str] = set()
 
         for w in projection.work_items:
-            if (w.external_id and wf_lower in w.external_id.lower()) or (wf_lower in w.id.lower()):
-                matched_work_ids.add(w.id)
+            is_match = False
+            if w.external_id and wf_lower == w.external_id.lower():
+                is_match = True
+            elif w.external_id and wf_lower in w.external_id.lower():
+                is_match = True
+            elif wf_lower == w.id.lower():
+                is_match = True
+            elif len(wf_lower) >= 4 and wf_lower != "work" and wf_lower in w.id.lower():
+                is_match = True
+
+            if is_match:
+                matched_internal_work_ids.add(w.id)
                 if w.external_id:
-                    matched_work_ids.add(w.external_id)
+                    matched_external_work_ids.add(w.external_id)
                 if w.actor_id:
                     matched_actor_ids.add(w.actor_id)
                 for b in w.basis:
@@ -1027,15 +1040,16 @@ def filter_timeline_events(
                         matched_source_ids.add(ob.source_id)
 
         for inc in projection.incidents:
-            if inc.work_id and (inc.work_id in matched_work_ids or any(mw.lower() in inc.work_id.lower() for mw in matched_work_ids)):
+            if inc.work_id and inc.work_id in matched_internal_work_ids:
                 for b in inc.basis:
                     matched_source_ids.add(b.source_id)
+
         events = [
             e for e in events
             if e.id in matched_source_ids
             or any(ref.source_id in matched_source_ids for ref in e.evidence)
-            or (e.attributes.get("work_id") and str(e.attributes.get("work_id")).lower() in {x.lower() for x in matched_work_ids})
-            or (isinstance(e.attributes.get("declaration"), dict) and str(e.attributes.get("declaration", {}).get("work_id", "")).lower() in {x.lower() for x in matched_work_ids})
+            or (e.attributes.get("work_id") and e.attributes.get("work_id") in matched_internal_work_ids)
+            or (isinstance(e.attributes.get("declaration"), dict) and e.attributes.get("declaration", {}).get("work_id") in matched_external_work_ids)
         ]
     return tuple(events)
 

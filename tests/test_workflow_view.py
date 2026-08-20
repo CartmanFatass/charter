@@ -1303,5 +1303,143 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
         # Active tag must be present because the child is currently active (running)
         self.assertIn("active", sub_head)
 
+
+    def test_return_a_incident_or_stop_later_dispatch_b_causal_isolation(self):
+        """Verify that a post-return-A incident/stop occurring before dispatch-B does NOT attach to WORK-B."""
+        from charter import observations, workflow_view
+        root = "root-post-ret-inc"
+        child = "child-post-ret-worker"
+
+        spawn_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-A\",\"title\":\"Task A\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        spawn_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:10:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-B\",\"title\":\"Task B\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        ret_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Done A"},
+        }
+        post_a_incident = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child: {"error": "Stray memory warning after A"}},
+                },
+            },
+        }
+        ret_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:15:00Z",
+            "payload": {"type": "task_complete", "summary": "Done B"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_a, spawn_b])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:01Z", collab_events=[ret_a, post_a_incident, ret_b])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # WORK-B timeline must NOT contain the 10:06 incident
+        tl_b = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-B")
+        summaries_b = [e.summary for e in tl_b]
+        self.assertFalse(any("Stray memory warning" in s for s in summaries_b), "WORK-B must not contain pre-dispatch incident")
+
+    def test_short_external_work_id_incident_substring_isolation(self):
+        """Verify that a short external work ID like 'WORK' does not substring match unrelated incidents into its timeline."""
+        from charter import observations, workflow_view
+        root = "root-short-id"
+        child = "child-short-id-worker"
+
+        spawn_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK\",\"title\":\"Short Work ID\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        spawn_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:10:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"TASK\",\"title\":\"Task ID\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Worker"}],
+                },
+            },
+        }
+        ret_1 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Done 1"},
+        }
+        inc_during_task = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:12:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child: {"error": "Connection refused during TASK"}},
+                },
+            },
+        }
+        ret_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:15:00Z",
+            "payload": {"type": "task_complete", "summary": "Done 2"},
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_1, spawn_2])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Worker", timestamp="2026-08-19T10:00:01Z", collab_events=[ret_1, inc_during_task, ret_2])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # Filtering by "WORK" must NOT include the incident from "TASK"
+        tl_work = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK")
+        summaries_work = [e.summary for e in tl_work]
+        self.assertFalse(any("Connection refused" in s for s in summaries_work), "Timeline for 'WORK' must not match incident from 'TASK'")
+
+        # Filtering by "TASK" MUST include its incident
+        tl_task = workflow_view.filter_timeline_events(snap, proj, work_filter="TASK")
+        summaries_task = [e.summary for e in tl_task]
+        self.assertTrue(any("Connection refused" in s for s in summaries_task), "Timeline for 'TASK' must contain its own incident")
+
 if __name__ == "__main__":
     unittest.main()
