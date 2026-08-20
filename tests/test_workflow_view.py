@@ -1441,5 +1441,209 @@ class TestStatuslineWorkflowIntegration(unittest.TestCase):
         summaries_task = [e.summary for e in tl_task]
         self.assertTrue(any("Connection refused" in s for s in summaries_task), "Timeline for 'TASK' must contain its own incident")
 
+
+    def test_physically_later_incident_timestamped_earlier_than_dispatch_b(self):
+        """Verify that a physically later incident timestamped before dispatch_b remains unbound and absent from WORK-B."""
+        from charter import observations, workflow_view
+        root = "root-inv-inc"
+        child = "child-inv-inc-worker"
+
+        # WORK-A returns at 10:05
+        ret_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {"type": "task_complete", "summary": "Done A"},
+        }
+        # WORK-B is dispatched at 10:10
+        spawn_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:10:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-B\",\"title\":\"Task B\"}\n```",
+                    "receiver_agents": [{"thread_id": child, "agent_nickname": "Gauss"}],
+                },
+            },
+        }
+        # Child does tool activity for WORK-B at 10:20
+        tool_b = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:20:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "custom_tool_call", "name": "work_b_tool"},
+            },
+        }
+        # Child has an incident physically AFTER tool_b, but with inverted/skewed timestamp 10:06:00
+        inv_incident = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child: {"error": "Asynchronous delayed crash from prior work"}},
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_b])
+        write_test_rollout(self.sessions_dir, child, parent_id=root, nickname="Gauss", timestamp="2026-08-19T10:00:01Z", collab_events=[ret_a, tool_b, inv_incident])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir, include_tool_calls=True)
+        proj = workflow_view.project_workflow(snap)
+
+        # The 10:06 incident MUST remain unbound because 10:06 < WORK-B dispatched_at (10:10)
+        self.assertEqual(len(proj.incidents), 1)
+        self.assertIsNone(proj.incidents[0].work_id, "Incident timestamped earlier than WORK-B dispatch must NOT be bound to WORK-B")
+
+        # WORK-B timeline must NOT contain the incident
+        tl_b = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK-B")
+        summaries_b = [e.summary for e in tl_b]
+        self.assertFalse(any("Asynchronous delayed crash" in s for s in summaries_b), "WORK-B timeline must not contain unbound incident")
+
+    def test_exact_first_work_filter_collisions(self):
+        """Verify that exact external ID queries take precedence and do not match substring collisions."""
+        from charter import observations, workflow_view
+        root = "root-exact-filter"
+        child1 = "child-exact-1"
+        child2 = "child-exact-2"
+        child3 = "child-exact-3"
+
+        # Spawn work "A"
+        spawn_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:00:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"A\",\"title\":\"Exact A\"}\n```",
+                    "receiver_agents": [{"thread_id": child1, "agent_nickname": "WorkerA"}],
+                },
+            },
+        }
+        # Spawn work "TASK-A"
+        spawn_task_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:01:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"TASK-A\",\"title\":\"Task A\"}\n```",
+                    "receiver_agents": [{"thread_id": child2, "agent_nickname": "WorkerTaskA"}],
+                },
+            },
+        }
+        # Spawn work "WORK"
+        spawn_work = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:02:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK\",\"title\":\"Exact WORK\"}\n```",
+                    "receiver_agents": [{"thread_id": child3, "agent_nickname": "WorkerWork"}],
+                },
+            },
+        }
+        # Spawn work "NETWORK"
+        child4 = "child-exact-4"
+        spawn_network = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:03:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"NETWORK\",\"title\":\"Network Task\"}\n```",
+                    "receiver_agents": [{"thread_id": child4, "agent_nickname": "WorkerNet"}],
+                },
+            },
+        }
+        # Spawn work "WORK-2"
+        child5 = "child-exact-5"
+        spawn_work_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:04:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "prompt": "```charter-observe\n{\"schema\":1,\"event\":\"dispatch\",\"work_id\":\"WORK-2\",\"title\":\"Work Two\"}\n```",
+                    "receiver_agents": [{"thread_id": child5, "agent_nickname": "WorkerWork2"}],
+                },
+            },
+        }
+
+        inc_task_a = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:05:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child2: {"error": "Error in TASK-A"}},
+                },
+            },
+        }
+        inc_network = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:06:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child4: {"error": "Error in NETWORK"}},
+                },
+            },
+        }
+        inc_work_2 = {
+            "type": "event_msg",
+            "timestamp": "2026-08-19T10:07:00Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "close_agent",
+                    "agents_states": {child5: {"error": "Error in WORK-2"}},
+                },
+            },
+        }
+
+        write_test_rollout(self.sessions_dir, root, timestamp="2026-08-19T10:00:00Z", collab_events=[spawn_a, spawn_task_a, spawn_work, spawn_network, spawn_work_2])
+        write_test_rollout(self.sessions_dir, child1, parent_id=root, nickname="WorkerA", timestamp="2026-08-19T10:00:01Z")
+        write_test_rollout(self.sessions_dir, child2, parent_id=root, nickname="WorkerTaskA", timestamp="2026-08-19T10:01:01Z", collab_events=[inc_task_a])
+        write_test_rollout(self.sessions_dir, child3, parent_id=root, nickname="WorkerWork", timestamp="2026-08-19T10:02:01Z")
+        write_test_rollout(self.sessions_dir, child4, parent_id=root, nickname="WorkerNet", timestamp="2026-08-19T10:03:01Z", collab_events=[inc_network])
+        write_test_rollout(self.sessions_dir, child5, parent_id=root, nickname="WorkerWork2", timestamp="2026-08-19T10:04:01Z", collab_events=[inc_work_2])
+
+        snap = observations.collect_observation_snapshot(root, sessions_dir=self.sessions_dir)
+        proj = workflow_view.project_workflow(snap)
+
+        # 1. Filter "A" -> MUST select ONLY exact "A", NEVER "TASK-A"
+        tl_a = workflow_view.filter_timeline_events(snap, proj, work_filter="A")
+        summaries_a = [e.summary for e in tl_a]
+        self.assertFalse(any("Error in TASK-A" in s for s in summaries_a), "Exact query 'A' must not match 'TASK-A'")
+
+        # 2. Filter "WORK" -> MUST select ONLY exact "WORK", NEVER "NETWORK" or "WORK-2"
+        tl_work = workflow_view.filter_timeline_events(snap, proj, work_filter="WORK")
+        summaries_work = [e.summary for e in tl_work]
+        self.assertFalse(any("Error in NETWORK" in s for s in summaries_work), "Exact query 'WORK' must not match 'NETWORK'")
+        self.assertFalse(any("Error in WORK-2" in s for s in summaries_work), "Exact query 'WORK' must not match 'WORK-2'")
+
 if __name__ == "__main__":
     unittest.main()

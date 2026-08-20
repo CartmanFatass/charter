@@ -571,7 +571,7 @@ def project_workflow(snapshot: ObservationSnapshot) -> WorkflowProjection:
             if target_actor in child_dispatches:
                 for cand_wid in child_dispatches[target_actor]:
                     cand_wi = work_items_map[cand_wid]
-                    if cand_wi.phase in ("dispatched", "active"):
+                    if cand_wi.phase in ("dispatched", "active") and ts >= cand_wi.dispatched_at:
                         bound_wid = cand_wid
                         break
 
@@ -1010,35 +1010,40 @@ def filter_timeline_events(
         ]
 
     if work_filter:
-        wf_lower = work_filter.lower()
+        wf_query = work_filter.strip().casefold()
+
+        # Stage 1: Exact matches take absolute precedence
+        exact_matches = [
+            w for w in projection.work_items
+            if (w.external_id and wf_query == w.external_id.casefold())
+            or wf_query == w.id.casefold()
+        ]
+        if exact_matches:
+            selected_work_items = exact_matches
+        else:
+            # Stage 2: Prefix / substring fallback only when no exact match exists
+            selected_work_items = [
+                w for w in projection.work_items
+                if (w.external_id and wf_query in w.external_id.casefold())
+                or (len(wf_query) >= 4 and wf_query != "work" and wf_query in w.id.casefold())
+            ]
+
         matched_internal_work_ids: set[str] = set()
         matched_external_work_ids: set[str] = set()
         matched_source_ids: set[str] = set()
         matched_actor_ids: set[str] = set()
 
-        for w in projection.work_items:
-            is_match = False
-            if w.external_id and wf_lower == w.external_id.lower():
-                is_match = True
-            elif w.external_id and wf_lower in w.external_id.lower():
-                is_match = True
-            elif wf_lower == w.id.lower():
-                is_match = True
-            elif len(wf_lower) >= 4 and wf_lower != "work" and wf_lower in w.id.lower():
-                is_match = True
-
-            if is_match:
-                matched_internal_work_ids.add(w.id)
-                if w.external_id:
-                    matched_external_work_ids.add(w.external_id)
-                if w.actor_id:
-                    matched_actor_ids.add(w.actor_id)
-                for b in w.basis:
-                    matched_source_ids.add(b.source_id)
-                for o in w.obligations:
-                    for ob in o.basis:
-                        matched_source_ids.add(ob.source_id)
-
+        for w in selected_work_items:
+            matched_internal_work_ids.add(w.id)
+            if w.external_id:
+                matched_external_work_ids.add(w.external_id)
+            if w.actor_id:
+                matched_actor_ids.add(w.actor_id)
+            for b in w.basis:
+                matched_source_ids.add(b.source_id)
+            for o in w.obligations:
+                for ob in o.basis:
+                    matched_source_ids.add(ob.source_id)
         for inc in projection.incidents:
             if inc.work_id and inc.work_id in matched_internal_work_ids:
                 for b in inc.basis:
